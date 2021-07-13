@@ -40,13 +40,12 @@ def render_networks_json(subnets):
 
 
 class NetworkHandler(OperationsHandler):
-    """
-    Manage a network.
+    """Manage a network.
 
     This endpoint is deprecated. Use the new 'subnet' endpoint instead.
     """
 
-    api_doc_section_name = "Network (deprecated)"
+    api_doc_section_name = "Network"
     create = None
 
     def read(self, request, name):
@@ -148,8 +147,7 @@ class NetworkHandler(OperationsHandler):
 
 
 class NetworksHandler(OperationsHandler):
-    """
-    Manage the networks.
+    """Manage the networks.
 
     This endpoint is deprecated. Use the new 'subnets' endpoint instead.
     """

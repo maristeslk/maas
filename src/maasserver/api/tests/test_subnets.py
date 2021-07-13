@@ -1,4 +1,4 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2016 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Tests for Subnet API."""
@@ -16,7 +16,6 @@ from maasserver.enum import IPADDRESS_TYPE, NODE_STATUS, RDNS_MODE_CHOICES
 from maasserver.testing.api import APITestCase, explain_unexpected_response
 from maasserver.testing.factory import factory, RANDOM
 from maasserver.utils.orm import reload_object
-from provisioningserver.boot import BootMethodRegistry
 from provisioningserver.utils.network import inet_ntop, IPRangeStatistics
 
 
@@ -73,15 +72,6 @@ class TestSubnetsAPI(APITestCase.ForUser):
                     network, but_not=[gateway_ip] + dns_servers
                 )
             )
-        disabled_arches = random.sample(
-            [
-                boot_method.name
-                for _, boot_method in BootMethodRegistry
-                if boot_method.arch_octet or boot_method.path_prefix_http
-            ],
-            3,
-        )
-
         uri = get_subnets_uri()
         response = self.client.post(
             uri,
@@ -96,7 +86,6 @@ class TestSubnetsAPI(APITestCase.ForUser):
                 "allow_dns": allow_dns,
                 "managed": managed,
                 "description": description,
-                "disabled_boot_architectures": ",".join(disabled_arches),
             },
         )
         self.assertEqual(
@@ -115,10 +104,6 @@ class TestSubnetsAPI(APITestCase.ForUser):
         self.assertEqual(allow_dns, created_subnet["allow_dns"])
         self.assertEqual(managed, created_subnet["managed"])
         self.assertEqual(description, created_subnet["description"])
-        self.assertEqual(
-            sorted(disabled_arches),
-            sorted(created_subnet["disabled_boot_architectures"]),
-        )
 
     def test_create_defaults_to_allow_dns(self):
         self.become_admin()
@@ -294,9 +279,6 @@ class TestSubnetAPI(APITestCase.ForUser):
                     "gateway_ip": Equals(subnet.gateway_ip),
                     "dns_servers": Equals(subnet.dns_servers),
                     "managed": Equals(subnet.managed),
-                    "disabled_boot_architectures": Equals(
-                        subnet.disabled_boot_architectures
-                    ),
                 }
             ),
         )
@@ -318,6 +300,13 @@ class TestSubnetAPI(APITestCase.ForUser):
             http.client.NOT_FOUND, response.status_code, response.content
         )
 
+    def test_read_400_when_blank_id(self):
+        uri = reverse("subnet_handler", args=[" "])
+        response = self.client.get(uri)
+        self.assertEqual(
+            http.client.BAD_REQUEST, response.status_code, response.content
+        )
+
     def test_read_403_when_ambiguous(self):
         fabric = factory.make_Fabric(name="foo")
         factory.make_Subnet(fabric=fabric)
@@ -337,15 +326,6 @@ class TestSubnetAPI(APITestCase.ForUser):
         new_allow_dns = factory.pick_bool()
         new_managed = factory.pick_bool()
         uri = get_subnet_uri(subnet)
-        disabled_arches = random.sample(
-            [
-                boot_method.name
-                for _, boot_method in BootMethodRegistry
-                if boot_method.arch_octet or boot_method.path_prefix_http
-            ],
-            3,
-        )
-
         response = self.client.put(
             uri,
             {
@@ -354,7 +334,6 @@ class TestSubnetAPI(APITestCase.ForUser):
                 "allow_proxy": new_allow_proxy,
                 "allow_dns": new_allow_dns,
                 "managed": new_managed,
-                "disabled_boot_architectures": ",".join(disabled_arches),
             },
         )
         self.assertEqual(
@@ -372,9 +351,6 @@ class TestSubnetAPI(APITestCase.ForUser):
         self.assertEqual(new_allow_proxy, subnet.allow_proxy)
         self.assertEqual(new_allow_dns, subnet.allow_dns)
         self.assertEqual(new_managed, subnet.managed)
-        self.assertEqual(
-            sorted(disabled_arches), sorted(subnet.disabled_boot_architectures)
-        )
 
     def test_update_admin_only(self):
         subnet = factory.make_Subnet()

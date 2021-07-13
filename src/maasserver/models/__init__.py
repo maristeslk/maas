@@ -1,4 +1,4 @@
-# Copyright 2012-2020 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2019 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Model export and helpers for maasserver."""
@@ -34,10 +34,10 @@ __all__ = [
     "FileStorage",
     "Filesystem",
     "FilesystemGroup",
-    "ForwardDNSServer",
     "GlobalDefault",
     "Interface",
     "IPRange",
+    "ISCSIBlockDevice",
     "KeySource",
     "LargeFile",
     "LicenseKey",
@@ -46,7 +46,6 @@ __all__ = [
     "MDNS",
     "Neighbour",
     "Node",
-    "NodeDevice",
     "NodeMetadata",
     "NodeGroupToRackController",
     "Notification",
@@ -80,6 +79,7 @@ __all__ = [
     "StaticIPAddress",
     "StaticRoute",
     "Subnet",
+    "Switch",
     "Tag",
     "Template",
     "UnknownInterface",
@@ -137,7 +137,6 @@ from maasserver.models.filesystemgroup import (
     VMFS,
     VolumeGroup,
 )
-from maasserver.models.forwarddnsserver import ForwardDNSServer
 from maasserver.models.globaldefault import GlobalDefault
 from maasserver.models.interface import (
     BondInterface,
@@ -148,6 +147,7 @@ from maasserver.models.interface import (
     VLANInterface,
 )
 from maasserver.models.iprange import IPRange
+from maasserver.models.iscsiblockdevice import ISCSIBlockDevice
 from maasserver.models.keysource import KeySource
 from maasserver.models.largefile import LargeFile
 from maasserver.models.licensekey import LicenseKey
@@ -162,7 +162,6 @@ from maasserver.models.node import (
     RackController,
     RegionController,
 )
-from maasserver.models.nodedevice import NodeDevice
 from maasserver.models.nodemetadata import NodeMetadata
 from maasserver.models.notification import Notification
 from maasserver.models.numa import NUMANode, NUMANodeHugepages
@@ -189,6 +188,7 @@ from maasserver.models.sslkey import SSLKey
 from maasserver.models.staticipaddress import StaticIPAddress
 from maasserver.models.staticroute import StaticRoute
 from maasserver.models.subnet import Subnet
+from maasserver.models.switch import Switch
 from maasserver.models.tag import Tag
 from maasserver.models.template import Template
 from maasserver.models.user import create_user

@@ -1,4 +1,4 @@
-# Copyright 2012-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Forms."""
@@ -80,11 +80,10 @@ from django.forms import CheckboxInput, Form, MultipleChoiceField
 from django.forms.models import ModelFormMetaclass
 from django.http import QueryDict
 from django.utils.safestring import mark_safe
-from formencode.validators import StringBool
 from lxml import etree
 from netaddr import IPNetwork, valid_ipv6
 
-from maasserver.api.utils import get_optional_param, get_overridden_query_dict
+from maasserver.api.utils import get_overridden_query_dict
 from maasserver.audit import create_audit_event
 from maasserver.clusterrpc.driver_parameters import (
     get_driver_choices,
@@ -155,7 +154,7 @@ from maasserver.models.blockdevice import MIN_BLOCK_DEVICE_SIZE
 from maasserver.models.partition import MIN_PARTITION_SIZE
 from maasserver.models.partitiontable import PARTITION_TABLE_TYPE_CHOICES
 from maasserver.permissions import NodePermission, ResourcePoolPermission
-from maasserver.storage_layouts import VMFS6StorageLayout, VMFS7StorageLayout
+from maasserver.storage_layouts import VMFS6StorageLayout
 from maasserver.utils.converters import machine_readable_bytes
 from maasserver.utils.forms import (
     compose_invalid_choice_text,
@@ -739,18 +738,17 @@ class MachineForm(NodeForm):
         """
         architectures = list_all_usable_architectures()
         default_arch = pick_default_architecture(architectures)
-        choices = (
-            list_architecture_choices(architectures)
-            if architectures
-            else [BLANK_CHOICE]
-        )
+        if len(architectures) == 0:
+            choices = [BLANK_CHOICE]
+        else:
+            choices = list_architecture_choices(architectures)
         invalid_arch_message = compose_invalid_choice_text(
             "architecture", choices
         )
-        required = requires_macs_and_architecture(self.data) or requires_arch
+        power_type = self.data.get("power_type", None)
         self.fields["architecture"] = forms.ChoiceField(
             choices=choices,
-            required=required,
+            required=(power_type != "ipmi" or requires_arch),
             initial=default_arch,
             error_messages={"invalid_choice": invalid_arch_message},
         )
@@ -1147,13 +1145,10 @@ class AdminMachineForm(MachineForm, AdminNodeForm, WithPowerTypeMixin):
     def __init__(self, data=None, instance=None, **kwargs):
         super().__init__(data=data, instance=instance, **kwargs)
         WithPowerTypeMixin.set_up_power_fields(self, data, instance)
-        if self.new_node:
-            self.fields["deployed"] = forms.BooleanField(required=False)
 
     def clean(self):
         cleaned_data = super().clean()
-        cleaned_data = WithPowerTypeMixin.check_driver(self, cleaned_data)
-        return cleaned_data
+        return WithPowerTypeMixin.check_driver(self, cleaned_data)
 
     def save(self, *args, **kwargs):
         """Persist the node into the database."""
@@ -1164,8 +1159,6 @@ class AdminMachineForm(MachineForm, AdminNodeForm, WithPowerTypeMixin):
         pool = self.cleaned_data.get("pool")
         if pool:
             machine.pool = pool
-        if self.cleaned_data.get("deployed"):
-            machine.status = NODE_STATUS.DEPLOYED
         WithPowerTypeMixin.set_values(self, machine)
         if kwargs.get("commit", True):
             machine.save(*args, **kwargs)
@@ -1321,13 +1314,6 @@ def merge_error_messages(summary, errors, limit=MAX_MESSAGES):
     )
 
 
-def requires_macs_and_architecture(data):
-    """Whether mac addresses and architecture need to be specified."""
-    power_type = data.get("power_type", "unknown")
-    deployed = get_optional_param(data, "deployed", validator=StringBool)
-    return not (power_type == "ipmi" or (deployed and power_type == "unknown"))
-
-
 class WithMACAddressesMixin:
     """A form mixin which dynamically adds a MultipleMACAddressField to the
     list of fields.  This mixin also overrides the 'save' method to persist
@@ -1348,8 +1334,7 @@ class WithMACAddressesMixin:
     def set_up_mac_addresses_field(self):
         macs = [mac for mac in self.data.getlist("mac_addresses") if mac]
         self.fields["mac_addresses"] = MultipleMACAddressField(
-            len(macs),
-            required=requires_macs_and_architecture(self.data),
+            len(macs), required=(self.data.get("power_type") != "ipmi")
         )
         self.data = self.data.copy()
         self.data["mac_addresses"] = macs
@@ -1409,13 +1394,14 @@ class WithMACAddressesMixin:
         """
         node = super().save()
         architecture = self.cleaned_data.get("architecture")
+        power_type = self.cleaned_data.get("power_type")
         # If a new node with an IPMI BMC is created the user doesn't have
         # to specify the architecture or MAC addresses. Anonymous POST
         # on the machines API will find the machine the user created by
         # power address. If only the MAC address is given ignore it so the
         # machine boots into the enlistment environment and MAAS can capture
         # the architecture.
-        if not architecture and not requires_macs_and_architecture(self.data):
+        if not architecture and power_type == "ipmi":
             mac_addresses = []
         else:
             mac_addresses = self.cleaned_data["mac_addresses"]
@@ -2266,18 +2252,18 @@ class LicenseKeyForm(MAASModelForm):
         invalid_distro_series_message = compose_invalid_choice_text(
             "distro_series", distro_choices
         )
-        self.fields["osystem"] = forms.ChoiceField(
-            label="OS",
-            choices=os_choices,
-            required=True,
-            error_messages={"invalid_choice": invalid_osystem_message},
-        )
-        self.fields["distro_series"] = forms.ChoiceField(
-            label="Release",
-            choices=distro_choices,
-            required=True,
-            error_messages={"invalid_choice": invalid_distro_series_message},
-        )
+      #  self.fields["osystem"] = forms.ChoiceField(
+      #      label="OS",
+      #      choices=os_choices,
+      #      required=True,
+      #      error_messages={"invalid_choice": invalid_osystem_message},
+      #  )
+      #  self.fields["distro_series"] = forms.ChoiceField(
+      #      label="Release",
+      #      choices=distro_choices,
+      #      required=True,
+      #      error_messages={"invalid_choice": invalid_distro_series_message},
+      #  )
         if instance is not None:
             initial_value = get_distro_series_initial(
                 osystems, instance, with_key_required=False
@@ -2791,7 +2777,7 @@ class FormatPartitionForm(Form):
         cleaned_data = super().clean()
         if self.partition.is_vmfs_partition():
             set_form_error(
-                self, "VMFS", "Base VMFS partitions may not be formatted."
+                self, "VMFS6", "VMFS6 partitions may not be formatted."
             )
         return cleaned_data
 
@@ -4099,18 +4085,16 @@ class CreateVMFSForm(CreateVolumeGroupForm):
     """For validating and saving a new VMFS group."""
 
     def clean(self):
-        """Validate that the VMFS storage layout is applied."""
+        """Validate that the VMFS6 storage layout is applied."""
         cleaned_data = super().clean()
-        vmfs6_layout = VMFS6StorageLayout(self.node)
-        vmfs6_bd = vmfs6_layout.is_layout()
-        vmfs7_layout = VMFS7StorageLayout(self.node)
-        vmfs7_bd = vmfs7_layout.is_layout()
-        if vmfs6_bd is None and vmfs7_bd is None:
+        vmfs_layout = VMFS6StorageLayout(self.node)
+        vmfs_bd = vmfs_layout.is_layout()
+        if vmfs_bd is None:
             set_form_error(
                 self,
-                "VMFS",
+                "VMFS6",
                 "VMFS Datastores may only be created after the "
-                "VMFS6 or VMFS7 storage layout has been applied.",
+                "VMFS6 storage layout has been applied.",
             )
         return cleaned_data
 

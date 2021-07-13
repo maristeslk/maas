@@ -1,4 +1,4 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2016 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """RPC declarations for the region.
@@ -13,6 +13,7 @@ __all__ = [
     "GetArchiveMirrors",
     "GetBootConfig",
     "GetBootSources",
+    "GetBootSourcesV2",
     "GetControllerType",
     "GetDiscoveryState",
     "GetDNSConfiguration",
@@ -30,7 +31,7 @@ __all__ = [
     "RequestNodeInfoByMACAddress",
     "SendEvent",
     "SendEventMACAddress",
-    "UpdateControllerState",
+    "UpdateInterfaces",
     "UpdateLastImageSync",
     "UpdateNodePowerState",
 ]
@@ -53,7 +54,6 @@ from provisioningserver.rpc.exceptions import (
     NoSuchCluster,
     NoSuchEventType,
     NoSuchNode,
-    NoSuchScope,
 )
 
 
@@ -159,6 +159,42 @@ class GetBootConfig(amp.Command):
 
 
 class GetBootSources(amp.Command):
+    """Report boot sources and selections for the given cluster.
+
+    :since: 1.6
+    :deprecated: 1.7
+    """
+
+    arguments = [
+        # The cluster UUID.
+        (b"uuid", amp.Unicode())
+    ]
+    response = [
+        (
+            b"sources",
+            AmpList(
+                [
+                    (b"url", amp.Unicode()),
+                    (b"keyring_data", Bytes()),
+                    (
+                        b"selections",
+                        AmpList(
+                            [
+                                (b"release", amp.Unicode()),
+                                (b"arches", amp.ListOf(amp.Unicode())),
+                                (b"subarches", amp.ListOf(amp.Unicode())),
+                                (b"labels", amp.ListOf(amp.Unicode())),
+                            ]
+                        ),
+                    ),
+                ]
+            ),
+        )
+    ]
+    errors = []
+
+
+class GetBootSourcesV2(amp.Command):
     """Report boot sources and selections for the given cluster.
 
     Includes the new os field for the selections.
@@ -449,6 +485,21 @@ class CommissionNode(amp.Command):
     errors = {CommissionNodeFailed: b"CommissionNodeFailed"}
 
 
+class UpdateInterfaces(amp.Command):
+    """Called by a rack controller to update its interface definition.
+
+    :since: 2.0
+    """
+
+    arguments = [
+        (b"system_id", amp.Unicode()),
+        (b"interfaces", StructureAsJSON()),
+        (b"topology_hints", StructureAsJSON(optional=True)),
+    ]
+    response = []
+    errors = []
+
+
 class GetDiscoveryState(amp.Command):
     """Called by a rack controller to get its interface discovery state.
 
@@ -527,23 +578,11 @@ class UpdateServices(amp.Command):
 class RequestRackRefresh(amp.Command):
     """Request a refresh of the rack from the region.
 
-    The credentials for posting the commissioning script results to the
-    metadata server is returned.
-
-    It's the caller's responsibility to run the commissioning script and
-    finish the refresh by posting the results.
-
     :since: 2.0
     """
 
-    arguments = [
-        (b"system_id", amp.Unicode()),
-    ]
-    response = [
-        (b"consumer_key", amp.Unicode()),
-        (b"token_key", amp.Unicode()),
-        (b"token_secret", amp.Unicode()),
-    ]
+    arguments = [(b"system_id", amp.Unicode())]
+    response = []
     errors = []
 
 
@@ -608,19 +647,3 @@ class GetSyslogConfiguration(amp.Command):
     arguments = [(b"system_id", amp.Unicode())]
     response = [(b"port", amp.Integer())]
     errors = {NoSuchNode: b"NoSuchNode"}
-
-
-class UpdateControllerState(amp.Command):
-    """Called by a rack controller to update its state in the region.
-
-    :since: 3.0
-    """
-
-    arguments = [
-        (b"system_id", amp.Unicode()),
-        # type of state information to update
-        (b"scope", amp.Unicode()),
-        (b"state", StructureAsJSON()),
-    ]
-    response = []
-    errors = {NoSuchNode: b"NoSuchNode", NoSuchScope: b"NoSuchScope"}

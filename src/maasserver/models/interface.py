@@ -1,4 +1,4 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Model for interfaces."""
@@ -41,7 +41,6 @@ from maasserver.enum import (
     INTERFACE_TYPE,
     INTERFACE_TYPE_CHOICES,
     IPADDRESS_TYPE,
-    NODE_TYPE,
 )
 from maasserver.exceptions import (
     StaticIPAddressOutOfRange,
@@ -112,7 +111,7 @@ class InterfaceQueriesMixin(MAASQueriesMixin):
             specifiers,
             specifier_types=specifier_types,
             separator=separator,
-            **kwargs,
+            **kwargs
         )
 
     def _add_interface_id_query(self, current_q, op, item):
@@ -438,9 +437,7 @@ class InterfaceManager(Manager, InterfaceQueriesMixin):
             interface.save()
         return interface, created
 
-    def get_or_create_on_node(
-        self, node, name, mac_address, parent_nics, acquired=False
-    ):
+    def get_or_create_on_node(self, node, name, mac_address, parent_nics):
         """Create an interface on the specified node, with the specified MAC
         address and parent NICs.
 
@@ -476,11 +473,7 @@ class InterfaceManager(Manager, InterfaceQueriesMixin):
                 # intentionally changed the interface type.
                 interface.delete()
                 return self.get_or_create_on_node(
-                    node,
-                    name,
-                    mac_address,
-                    parent_nics,
-                    acquired=acquired,
+                    node, name, mac_address, parent_nics
                 )
             interface.mac_address = mac_address
             interface.name = name
@@ -497,10 +490,7 @@ class InterfaceManager(Manager, InterfaceQueriesMixin):
                 interface.node = node
         else:
             interface = self.create(
-                name=name,
-                mac_address=mac_address,
-                node=node,
-                acquired=acquired,
+                name=name, mac_address=mac_address, node=node
             )
             for parent_nic in parent_nics:
                 InterfaceRelationship(
@@ -649,15 +639,6 @@ class Interface(CleanSave, TimestampedModel):
         Return `None` on `Interface`.
         """
         return None
-
-    def serialize(self):
-        return {
-            "id": self.id,
-            "name": self.name,
-            "mac_address": str(self.mac_address),
-            "vendor": self.vendor,
-            "product": self.product,
-        }
 
     def __str__(self):
         return "name=%s, type=%s, mac=%s, id=%s" % (
@@ -1487,6 +1468,13 @@ class Interface(CleanSave, TimestampedModel):
         if self.mac_address:
             validate_mac(self.mac_address)
 
+        # Acquired can only be set on bridge interface types and the node
+        # must be in an allocated state.
+        if self.acquired and self.type != INTERFACE_TYPE.BRIDGE:
+            raise ValueError(
+                "acquired cannot be True on interface type '%s'" % self.type
+            )
+
     def delete(self, remove_ip_address=True):
         # We set the _skip_ip_address_removal so the signal can use it to
         # skip removing the IP addresses. This is normally only done by the
@@ -1534,10 +1522,20 @@ class Interface(CleanSave, TimestampedModel):
                     % (self.get_log_string(), vid, vlan.fabric.get_name())
                 )
 
-    def update_neighbour(self, ip, mac, time, vid=None):
-        """Updates the neighbour table for this interface."""
+    def update_neighbour(self, neighbour_json: dict):
+        """Updates the neighbour table for this interface.
+
+        Input is expected to be the neighbour JSON from the controller.
+        """
+        # Circular imports
         from maasserver.models.neighbour import Neighbour
 
+        if self.neighbour_discovery_state is False:
+            return None
+        ip = neighbour_json["ip"]
+        mac = neighbour_json["mac"]
+        time = neighbour_json["time"]
+        vid = neighbour_json.get("vid", None)
         deleted = Neighbour.objects.delete_and_log_obsolete_neighbours(
             ip, mac, interface=self, vid=vid
         )
@@ -1554,10 +1552,13 @@ class Interface(CleanSave, TimestampedModel):
             # generated a log statement about this neighbour.
             if not deleted:
                 maaslog.info(
-                    f"{self.get_log_string()}: "
-                    "New MAC, IP binding "
-                    f"observed{Neighbour.objects.get_vid_log_snippet(vid)}: "
-                    f"{mac}, {ip}"
+                    "%s: New MAC, IP binding observed%s: %s, %s"
+                    % (
+                        self.get_log_string(),
+                        Neighbour.objects.get_vid_log_snippet(vid),
+                        mac,
+                        ip,
+                    )
                 )
         else:
             neighbour.time = time
@@ -1597,16 +1598,19 @@ class Interface(CleanSave, TimestampedModel):
             binding.save(update_fields=["count", "updated"])
         return binding
 
-    def update_discovery_state(self, discovery_mode, monitored: bool):
+    def update_discovery_state(self, discovery_mode, settings: dict):
         """Updates the state of interface monitoring. Uses
 
         The `discovery_mode` parameter must be a NetworkDiscoveryConfig tuple.
 
-        The `monitored` parameter indicates whether discover should be enabled.
+        The `settings` dict must be in the format defined by the region/rack
+        contract. This function checks its 'monitored' key to determine whether
+        or not to monitor the interface.
 
         Upon completion, .save() will be called to update the discovery state
         fields.
         """
+        monitored = settings.get("monitored", False)
         if monitored:
             self.neighbour_discovery_state = discovery_mode.passive
         else:
@@ -1663,7 +1667,7 @@ class PhysicalInterface(Interface):
             validation_errors["node"] = ["This field cannot be blank."]
         if self.mac_address is None:
             validation_errors["mac_address"] = ["This field cannot be blank."]
-        if validation_errors:
+        if len(validation_errors) > 0:
             raise ValidationError(validation_errors)
 
         # MAC address must be unique amongst every PhysicalInterface.
@@ -1690,17 +1694,6 @@ class PhysicalInterface(Interface):
                 raise ValidationError(
                     {"parents": ["A physical interface cannot have parents."]}
                 )
-
-    def save(self, *args, **kwargs):
-        if (
-            self.numa_node_id is None
-            and self.node
-            and self.node.node_type != NODE_TYPE.DEVICE
-        ):
-            # the node is required; if not provided, let the upcall raise an
-            # error
-            self.numa_node_id = self.node.default_numanode.id
-        super().save(*args, **kwargs)
 
 
 class ChildInterface(Interface):
@@ -1924,7 +1917,7 @@ class VLANInterface(ChildInterface):
         :raises: AssertionError if the VLAN is not defined, or if the related
             VLAN is not tagged with a valid 802.1Q VLAN tag (between 1-4094).
         """
-        if self._should_preserve_name():
+        if self._is_related_node_a_controller() and self.name is not None:
             # Controllers must preserve original VLAN interface names, since
             # having an accurate name is important for MAAS (in order to
             # perform actions such as providing DHCP or monitoring interfaces).
@@ -1982,13 +1975,9 @@ class VLANInterface(ChildInterface):
                     {"vlan": ["VLAN interface requires connection to a VLAN."]}
                 )
 
-    # XXX: We should always trust the name that is passed when creating
-    #      the VLANInterface. This should be removed when 3.0 is
-    #      released.
-    def _should_preserve_name(self):
-        """Returns True if the VLAN interface name shouldn't be generated"""
-        node = self.get_node()
-        return (node.is_controller or node.is_pod) and self.name is not None
+    def _is_related_node_a_controller(self):
+        """Returns True if the related Node is a Controller."""
+        return self.get_node().is_controller
 
     def save(self, *args, **kwargs):
         # Set the node of this VLAN to the same as its parents.
@@ -2000,7 +1989,18 @@ class VLANInterface(ChildInterface):
             parent = self.parents.first()
             if parent is not None:
                 self.mac_address = parent.mac_address
-        if not self._should_preserve_name():
+        # There are two cases where we want to automatically generate a
+        # VLAN interface's name:
+        # (1) The interface is not attached to a Controller. Controllers
+        #     always inform MAAS what their interface name is, so MAAS
+        #     must trust what they say. On controllers, we allow
+        #     non-standard naming conventions, such as 'vlan100',
+        #     'vlan0100', or 'eth0.0100'. On deployed nodes, we always
+        #     coerce the name to '<parent>.<vid-no-pad>' format.
+        # (2) The interface is on a controller, but no name was specified.
+        #     (This is useful more for the test suite than anything else.)
+        is_controller = self._is_related_node_a_controller()
+        if not is_controller or (is_controller and self.name is None):
             new_name = self.get_name()
             if self.name != new_name:
                 self.name = new_name

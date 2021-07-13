@@ -7,6 +7,9 @@
 import os.path
 import random
 from subprocess import CalledProcessError, check_output, STDOUT
+from textwrap import dedent
+
+from testtools.matchers import Equals
 
 from maascli import main
 from maascli.config import ProfileConfig
@@ -14,6 +17,7 @@ from maascli.testing.config import make_configs
 from maascli.utils import handler_command_name
 from maastesting import root
 from maastesting.fixtures import CaptureStandardIO
+from maastesting.matchers import DocTestMatches
 from maastesting.testcase import MAASTestCase
 
 
@@ -29,13 +33,13 @@ class TestMAASCli(MAASTestCase):
         self.assertRaises(CalledProcessError, self.run_command)
 
     def test_run_without_args_shows_help_reminder(self):
+        self.output_file = self.make_file("output")
         try:
             self.run_command()
         except CalledProcessError as error:
-            self.assertTrue(
-                error.output.decode("utf-8").startswith(
-                    "usage: maas [-h] COMMAND"
-                )
+            self.assertIn(
+                "Run %s --help for usage details." % locate_maascli(),
+                error.output.decode("ascii"),
             )
 
     def test_help_option_succeeds(self):
@@ -71,16 +75,23 @@ class TestMain(MAASTestCase):
         [profile_name] = configs
         resources = configs[profile_name]["description"]["resources"]
         resource_name = random.choice(resources)["name"]
-        handler_name = handler_command_name(resource_name)
-        command = "maas", profile_name, handler_name
+        command = "maas", profile_name, handler_command_name(resource_name)
 
         with CaptureStandardIO() as stdio:
             error = self.assertRaises(SystemExit, main, command)
 
-        self.assertEqual(error.code, 2)
-        error = stdio.getError()
-        self.assertIn(
-            f"usage: maas {profile_name} {handler_name} [-h] COMMAND ...",
-            error,
+        self.assertThat(error.code, Equals(2))
+        self.assertThat(
+            stdio.getError(),
+            DocTestMatches(
+                dedent(
+                    """\
+                usage: maas [-h] COMMAND ...
+                <BLANKLINE>
+                ...
+                <BLANKLINE>
+                too few arguments
+                """
+                )
+            ),
         )
-        self.assertIn("too few arguments", error)

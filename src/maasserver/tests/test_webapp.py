@@ -38,38 +38,30 @@ class TestDocsFallbackFile(MAASTestCase):
     def test_html_404(self):
         request = DummyRequest([b"foo.html"])
         resource = self.docs.getChild(b"foo.html", request)
-        self.assertTrue(resource.path.endswith("404.html"), resource.path)
+        self.assertTrue(resource.path.endswith("404.html"))
 
     def test_other_404(self):
         request = DummyRequest([b"foo.jpg"])
         resource = self.docs.getChild(b"foo.jpg", request)
-        self.assertTrue(resource.path.endswith("404.html"), resource.path)
+        self.assertTrue(resource.path.endswith("404.html"))
 
     def test_html_resource(self):
         self.touch_file("foo.html")
         request = DummyRequest([b"foo.html"])
         resource = self.docs.getChild(b"foo.html", request)
-        self.assertTrue(resource.path.endswith("foo.html"), resource.path)
+        self.assertTrue(resource.path.endswith("foo.html"))
 
     def test_other_resource(self):
         self.touch_file("foo.jpg")
         request = DummyRequest([b"foo.jpg"])
         resource = self.docs.getChild(b"foo.jpg", request)
-        self.assertTrue(resource.path.endswith("foo.jpg"), resource.path)
+        self.assertTrue(resource.path.endswith("foo.jpg"))
 
     def test_append_html(self):
         self.touch_file("foo.html")
         request = DummyRequest([b"foo"])
         resource = self.docs.getChild(b"foo", request)
-        self.assertTrue(resource.path.endswith("foo.html"), resource.path)
-
-    def test_index(self):
-        self.touch_file("maas-documentation-25.html")
-        request = DummyRequest([b""])
-        resource = self.docs.getChild(b"", request)
-        self.assertTrue(
-            resource.path.endswith("maas-documentation-25.html"), resource.path
-        )
+        self.assertTrue(resource.path.endswith("foo.html"))
 
 
 class TestCleanPathRequest(MAASTestCase):

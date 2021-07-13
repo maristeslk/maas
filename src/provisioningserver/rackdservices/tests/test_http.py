@@ -1,9 +1,9 @@
 # Copyright 2018 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Tests for `provisioningserver.rackdservices.http`."""
 
-import os
-from pathlib import Path
+
 import random
 from unittest.mock import ANY, Mock
 
@@ -32,7 +32,7 @@ from provisioningserver import services
 from provisioningserver.boot import BytesReader
 from provisioningserver.events import EVENT_TYPES
 from provisioningserver.rackdservices import http
-from provisioningserver.rpc import clusterservice, common, exceptions
+from provisioningserver.rpc import common, exceptions
 from provisioningserver.rpc.testing import MockLiveClusterToRegionRPCFixture
 
 
@@ -67,12 +67,6 @@ class TestRackHTTPService(MAASTestCase):
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5000)
 
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
-
     def test_service_uses__tryUpdate_as_periodic_function(self):
         service = http.RackHTTPService(
             self.make_dir(), StubClusterClientService(), reactor
@@ -101,29 +95,6 @@ class TestRackHTTPService(MAASTestCase):
         )
         service.call = (service._tryUpdate, tuple(), {})
         return service
-
-    def test_configure_not_snap(self):
-        tempdir = self.make_dir()
-        nginx_conf = Path(tempdir) / "rackd.nginx.conf"
-        service = self.make_startable_RackHTTPService(tempdir, None, reactor)
-        self.patch(http, "compose_http_config_path").return_value = str(
-            nginx_conf
-        )
-        service._configure(["region1.maas", "region2.maas"])
-        self.assertIn("root /usr/share/maas;", nginx_conf.read_text())
-
-    def test_configure_in_snap(self):
-        self.patch(os, "environ", {"SNAP": "/snap/maas/123"})
-        tempdir = self.make_dir()
-        nginx_conf = Path(tempdir) / "rackd.nginx.conf"
-        service = self.make_startable_RackHTTPService(tempdir, None, reactor)
-        self.patch(http, "compose_http_config_path").return_value = str(
-            nginx_conf
-        )
-        service._configure(["region1.maas", "region2.maas"])
-        self.assertIn(
-            "root /snap/maas/123/usr/share/maas;", nginx_conf.read_text()
-        )
 
     @inlineCallbacks
     def test_getConfiguration_returns_configuration_object(self):
@@ -209,7 +180,7 @@ class TestRackHTTPService(MAASTestCase):
 
         service = http.RackHTTPService(self.make_dir(), mock_rpc, reactor)
         region_ips = list(service._genRegionIps())
-        self.assertEqual(3, len(region_ips))
+        self.assertEquals(3, len(region_ips))
 
     def test_genRegionIps_always_returns_same_result(self):
         mock_rpc = Mock()
@@ -227,7 +198,7 @@ class TestRackHTTPService(MAASTestCase):
         service = http.RackHTTPService(self.make_dir(), mock_rpc, reactor)
         region_ips = frozenset(service._genRegionIps())
         for _ in range(3):
-            self.assertEqual(region_ips, frozenset(service._genRegionIps()))
+            self.assertEquals(region_ips, frozenset(service._genRegionIps()))
 
     def test_genRegionIps_formats_ipv6(self):
         mock_rpc = Mock()
@@ -245,7 +216,7 @@ class TestRackHTTPService(MAASTestCase):
 
         service = http.RackHTTPService(self.make_dir(), mock_rpc, reactor)
         region_ips = set(service._genRegionIps())
-        self.assertEqual(ip_addresses, region_ips)
+        self.assertEquals(ip_addresses, region_ips)
 
 
 class TestRackHTTPService_Errors(MAASTestCase):
@@ -259,12 +230,6 @@ class TestRackHTTPService_Errors(MAASTestCase):
         ("_applyConfiguration", dict(method="_applyConfiguration")),
         ("_configurationApplied", dict(method="_configurationApplied")),
     )
-
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def make_startable_RackHTTPService(self, *args, **kwargs):
         service = http.RackHTTPService(*args, **kwargs)
@@ -440,8 +405,8 @@ class TestHTTPBootResource(MAASTestCase):
         resource = http.HTTPBootResource()
         yield self.render_GET(resource, request)
 
-        self.assertEqual(503, request.responseCode)
-        self.assertEqual(
+        self.assertEquals(503, request.responseCode)
+        self.assertEquals(
             b"HTTP boot service not ready.", b"".join(request.written)
         )
 
@@ -464,8 +429,8 @@ class TestHTTPBootResource(MAASTestCase):
         resource = http.HTTPBootResource()
         yield self.render_GET(resource, request)
 
-        self.assertEqual(400, request.responseCode)
-        self.assertEqual(
+        self.assertEquals(400, request.responseCode)
+        self.assertEquals(
             b"Missing X-Server-Addr and X-Forwarded-For HTTP headers.",
             b"".join(request.written),
         )
@@ -485,8 +450,8 @@ class TestHTTPBootResource(MAASTestCase):
         resource = http.HTTPBootResource()
         yield self.render_GET(resource, request)
 
-        self.assertEqual(400, request.responseCode)
-        self.assertEqual(
+        self.assertEquals(400, request.responseCode)
+        self.assertEquals(
             b"Missing X-Server-Addr and X-Forwarded-For HTTP headers.",
             b"".join(request.written),
         )
@@ -514,8 +479,8 @@ class TestHTTPBootResource(MAASTestCase):
         resource = http.HTTPBootResource()
         yield self.render_GET(resource, request)
 
-        self.assertEqual(403, request.responseCode)
-        self.assertEqual(b"", b"".join(request.written))
+        self.assertEquals(403, request.responseCode)
+        self.assertEquals(b"", b"".join(request.written))
 
     @inlineCallbacks
     def test_render_GET_404_file_not_found(self):
@@ -540,8 +505,8 @@ class TestHTTPBootResource(MAASTestCase):
         resource = http.HTTPBootResource()
         yield self.render_GET(resource, request)
 
-        self.assertEqual(404, request.responseCode)
-        self.assertEqual(b"", b"".join(request.written))
+        self.assertEquals(404, request.responseCode)
+        self.assertEquals(b"", b"".join(request.written))
 
     @inlineCallbacks
     def test_render_GET_500_server_error(self):
@@ -567,8 +532,8 @@ class TestHTTPBootResource(MAASTestCase):
         resource = http.HTTPBootResource()
         yield self.render_GET(resource, request)
 
-        self.assertEqual(500, request.responseCode)
-        self.assertEqual(str(exc).encode("utf-8"), b"".join(request.written))
+        self.assertEquals(500, request.responseCode)
+        self.assertEquals(str(exc).encode("utf-8"), b"".join(request.written))
 
     @inlineCallbacks
     def test_render_GET_produces_from_reader(self):
@@ -595,10 +560,10 @@ class TestHTTPBootResource(MAASTestCase):
         resource = http.HTTPBootResource()
         yield self.render_GET(resource, request)
 
-        self.assertEqual(
+        self.assertEquals(
             [100], request.responseHeaders.getRawHeaders(b"Content-Length")
         )
-        self.assertEqual(content, b"".join(request.written))
+        self.assertEquals(content, b"".join(request.written))
 
     @inlineCallbacks
     def test_render_GET_logs_node_event_with_original_path_ip(self):

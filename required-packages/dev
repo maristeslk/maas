@@ -1,10 +1,13 @@
+archdetect-deb
 authbind
 avahi-utils
+bash
 build-essential
 curl
 dos2unix
 git
 libnss-wrapper
+make
 psmisc
 python3-django-nose
 python3-dnspython
@@ -12,4 +15,3 @@ python3-packaging
 python3-prometheus-client
 python3-wheel
 socat
-tox

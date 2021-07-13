@@ -123,7 +123,8 @@ Description: Region Controller for MAAS
 Package: python3-maas-provisioningserver
 Section: python
 Architecture: all
-Depends: lshw,
+Depends: archdetect-deb,
+         lshw,
          openssh-client,
          python3-attr,
          python3-bson,
@@ -138,11 +139,12 @@ Depends: lshw,
          python3-oauthlib,
          python3-paramiko,
          python3-pexpect,
-         python3-pylxd (>= 2.3.0),
+         python3-pylxd (>= 2.2.11~),
          python3-pyparsing,
          python3-pypureomapi,
          python3-pyvmomi,
          python3-seamicroclient,
+         python3-simplejson,
          python3-simplestreams,
          python3-tempita,
          python3-twisted,
@@ -154,7 +156,6 @@ Depends: lshw,
          iproute2,
          ${misc:Depends},
          ${python3:Depends}
-Suggests: python3-zhmcclient (>= 0.30.1)
 Description: MAAS server provisioning libraries (Python 3)
  This package provides the MAAS provisioning server python libraries.
  .

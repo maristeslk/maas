@@ -41,7 +41,7 @@ from provisioningserver.utils.twisted import (
 log = LegacyLogger()
 
 
-class CleanPathRequest(Request):
+class CleanPathRequest(Request, object):
     """A request that supports '/+' in the path.
 
     It converts all '/+' in the path to a single '/'.
@@ -107,7 +107,7 @@ class OverlaySite(Site):
             return result
 
 
-class ResourceOverlay(Resource):
+class ResourceOverlay(Resource, object):
     """A resource that can fall-back to a basis resource.
 
     Children can be set using `putChild()` as usual. However, if path
@@ -181,8 +181,6 @@ class DocsFallbackFile(NoListingFile):
         self.childNotFound = DefaultFile(self.child(fallback).path)
 
     def getChild(self, path, request):
-        if path == b"":
-            return self.getChild("maas-documentation-25.html", request)
         child = super().getChild(path, request)
         if child is self.childNotFound and not path.endswith(b".html"):
             child = super().getChild(path + b".html", request)

@@ -1,6 +1,9 @@
 # Copyright 2012-2016 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Tests for `maascli.utils`."""
+
+
 from collections import OrderedDict
 import http.client
 import io
@@ -8,10 +11,11 @@ import random
 from unittest.mock import sentinel
 
 import httplib2
-import pytest
+from testtools.matchers import AfterPreprocessing, Equals, MatchesListwise
 
 from maascli import utils
 from maastesting.factory import factory
+from maastesting.matchers import MockCalledOnceWith
 from maastesting.testcase import MAASTestCase
 
 
@@ -154,7 +158,11 @@ class TestFunctions(MAASTestCase):
         )
         urls = [url for url, url_out in transformations]
         urls_out = [url_out for url, url_out in transformations]
-        self.assertEqual([utils.api_url(url) for url in urls], urls_out)
+        expected = [
+            AfterPreprocessing(utils.api_url, Equals(url_out))
+            for url_out in urls_out
+        ]
+        self.assertThat(urls, MatchesListwise(expected))
 
 
 class TestGetResponseContentType(MAASTestCase):
@@ -179,24 +187,30 @@ class TestGetResponseContentType(MAASTestCase):
         self.assertIsNone(utils.get_response_content_type(response))
 
 
-class TestIsResponseTextual:
-    @pytest.mark.parametrize(
-        "content_type,is_textual",
-        [
-            ("text/plain", True),
-            ("text/yaml", True),
-            ("text/foobar", True),
-            ("application/json", True),
-            ("image/png", False),
-            ("video/webm", False),
-        ],
+class TestIsResponseTextual(MAASTestCase):
+    """Tests for `is_response_textual`."""
+
+    content_types_textual_map = {
+        "text/plain": True,
+        "text/yaml": True,
+        "text/foobar": True,
+        "application/json": True,
+        "image/png": False,
+        "video/webm": False,
+    }
+
+    scenarios = sorted(
+        (ctype, {"content_type": ctype, "is_textual": is_textual})
+        for ctype, is_textual in content_types_textual_map.items()
     )
-    def test_type(self, mocker, content_type, is_textual):
-        grct = mocker.patch.object(
-            utils, "get_response_content_type", return_value=content_type
+
+    def test_type(self):
+        grct = self.patch(utils, "get_response_content_type")
+        grct.return_value = self.content_type
+        self.assertEqual(
+            self.is_textual, utils.is_response_textual(sentinel.response)
         )
-        assert utils.is_response_textual(sentinel.response) == is_textual
-        grct.assert_called_once_with(sentinel.response)
+        self.assertThat(grct, MockCalledOnceWith(sentinel.response))
 
 
 class TestPrintResponseHeaders(MAASTestCase):

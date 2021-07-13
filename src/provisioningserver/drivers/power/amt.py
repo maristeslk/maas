@@ -1,4 +1,4 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2016 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """AMT Power Driver."""
@@ -20,7 +20,7 @@ from provisioningserver.drivers.power import (
     PowerDriver,
     PowerSettingError,
 )
-from provisioningserver.utils import shell, snap, typed
+from provisioningserver.utils import shell, snappy, typed
 
 AMT_ERRORS = {
     "401 Unauthorized": {
@@ -47,7 +47,6 @@ class AMTPowerDriver(PowerDriver):
     name = "amt"
     chassis = False
     can_probe = False
-    can_set_boot_order = False
     description = "Intel AMT"
     settings = [
         make_setting_field(
@@ -431,7 +430,7 @@ class AMTPowerDriver(PowerDriver):
             return boot_mode
 
     def _get_wsman_command(self, *args):
-        base_path = snap.SnapPaths.from_environ().snap or "/"
+        base_path = snappy.get_snap_path() or "/"
         return (
             "wsman",
             "-C",

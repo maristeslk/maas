@@ -5,7 +5,6 @@
 
 from io import BytesIO
 import json
-import re
 from urllib.parse import urlencode, urlparse
 
 from twisted.internet.defer import inlineCallbacks, succeed
@@ -21,19 +20,17 @@ from provisioningserver.drivers.power import PowerActionError
 from provisioningserver.drivers.power.webhook import (
     SSL_INSECURE_CHOICES,
     SSL_INSECURE_NO,
-    SSL_INSECURE_YES,
     WebhookPowerDriver,
 )
-from provisioningserver.rpc.utils import commission_node, create_node
 from provisioningserver.utils.twisted import asynchronous
 
 
 class ProxmoxPowerDriver(WebhookPowerDriver):
 
     name = "proxmox"
-    chassis = True
-    can_probe = True
-    can_set_boot_order = False
+    chassis = False
+    # XXX ltrager - 2021-01-11 - Support for probing and Pods could be added.
+    can_probe = False
     description = "Proxmox"
     settings = [
         make_setting_field(
@@ -55,7 +52,7 @@ class ProxmoxPowerDriver(WebhookPowerDriver):
             field_type="password",
         ),
         make_setting_field(
-            "power_vm_name", "Node ID", scope=SETTING_SCOPE.NODE, required=True
+            "power_vm_name", "Node ID", scope=SETTING_SCOPE.NODE
         ),
         make_setting_field(
             "power_verify_ssl",
@@ -120,7 +117,7 @@ class ProxmoxPowerDriver(WebhookPowerDriver):
                 {},
                 {b"Content-Type": [b"application/json; charset=utf-8"]},
             ),
-            context.get("power_verify_ssl") == SSL_INSECURE_YES,
+            context.get("power_verify_ssl") is True,
             FileBodyProducer(
                 BytesIO(
                     json.dumps(
@@ -153,17 +150,12 @@ class ProxmoxPowerDriver(WebhookPowerDriver):
             b"GET",
             self._get_url(context, "cluster/resources", {"type": "vm"}),
             self._make_auth_headers(system_id, {}, extra_headers),
-            context.get("power_verify_ssl") == SSL_INSECURE_YES,
+            context.get("power_verify_ssl") is True,
         )
 
         def cb(response_data):
             parsed_data = json.loads(response_data)
-            vms = parsed_data["data"]
-            if not vms:
-                raise PowerActionError(
-                    "No VMs returned! Are permissions set correctly?"
-                )
-            for vm in vms:
+            for vm in parsed_data["data"]:
                 if power_vm_name in (str(vm.get("vmid")), vm.get("name")):
                     return vm
             raise PowerActionError("Unable to find virtual machine")
@@ -185,7 +177,7 @@ class ProxmoxPowerDriver(WebhookPowerDriver):
                     "status/start",
                 ),
                 self._make_auth_headers(system_id, {}, extra_headers),
-                context.get("power_verify_ssl") == SSL_INSECURE_YES,
+                context.get("power_verify_ssl") is True,
             )
 
     @asynchronous
@@ -202,7 +194,7 @@ class ProxmoxPowerDriver(WebhookPowerDriver):
                     "status/stop",
                 ),
                 self._make_auth_headers(system_id, {}, extra_headers),
-                context.get("power_verify_ssl") == SSL_INSECURE_YES,
+                context.get("power_verify_ssl") is True,
             )
 
     @asynchronous
@@ -216,114 +208,3 @@ class ProxmoxPowerDriver(WebhookPowerDriver):
             return "off"
         else:
             return "unknown"
-
-
-def probe_proxmox_and_enlist(
-    user,
-    hostname,
-    username,
-    password,
-    token_name,
-    token_secret,
-    verify_ssl,
-    accept_all,
-    domain,
-    prefix_filter,
-):
-    """Extracts all of the VMs from Proxmox and enlists them into MAAS.
-
-    :param user: user for the nodes.
-    :param hostname: Hostname for Proxmox
-    :param username: The username to connect to Proxmox to
-    :param password: The password to connect to Proxmox with.
-    :param token_name: The name of the token to use instead of a password.
-    :param token_secret: The token secret to use instead of a password.
-    :param verify_ssl: Whether SSL connections should be verified.
-    :param accept_all: If True, commission enlisted nodes.
-    :param domain: What domain discovered machines to be apart of.
-    :param prefix_filter: only enlist nodes that have the prefix.
-    """
-    proxmox = ProxmoxPowerDriver()
-    context = {
-        "power_address": hostname,
-        "power_user": username,
-        "power_pass": password,
-        "power_token_name": token_name,
-        "power_token_secret": token_secret,
-        "power_verify_ssl": SSL_INSECURE_YES
-        if verify_ssl
-        else SSL_INSECURE_NO,
-    }
-    mac_regex = re.compile(r"(([\dA-F]{2}[:]){5}[\dA-F]{2})", re.I)
-
-    d = proxmox._login("", context)
-
-    @inlineCallbacks
-    def get_vms(extra_headers):
-        vms = yield proxmox._webhook_request(
-            b"GET",
-            proxmox._get_url(context, "cluster/resources", {"type": "vm"}),
-            proxmox._make_auth_headers("", {}, extra_headers),
-            verify_ssl,
-        )
-        return extra_headers, vms
-
-    d.addCallback(get_vms)
-
-    @inlineCallbacks
-    def process_vms(data):
-        extra_headers, response_data = data
-        vms = json.loads(response_data)["data"]
-        if not vms:
-            raise PowerActionError(
-                "No VMs returned! Are permissions set correctly?"
-            )
-        for vm in vms:
-            if prefix_filter and not vm["name"].startswith(prefix_filter):
-                continue
-            # Proxmox doesn't have an easy way to get the MAC address, it
-            # includes it with a bunch of other data in the config.
-            vm_config_data = yield proxmox._webhook_request(
-                b"GET",
-                proxmox._get_url(
-                    context,
-                    f"nodes/{vm['node']}/{vm['type']}/{vm['vmid']}/config",
-                ),
-                proxmox._make_auth_headers("", {}, extra_headers),
-                verify_ssl,
-            )
-            macs = [
-                mac[0] for mac in mac_regex.findall(vm_config_data.decode())
-            ]
-
-            system_id = yield create_node(
-                macs,
-                "amd64",
-                "proxmox",
-                {"power_vm_name": vm["vmid"], **context},
-                domain,
-                hostname=vm["name"].replace(" ", "-"),
-            )
-
-            # If the system_id is None an error occured when creating the machine.
-            # Most likely the error is the node already exists.
-            if system_id is None:
-                continue
-
-            if vm["status"] != "stopped":
-                yield proxmox._webhook_request(
-                    b"POST",
-                    proxmox._get_url(
-                        context,
-                        f"nodes/{vm['node']}/{vm['type']}/{vm['vmid']}/"
-                        "status/stop",
-                    ),
-                    proxmox._make_auth_headers(system_id, {}, extra_headers),
-                    context.get("power_verify_ssl") == SSL_INSECURE_YES,
-                )
-
-            if accept_all:
-                yield commission_node(system_id, user)
-
-    d.addCallback(process_vms)
-    return d

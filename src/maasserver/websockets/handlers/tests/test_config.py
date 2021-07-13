@@ -6,9 +6,10 @@
 
 import random
 
+from django.core.exceptions import ValidationError
 from testtools import ExpectedException
 
-from maasserver.forms.settings import CONFIG_ITEMS, get_config_field
+from maasserver.forms.settings import get_config_field
 from maasserver.models.config import Config, get_default_config
 from maasserver.testing.factory import factory
 from maasserver.testing.testcase import MAASServerTestCase
@@ -18,57 +19,40 @@ from maasserver.websockets.base import (
     HandlerPKError,
     HandlerValidationError,
 )
-from maasserver.websockets.handlers.config import (
-    ConfigHandler,
-    get_config_keys,
-)
+from maasserver.websockets.handlers.config import CONFIG_ITEMS, ConfigHandler
 
 
 class TestConfigHandler(MAASServerTestCase):
-    def setUp(self):
-        super().setUp()
-        # Avoid triggering updates e.g. update_boot_cache_source
-        Config.objects._config_changed_connections.clear()
-
-    def test_dehydrate_no_choice_config(self):
-        no_choice_name = random.choice(
-            list(
-                name
-                for name in CONFIG_ITEMS.keys()
-                if not hasattr(get_config_field(name), "choices")
-            )
-        )
-        Config.objects.set_config(no_choice_name, "myvalue")
-        user = factory.make_User()
-        handler = ConfigHandler(user, {}, None)
-        dehydrated = handler.dehydrate_configs([no_choice_name])[0]
-        self.assertEqual(no_choice_name, dehydrated["name"])
-        self.assertEqual("myvalue", dehydrated["value"])
-        self.assertNotIn("choices", dehydrated)
-
-    def test_dehydrate_choice_config(self):
-        choice_name, choices = random.choice(
-            list(
-                (name, get_config_field(name).choices)
-                for name in CONFIG_ITEMS.keys()
-                if hasattr(get_config_field(name), "choices")
-            )
-        )
-
-        choice_value = random.choice([value for value, _ in choices])
-        Config.objects.set_config(choice_name, choice_value)
-        user = factory.make_User()
-        handler = ConfigHandler(user, {}, None)
-        dehydrated = handler.dehydrate_configs([choice_name])[0]
-        self.assertEqual(choice_name, dehydrated["name"])
-        self.assertEqual(choice_value, dehydrated["value"])
-        self.assertEqual(choices, dehydrated["choices"])
+    def dehydrated_all_configs(self):
+        defaults = get_default_config()
+        config_keys = CONFIG_ITEMS.keys()
+        config_objs = Config.objects.filter(name__in=config_keys)
+        config_objs = {obj.name: obj for obj in config_objs}
+        config_keys = [
+            {
+                "name": key,
+                "value": (
+                    config_objs[key].value
+                    if key in config_objs
+                    else defaults.get(key, "")
+                ),
+            }
+            for key in config_keys
+        ]
+        for config_key in config_keys:
+            try:
+                config_field = get_config_field(config_key["name"])
+                if hasattr(config_field, "choices"):
+                    config_key["choices"] = config_field.choices
+            except ValidationError:
+                pass
+        return config_keys
 
     def test_get(self):
         user = factory.make_User()
         handler = ConfigHandler(user, {}, None)
         Config.objects.set_config("curtin_verbose", True)
-        self.assertEqual(
+        self.assertEquals(
             {"name": "curtin_verbose", "value": True},
             handler.get({"name": "curtin_verbose"}),
         )
@@ -78,7 +62,7 @@ class TestConfigHandler(MAASServerTestCase):
         handler = ConfigHandler(user, {}, None)
         Config.objects.set_config("curtin_verbose", True)
         handler.get({"name": "curtin_verbose"})
-        self.assertEqual({"curtin_verbose"}, handler.cache["loaded_pks"])
+        self.assertEquals({"curtin_verbose"}, handler.cache["loaded_pks"])
 
     def test_get_requires_name(self):
         user = factory.make_User()
@@ -95,74 +79,24 @@ class TestConfigHandler(MAASServerTestCase):
         )
 
     def test_get_must_be_in_config_items(self):
-        admin = factory.make_admin()
-        allowed_keys = set(get_config_keys(admin))
+        allowed_keys = set(CONFIG_ITEMS.keys())
         all_keys = set(get_default_config().keys())
         not_allowed_keys = all_keys.difference(allowed_keys)
         key = random.choice(list(not_allowed_keys))
-        handler = ConfigHandler(admin, {}, None)
+        user = factory.make_User()
+        handler = ConfigHandler(user, {}, None)
         self.assertRaises(HandlerDoesNotExistError, handler.get, {"name": key})
 
-    def test_list_admin_includes_all_config(self):
-        admin = factory.make_admin()
-        config_keys = list(CONFIG_ITEMS.keys()) + [
-            "maas_url",
-            "uuid",
-            "rpc_shared_secret",
-        ]
-
-        handler = ConfigHandler(admin, {}, None)
-        self.assertCountEqual(
-            config_keys, [item["name"] for item in handler.list({})]
-        )
-
-    def test_list_user_excludes_secret(self):
-        user = factory.make_User()
-        config_keys = list(CONFIG_ITEMS.keys()) + ["maas_url", "uuid"]
-
-        handler = ConfigHandler(user, {}, None)
-        self.assertNotIn("rpc_shared_secret", config_keys)
-        self.assertCountEqual(
-            config_keys, [item["name"] for item in handler.list({})]
-        )
-
-    def test_list_admin_includes_rpc_secret(self):
-        Config.objects.set_config("rpc_shared_secret", "my-secret")
-        admin = factory.make_admin()
-        handler = ConfigHandler(admin, {}, None)
-        config = {item["name"]: item["value"] for item in handler.list({})}
-        self.assertEqual("my-secret", config["rpc_shared_secret"])
-
-    def test_get_admin_allows_rpc_secret(self):
-        Config.objects.set_config("rpc_shared_secret", "my-secret")
-        admin = factory.make_admin()
-        handler = ConfigHandler(admin, {}, None)
-        self.assertEqual(
-            "my-secret", handler.get({"name": "rpc_shared_secret"})["value"]
-        )
-
-    def test_list_non_admin_hides_rpc_secret(self):
-        Config.objects.set_config("rpc_shared_secret", "my-secret")
+    def test_list(self):
         user = factory.make_User()
         handler = ConfigHandler(user, {}, None)
-        config = {item["name"]: item["value"] for item in handler.list({})}
-        self.assertNotIn("rpc_shared_secret", config)
-
-    def test_get_non_admin_disallows_rpc_secret(self):
-        Config.objects.set_config("rpc_shared_secret", "my-secret")
-        user = factory.make_User()
-        handler = ConfigHandler(user, {}, None)
-        self.assertRaises(
-            HandlerDoesNotExistError,
-            handler.get,
-            {"name": "rpc_shared_secret"},
-        )
+        self.assertItemsEqual(self.dehydrated_all_configs(), handler.list({}))
 
     def test_list_sets_loaded_pks_in_cache(self):
         user = factory.make_User()
         handler = ConfigHandler(user, {}, None)
-        configs = handler.list({})
-        config_keys = {obj["name"] for obj in configs}
+        handler.list({})
+        config_keys = {obj["name"] for obj in self.dehydrated_all_configs()}
         self.assertItemsEqual(config_keys, handler.cache["loaded_pks"])
 
     def test_update_as_non_admin_asserts(self):
@@ -187,7 +121,7 @@ class TestConfigHandler(MAASServerTestCase):
         user = factory.make_admin()
         handler = ConfigHandler(user, {}, None)
         updated = handler.update({"name": "curtin_verbose", "value": True})
-        self.assertEqual({"name": "curtin_verbose", "value": True}, updated)
+        self.assertEquals({"name": "curtin_verbose", "value": True}, updated)
         self.assertTrue(Config.objects.get_config("curtin_verbose"))
 
     def test_update_cannot_update_uuid(self):
@@ -225,7 +159,9 @@ class TestConfigHandler(MAASServerTestCase):
             handler.update,
             {"name": "http_proxy", "value": factory.make_name("invalid")},
         )
-        self.assertEqual({"value": ["Enter a valid URL."]}, error.message_dict)
+        self.assertEquals(
+            {"value": ["Enter a valid URL."]}, error.message_dict
+        )
 
     def test_on_listen_returns_None_if_excluded(self):
         user = factory.make_User()

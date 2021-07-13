@@ -3,7 +3,6 @@
 
 """Networks monitoring service for region controllers."""
 
-from twisted.internet.defer import inlineCallbacks, returnValue
 
 from maasserver.models.node import RegionController
 from maasserver.utils.orm import transactional
@@ -21,12 +20,11 @@ class RegionNetworksMonitoringService(NetworksMonitoringService):
         """Get interface monitoring state from the region."""
         return deferToDatabase(self.getInterfaceMonitoringStateFromDatabase)
 
-    @inlineCallbacks
-    def getRefreshDetails(self):
+    def recordInterfaces(self, interfaces, hints=None):
         """Record the interfaces information."""
-        regiond = yield deferToDatabase(self._getRegion)
-        credentials = yield regiond.start_refresh()
-        returnValue((None, regiond.system_id, credentials))
+        return deferToDatabase(
+            self.recordInterfacesIntoDatabase, interfaces, hints
+        )
 
     def reportNeighbours(self, neighbours):
         """Record the specified list of neighbours."""
@@ -43,6 +41,12 @@ class RegionNetworksMonitoringService(NetworksMonitoringService):
         return region_controller.get_discovery_state()
 
     @transactional
+    def recordInterfacesIntoDatabase(self, interfaces, hints):
+        """Record the interfaces information."""
+        region_controller = RegionController.objects.get_running_controller()
+        region_controller.update_interfaces(interfaces, hints)
+
+    @transactional
     def recordNeighboursIntoDatabase(self, neighbours):
         """Record the interfaces information."""
         region_controller = RegionController.objects.get_running_controller()
@@ -53,7 +57,3 @@ class RegionNetworksMonitoringService(NetworksMonitoringService):
         """Record the mDNS entries."""
         region_controller = RegionController.objects.get_running_controller()
         region_controller.report_mdns_entries(mdns)
-
-    @transactional
-    def _getRegion(self):
-        return RegionController.objects.get_running_controller()

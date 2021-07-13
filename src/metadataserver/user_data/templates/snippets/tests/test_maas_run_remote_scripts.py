@@ -1,8 +1,9 @@
 # Copyright 2017-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Tests for maas_run_remote_scripts.py."""
 
-import argparse
+
 import copy
 from datetime import timedelta
 import http.client
@@ -31,7 +32,7 @@ from maastesting.matchers import (
 )
 from maastesting.testcase import MAASTestCase
 from snippets import maas_run_remote_scripts
-from snippets.maas_api_helper import Config, Credentials, SignalException
+from snippets.maas_api_helper import SignalException
 from snippets.maas_run_remote_scripts import (
     _check_link_connected,
     bmc_config,
@@ -62,7 +63,6 @@ SCRIPT_RESULT_ID = 0
 def make_script(
     scripts_dir=None,
     with_added_attribs=True,
-    with_config=True,
     name=None,
     script_version_id=None,
     timeout_seconds=None,
@@ -108,17 +108,11 @@ def make_script(
             scripts_dir, "out", "%s.%s" % (name, script_result_id)
         )
 
-        url = factory.make_url()
-        creds = {"token_secret": factory.make_name("token_secret")}
-        config = Config()
-        config.update({"metadata_url": url, **creds})
         ret["args"] = {
-            "url": url,
-            "creds": creds,
+            "url": factory.make_url(),
+            "creds": factory.make_name("creds"),
             "script_result_id": script_result_id,
         }
-        if with_config:
-            ret["config"] = config
         ret["msg_name"] = "%s (id: %s, script_version_id: %s)" % (
             name,
             script_result_id,
@@ -168,7 +162,6 @@ def make_scripts(
     count=3,
     scripts_dir=None,
     with_added_attribs=True,
-    with_config=True,
     with_output=True,
     parallel=None,
     hardware_type=None,
@@ -178,7 +171,6 @@ def make_scripts(
         script = make_script(
             scripts_dir=scripts_dir,
             with_added_attribs=with_added_attribs,
-            with_config=with_config,
             with_output=with_output,
             parallel=parallel,
             hardware_type=hardware_type,
@@ -188,7 +180,6 @@ def make_scripts(
             make_script(
                 scripts_dir=scripts_dir,
                 with_added_attribs=with_added_attribs,
-                with_config=with_config,
                 with_output=with_output,
                 name=script["name"],
                 script_version_id=script["script_version_id"],
@@ -206,7 +197,6 @@ def make_scripts(
             make_script(
                 scripts_dir=scripts_dir,
                 with_added_attribs=with_added_attribs,
-                with_config=with_config,
                 with_output=with_output,
                 parallel=parallel,
             )
@@ -230,8 +220,11 @@ def make_fake_os_path_exists(testcase, exists=True):
 class TestOutputAndSend(MAASTestCase):
     def setUp(self):
         super().setUp()
-        self.stderr_write = self.patch(
-            maas_run_remote_scripts.sys.stderr, "write"
+        self.stdout_write = self.patch(
+            maas_run_remote_scripts.sys.stdout, "write"
+        )
+        self.stdout_flush = self.patch(
+            maas_run_remote_scripts.sys.stdout, "flush"
         )
         self.signal_wrapper = self.patch(
             maas_run_remote_scripts, "signal_wrapper"
@@ -241,21 +234,24 @@ class TestOutputAndSend(MAASTestCase):
         error = factory.make_string()
         output_and_send(error)
 
-        self.assertThat(self.stderr_write, MockCalledOnceWith("%s\n" % error))
+        self.assertThat(self.stdout_write, MockCalledOnceWith("%s\n" % error))
+        self.assertThat(self.stdout_flush, MockCalledOnce())
         self.assertThat(self.signal_wrapper, MockCalledOnceWith(error=error))
 
     def test_output_and_send_doesnt_send_when_false(self):
         error = factory.make_string()
         self.assertFalse(output_and_send(error, False))
-        self.assertThat(self.stderr_write, MockCalledOnceWith("%s\n" % error))
+        self.assertThat(self.stdout_write, MockCalledOnceWith("%s\n" % error))
+        self.assertThat(self.stdout_flush, MockCalledOnce())
         self.assertThat(self.signal_wrapper, MockNotCalled())
 
     def test_output_and_send_scripts(self):
         scripts = make_scripts()
         error = "{msg_name} %s" % factory.make_string()
         output_and_send_scripts(error, scripts)
+
         self.assertThat(
-            self.stderr_write,
+            self.stdout_write,
             MockCallsMatch(
                 *[call("%s\n" % error.format(**script)) for script in scripts]
             ),
@@ -289,10 +285,10 @@ class TestOutputAndSend(MAASTestCase):
         )
         for script in scripts:
             script_error = "%s\n" % error.format(**script)
-            self.assertEqual(
+            self.assertEquals(
                 script_error, open(script["combined_path"], "r").read()
             )
-            self.assertEqual(
+            self.assertEquals(
                 script_error, open(script["stderr_path"], "r").read()
             )
 
@@ -326,13 +322,13 @@ class TestInstallDependencies(MAASTestCase):
                 factory.make_name("status"),
             )
         )
-        self.assertEqual(
+        self.assertEquals(
             script["stdout"], open(script["stdout_path"], "r").read()
         )
-        self.assertEqual(
+        self.assertEquals(
             script["stderr"], open(script["stderr_path"], "r").read()
         )
-        self.assertEqual(
+        self.assertEquals(
             script["combined"], open(script["combined_path"], "r").read()
         )
 
@@ -355,13 +351,13 @@ class TestInstallDependencies(MAASTestCase):
                 status,
             )
         )
-        self.assertEqual(
+        self.assertEquals(
             script["stdout"], open(script["stdout_path"], "r").read()
         )
-        self.assertEqual(
+        self.assertEquals(
             script["stderr"], open(script["stderr_path"], "r").read()
         )
-        self.assertEqual(
+        self.assertEquals(
             script["combined"], open(script["combined_path"], "r").read()
         )
         for script in scripts:
@@ -405,13 +401,13 @@ class TestInstallDependencies(MAASTestCase):
                 False,
             )
         )
-        self.assertEqual(
+        self.assertEquals(
             script["stdout"], open(script["stdout_path"], "r").read()
         )
-        self.assertEqual(
+        self.assertEquals(
             script["stderr"], open(script["stderr_path"], "r").read()
         )
-        self.assertEqual(
+        self.assertEquals(
             script["combined"], open(script["combined_path"], "r").read()
         )
 
@@ -834,7 +830,7 @@ class TestInstallDependencies(MAASTestCase):
         with open(
             os.path.join(scripts[0]["download_path"], "test-file"), "rb"
         ) as f:
-            self.assertEqual(file_content, f.read())
+            self.assertEquals(file_content, f.read())
 
     def test_install_dependencies_url_zip(self):
         self.patch(maas_run_remote_scripts, "run_and_check")
@@ -853,7 +849,7 @@ class TestInstallDependencies(MAASTestCase):
         with open(
             os.path.join(scripts[0]["download_path"], "test-file"), "rb"
         ) as f:
-            self.assertEqual(file_content, f.read())
+            self.assertEquals(file_content, f.read())
 
     def test_install_dependencies_url_deb(self):
         mock_run_and_check = self.patch(
@@ -982,9 +978,7 @@ class TestCustomNetworking(MAASTestCase):
         self.mock_get_interfaces = self.patch(
             maas_run_remote_scripts, "get_interfaces"
         )
-        self.mock_signal = self.patch_autospec(
-            maas_run_remote_scripts, "signal"
-        )
+        self.mock_signal = self.patch(maas_run_remote_scripts, "signal")
         self.patch(maas_run_remote_scripts.sys.stdout, "write")
         self.patch(maas_run_remote_scripts.sys.stderr, "write")
         self.patch(maas_run_remote_scripts.time, "sleep")
@@ -1058,7 +1052,7 @@ class TestCustomNetworking(MAASTestCase):
 
         with custom_networking:
             # Verify config files where moved into place
-            self.assertEqual(
+            self.assertEquals(
                 netplan_yaml_content,
                 open(
                     os.path.join(self.netplan_dir, "netplan.yaml"), "r"
@@ -1069,7 +1063,7 @@ class TestCustomNetworking(MAASTestCase):
                     os.path.join(self.netplan_dir, "50-cloud-init.yaml")
                 )
             )
-            self.assertEqual(
+            self.assertEquals(
                 ephemeral_config_content,
                 open(
                     os.path.join(
@@ -1111,7 +1105,7 @@ class TestCustomNetworking(MAASTestCase):
 
         with custom_networking:
             # Verify config files where moved into place
-            self.assertEqual(
+            self.assertEquals(
                 netplan_yaml_content,
                 open(
                     os.path.join(self.netplan_dir, "netplan.yaml"), "r"
@@ -1122,7 +1116,7 @@ class TestCustomNetworking(MAASTestCase):
                     os.path.join(self.netplan_dir, "50-cloud-init.yaml")
                 )
             )
-            self.assertEqual(
+            self.assertEquals(
                 ephemeral_config_content,
                 open(
                     os.path.join(
@@ -1252,7 +1246,7 @@ class TestCustomNetworking(MAASTestCase):
         custom_networking._apply_ephemeral_netplan()
 
         self.assertFalse(os.path.exists(backup_dir))
-        self.assertEqual(
+        self.assertEquals(
             ephemeral_config_content,
             open(
                 os.path.join(self.netplan_dir, "50-cloud-init.yaml"), "r"
@@ -1291,7 +1285,7 @@ class TestCustomNetworking(MAASTestCase):
         custom_networking._apply_ephemeral_netplan()
 
         self.assertFalse(os.path.exists(backup_dir))
-        self.assertEqual(
+        self.assertEquals(
             ephemeral_config_content,
             open(
                 os.path.join(self.netplan_dir, "50-cloud-init.yaml"), "r"
@@ -1333,7 +1327,7 @@ class TestCustomNetworking(MAASTestCase):
         custom_networking._apply_ephemeral_netplan()
 
         self.assertFalse(os.path.exists(backup_dir))
-        self.assertEqual(
+        self.assertEquals(
             ephemeral_config_content,
             open(
                 os.path.join(self.netplan_dir, "50-cloud-init.yaml"), "r"
@@ -1375,7 +1369,7 @@ class TestCustomNetworking(MAASTestCase):
         custom_networking._apply_ephemeral_netplan()
 
         self.assertFalse(os.path.exists(backup_dir))
-        self.assertEqual(
+        self.assertEquals(
             ephemeral_config_content,
             open(
                 os.path.join(self.netplan_dir, "50-cloud-init.yaml"), "r"
@@ -1657,7 +1651,7 @@ class TestParseParameters(MAASTestCase):
         self.assertRaises(KeyError, get_block_devices)
 
     def test_udev_decode(self):
-        self.assertEqual(
+        self.assertEquals(
             "QEMU HARDDISK", udev_decode("QEMU\x20HARDDISK\x20\x20\x20")
         )
 
@@ -2448,15 +2442,14 @@ class TestRunScript(MAASTestCase):
         run_script(script, scripts_dir)
 
         env = mock_popen.call_args[1]["env"]
-        self.assertEqual(script["combined_path"], env["OUTPUT_COMBINED_PATH"])
-        self.assertEqual(script["stdout_path"], env["OUTPUT_STDOUT_PATH"])
-        self.assertEqual(script["stderr_path"], env["OUTPUT_STDERR_PATH"])
-        self.assertEqual(script["result_path"], env["RESULT_PATH"])
-        self.assertEqual(script["download_path"], env["DOWNLOAD_PATH"])
-        self.assertEqual(str(script["timeout_seconds"]), env["RUNTIME"])
-        self.assertEqual(str(script["has_started"]), env["HAS_STARTED"])
-        self.assertEqual(script["bmc_config_path"], env["BMC_CONFIG_PATH"])
-        self.assertIn("MAAS_BASE_URL", env)
+        self.assertEquals(script["combined_path"], env["OUTPUT_COMBINED_PATH"])
+        self.assertEquals(script["stdout_path"], env["OUTPUT_STDOUT_PATH"])
+        self.assertEquals(script["stderr_path"], env["OUTPUT_STDERR_PATH"])
+        self.assertEquals(script["result_path"], env["RESULT_PATH"])
+        self.assertEquals(script["download_path"], env["DOWNLOAD_PATH"])
+        self.assertEquals(str(script["timeout_seconds"]), env["RUNTIME"])
+        self.assertEquals(str(script["has_started"]), env["HAS_STARTED"])
+        self.assertEquals(script["bmc_config_path"], env["BMC_CONFIG_PATH"])
         self.assertIn("PATH", env)
         self.assertThat(
             self.mock_check_link_connected, MockCalledOnceWith(script)
@@ -2992,10 +2985,8 @@ class TestBMCConfig(MAASTestCase):
         mock_geturl.return_value = BytesIO(yaml.safe_dump(preseed).encode())
         netloc = factory.make_hostname()
         url = factory.make_url(scheme="http", netloc=netloc)
-        config = Config()
-        config.update({"metadata_url": url, **creds})
 
-        enlist(config)
+        enlist(url, creds)
 
         self.assertThat(
             mock_get_maas_machines,
@@ -3016,14 +3007,11 @@ class TestBMCConfig(MAASTestCase):
             ),
         )
         self.assertEqual(
-            config.credentials.consumer_key, new_creds["consumer_key"]
-        )
-        self.assertEqual(
-            config.credentials.consumer_secret, new_creds["consumer_secret"]
-        )
-        self.assertEqual(config.credentials.token_key, new_creds["token_key"])
-        self.assertEqual(
-            config.credentials.token_secret, new_creds["token_secret"]
+            {
+                "config_path": config_path,
+                **new_creds,
+            },
+            creds,
         )
         self.assertEqual(yaml.safe_load(open(config_path, "r")), preseed)
 
@@ -3066,10 +3054,8 @@ class TestBMCConfig(MAASTestCase):
             factory.make_name("key"): factory.make_name("value")
             for _ in range(3)
         }
-        config = Config()
-        config.update({"metadata_url": url, **creds})
 
-        enlist(config, power_type, power_parameters)
+        enlist(url, creds, power_type, power_parameters)
 
         self.assertThat(
             mock_get_maas_machines,
@@ -3092,14 +3078,11 @@ class TestBMCConfig(MAASTestCase):
             ),
         )
         self.assertEqual(
-            config.credentials.consumer_key, new_creds["consumer_key"]
-        )
-        self.assertEqual(
-            config.credentials.consumer_secret, new_creds["consumer_secret"]
-        )
-        self.assertEqual(config.credentials.token_key, new_creds["token_key"])
-        self.assertEqual(
-            config.credentials.token_secret, new_creds["token_secret"]
+            {
+                "config_path": config_path,
+                **new_creds,
+            },
+            creds,
         )
         self.assertEqual(yaml.safe_load(open(config_path, "r")), preseed)
 
@@ -3182,8 +3165,6 @@ class TestBMCConfig(MAASTestCase):
             "token_secret": factory.make_name("token_secret"),
             "consumer_secret": factory.make_name("consumer_secret"),
         }
-        config = Config()
-        config.update({"metadata_url": url, **creds})
         script = {
             "name": script_name,
             "bmc_config_path": bmc_config_path,
@@ -3191,7 +3172,6 @@ class TestBMCConfig(MAASTestCase):
                 "url": url,
                 "creds": creds,
             },
-            "config": config,
         }
 
         bmc_config(script)
@@ -3209,7 +3189,7 @@ class TestBMCConfig(MAASTestCase):
         )
         self.assertThat(
             mock_enlist,
-            MockCalledOnceWith(config, power_type, power_params),
+            MockCalledOnceWith(url, creds, power_type, power_params),
         )
         self.assertTrue(maas_run_remote_scripts._bmc_config_uploaded)
 
@@ -3243,8 +3223,6 @@ class TestBMCConfig(MAASTestCase):
             "token_secret": factory.make_name("token_secret"),
             "consumer_secret": factory.make_name("consumer_secret"),
         }
-        config = Config()
-        config.update({"metadata_url": url, **creds})
         script = {
             "name": script_name,
             "bmc_config_path": bmc_config_path,
@@ -3252,7 +3230,6 @@ class TestBMCConfig(MAASTestCase):
                 "url": url,
                 "creds": creds,
             },
-            "config": config,
         }
 
         self.assertRaises(exception, bmc_config, script)
@@ -3271,8 +3248,8 @@ class TestBMCConfig(MAASTestCase):
         self.assertThat(
             mock_enlist,
             MockCallsMatch(
-                call(config, power_type, power_params),
-                call(config),
+                call(url, creds, power_type, power_params),
+                call(url, creds),
             ),
         )
         self.assertTrue(maas_run_remote_scripts._bmc_config_uploaded)
@@ -3312,11 +3289,12 @@ class TestRunScripts(MAASTestCase):
         for instance_thread_group in instance_thread:
             scripts += copy.deepcopy(instance_thread_group)
         scripts += copy.deepcopy(any_thread)
-        config = Config()
+        url = factory.make_url()
+        creds = factory.make_name("creds")
         scripts_dir = factory.make_name("scripts_dir")
         out_dir = os.path.join(scripts_dir, "out")
 
-        run_scripts(config, scripts_dir, out_dir, scripts)
+        run_scripts(url, creds, scripts_dir, out_dir, scripts)
 
         serial_scripts = []
         instance_scripts = []
@@ -3354,9 +3332,7 @@ class TestRunScripts(MAASTestCase):
         self.patch(maas_run_remote_scripts, "install_dependencies")
         self.patch(maas_run_remote_scripts, "run_script")
         url = factory.make_url()
-        creds = {"token_secret": factory.make_name("token_secret")}
-        config = Config()
-        config.update({"metadata_url": url, **creds})
+        creds = factory.make_name("creds")
         script = make_script(scripts_dir=scripts_dir)
         script.pop("result", None)
         script.pop("combined", None)
@@ -3364,12 +3340,11 @@ class TestRunScripts(MAASTestCase):
         script.pop("stdout", None)
         script["args"] = {
             "url": url,
-            "creds": config.credentials,
+            "creds": creds,
             "script_name": script["name"],
             "script_result_id": script["script_result_id"],
             "script_version_id": script["script_version_id"],
         }
-        script["config"] = config
         script["result_sent"] = True
         scripts = [
             {
@@ -3388,7 +3363,7 @@ class TestRunScripts(MAASTestCase):
                 "result_sent": True,
             }
         ]
-        run_scripts(config, scripts_dir, out_dir, scripts)
+        run_scripts(url, creds, scripts_dir, out_dir, scripts)
         scripts[0].pop("thread", None)
         self.assertDictEqual(script, scripts[0])
 
@@ -3585,9 +3560,7 @@ class TestRunScriptsFromMetadata(MAASTestCase):
         self.mock_output_and_send = self.patch(
             maas_run_remote_scripts, "output_and_send"
         )
-        self.mock_signal = self.patch_autospec(
-            maas_run_remote_scripts, "signal"
-        )
+        self.mock_signal = self.patch(maas_run_remote_scripts, "signal")
         self.mock_run_scripts = self.patch(
             maas_run_remote_scripts, "run_scripts"
         )
@@ -3604,12 +3577,14 @@ class TestRunScriptsFromMetadata(MAASTestCase):
         index_json = {}
         if with_commissioning:
             if commissioning_scripts is None:
-                commissioning_scripts = make_scripts(with_config=False)
-            index_json["commissioning_scripts"] = commissioning_scripts
+                index_json["commissioning_scripts"] = make_scripts()
+            else:
+                index_json["commissioning_scripts"] = commissioning_scripts
         if with_testing:
             if testing_scripts is None:
-                testing_scripts = make_scripts(with_config=False)
-            index_json["testing_scripts"] = testing_scripts
+                index_json["testing_scripts"] = make_scripts()
+            else:
+                index_json["testing_scripts"] = testing_scripts
         with open(os.path.join(scripts_dir, "index.json"), "w") as f:
             f.write(json.dumps({"1.0": index_json}))
         return index_json
@@ -3635,20 +3610,17 @@ class TestRunScriptsFromMetadata(MAASTestCase):
         mock_download_and_extract_tar.side_effect = (
             self.mock_download_and_extract_tar
         )
-        config = Config()
-        config.update(
-            {
-                "metadata_url": factory.make_url(),
-                "token_secret": factory.make_name("token_secret"),
-            }
-        )
+        creds = {"token_secret": factory.make_name("token_secret")}
 
-        run_scripts_from_metadata(config, scripts_dir, None)
+        # Don't need to give the url, out_dir as we're not running
+        # the scripts and sending the results.
+        run_scripts_from_metadata(None, creds, scripts_dir, None)
 
         self.assertThat(
             self.mock_run_scripts,
             MockAnyCall(
-                config,
+                None,
+                creds,
                 scripts_dir,
                 None,
                 index_json["commissioning_scripts"],
@@ -3659,24 +3631,18 @@ class TestRunScriptsFromMetadata(MAASTestCase):
         self.assertThat(
             self.mock_run_scripts,
             MockAnyCall(
-                config,
+                None,
+                creds,
                 scripts_dir,
                 None,
                 index_json["testing_scripts"],
                 True,
             ),
         )
-        self.assertThat(
-            self.mock_signal,
-            MockAnyCall(config.metadata_url, config.credentials, "TESTING"),
-        )
+        self.assertThat(self.mock_signal, MockAnyCall(None, creds, "TESTING"))
         self.assertThat(
             mock_download_and_extract_tar,
-            MockCalledOnceWith(
-                f"{config.metadata_url}maas-scripts",
-                config.credentials,
-                scripts_dir,
-            ),
+            MockCalledOnceWith("Nonemaas-scripts", creds, scripts_dir),
         )
 
     def test_run_scripts_from_metadata_doesnt_run_tests_on_commiss_fail(self):
@@ -3684,19 +3650,16 @@ class TestRunScriptsFromMetadata(MAASTestCase):
         fail_count = random.randint(1, 100)
         self.mock_run_scripts.return_value = fail_count
         index_json = self.make_index_json(scripts_dir)
-        config = Config()
-        config.update(
-            {
-                "metadata_url": factory.make_url(),
-                "token_secret": factory.make_name("token_secret"),
-            }
-        )
-        run_scripts_from_metadata(config, scripts_dir, None)
+
+        # Don't need to give the url, creds, or out_dir as we're not running
+        # the scripts and sending the results.
+        run_scripts_from_metadata(None, None, scripts_dir, None)
 
         self.assertThat(
             self.mock_run_scripts,
             MockCalledOnceWith(
-                config,
+                None,
+                None,
                 scripts_dir,
                 None,
                 index_json["commissioning_scripts"],
@@ -3710,8 +3673,8 @@ class TestRunScriptsFromMetadata(MAASTestCase):
             MockCalledOnceWith(
                 "%s commissioning scripts failed to run" % fail_count,
                 True,
-                config.metadata_url,
-                config.credentials,
+                None,
+                None,
                 "FAILED",
             ),
         )
@@ -3719,7 +3682,7 @@ class TestRunScriptsFromMetadata(MAASTestCase):
     def test_run_scripts_from_metadata_redownloads_after_commiss(self):
         scripts_dir = self.useFixture(TempDirectory()).path
         self.mock_run_scripts.return_value = 0
-        testing_scripts = make_scripts(with_config=False)
+        testing_scripts = make_scripts()
         testing_scripts[0]["parameters"] = {"storage": {"type": "storage"}}
         mock_download_and_extract_tar = self.patch(
             maas_run_remote_scripts, "download_and_extract_tar"
@@ -3736,19 +3699,17 @@ class TestRunScriptsFromMetadata(MAASTestCase):
         index_json = self.make_index_json(
             scripts_dir, testing_scripts=testing_scripts
         )
-        config = Config()
-        config.update(
-            {
-                "metadata_url": factory.make_url(),
-                "token_secret": factory.make_name("token_secret"),
-            }
-        )
-        run_scripts_from_metadata(config, scripts_dir, None)
+        creds = {"token_secret": factory.make_name("token_secret")}
+
+        # Don't need to give the url or out_dir as we're not running
+        # the scripts and sending the results.
+        run_scripts_from_metadata(None, creds, scripts_dir, None)
 
         self.assertThat(
             self.mock_run_scripts,
             MockAnyCall(
-                config,
+                None,
+                creds,
                 scripts_dir,
                 None,
                 index_json["commissioning_scripts"],
@@ -3756,22 +3717,16 @@ class TestRunScriptsFromMetadata(MAASTestCase):
                 allow_bmc_detection=True,
             ),
         )
-        self.assertThat(
-            self.mock_signal,
-            MockAnyCall(config.metadata_url, config.credentials, "TESTING"),
-        )
+        self.assertThat(self.mock_signal, MockAnyCall(None, creds, "TESTING"))
         self.assertThat(
             mock_download_and_extract_tar,
-            MockCalledOnceWith(
-                f"{config.metadata_url}maas-scripts",
-                config.credentials,
-                scripts_dir,
-            ),
+            MockCalledOnceWith("Nonemaas-scripts", creds, scripts_dir),
         )
         self.assertThat(
             self.mock_run_scripts,
             MockAnyCall(
-                config,
+                None,
+                creds,
                 scripts_dir,
                 None,
                 index_json["testing_scripts"],
@@ -3790,20 +3745,17 @@ class TestRunScriptsFromMetadata(MAASTestCase):
         mock_download_and_extract_tar.side_effect = (
             self.mock_download_and_extract_tar
         )
+        creds = {"token_secret": factory.make_name("token_secret")}
 
-        config = Config()
-        config.update(
-            {
-                "metadata_url": factory.make_url(),
-                "token_secret": factory.make_name("token_secret"),
-            }
-        )
-        run_scripts_from_metadata(config, scripts_dir, None)
+        # Don't need to give the url, out_dir as we're not running
+        # the scripts and sending the results.
+        run_scripts_from_metadata(None, creds, scripts_dir, None)
 
         self.assertThat(
             self.mock_run_scripts,
             MockAnyCall(
-                config,
+                None,
+                creds,
                 scripts_dir,
                 None,
                 index_json["commissioning_scripts"],
@@ -3814,32 +3766,26 @@ class TestRunScriptsFromMetadata(MAASTestCase):
         self.assertThat(
             self.mock_run_scripts,
             MockAnyCall(
-                config,
+                None,
+                creds,
                 scripts_dir,
                 None,
                 index_json["testing_scripts"],
                 True,
             ),
         )
-        self.assertThat(
-            self.mock_signal,
-            MockAnyCall(config.metadata_url, config.credentials, "TESTING"),
-        )
+        self.assertThat(self.mock_signal, MockAnyCall(None, creds, "TESTING"))
         self.assertThat(
             mock_download_and_extract_tar,
-            MockCalledOnceWith(
-                f"{config.metadata_url}maas-scripts",
-                config.credentials,
-                scripts_dir,
-            ),
+            MockCalledOnceWith("Nonemaas-scripts", creds, scripts_dir),
         )
         self.assertThat(
             self.mock_output_and_send,
             MockAnyCall(
                 "%s test scripts failed to run" % fail_count,
                 True,
-                config.metadata_url,
-                config.credentials,
+                None,
+                creds,
                 "FAILED",
             ),
         )
@@ -3923,7 +3869,7 @@ class TestMaasRunRemoteScripts(MAASTestCase):
         written_file_content = open(
             os.path.join(scripts_dir, "test-file"), "rb"
         ).read()
-        self.assertEqual(file_content, written_file_content)
+        self.assertEquals(file_content, written_file_content)
 
     def test_download_and_extract_tar_returns_false_on_no_content(self):
         self.patch(maas_run_remote_scripts.sys.stdout, "write")
@@ -3938,10 +3884,9 @@ class TestMaasRunRemoteScripts(MAASTestCase):
         self.assertFalse(download_and_extract_tar(None, None, scripts_dir))
 
     def test_heartbeat(self):
-        mock_signal = self.patch_autospec(maas_run_remote_scripts, "signal")
+        mock_signal = self.patch(maas_run_remote_scripts, "signal")
         url = factory.make_url()
-        creds = Credentials()
-        creds.update({"token_secret": factory.make_name("token_secret")})
+        creds = {"token_secret": factory.make_name("token_secret")}
         heart_beat = maas_run_remote_scripts.HeartBeat(url, creds)
         start_time = time.time()
         heart_beat.start()
@@ -3950,15 +3895,14 @@ class TestMaasRunRemoteScripts(MAASTestCase):
         self.assertThat(mock_signal, MockCalledOnceWith(url, creds, "WORKING"))
 
     def test_heartbeat_with_long_sleep(self):
-        mock_signal = self.patch_autospec(maas_run_remote_scripts, "signal")
+        mock_signal = self.patch(maas_run_remote_scripts, "signal")
         self.patch(maas_run_remote_scripts.time, "monotonic").side_effect = [
             time.monotonic(),
             time.monotonic(),
             time.monotonic() + 500,
         ]
         url = factory.make_url()
-        creds = Credentials()
-        creds.update({"token_secret": factory.make_name("token_secret")})
+        creds = {"token_secret": factory.make_name("token_secret")}
         heart_beat = maas_run_remote_scripts.HeartBeat(url, creds)
         start_time = time.time()
         heart_beat.start()
@@ -3969,17 +3913,15 @@ class TestMaasRunRemoteScripts(MAASTestCase):
     def test_main_checks_if_registered_during_enlistment(self):
         self.patch(
             maas_run_remote_scripts.argparse.ArgumentParser, "parse_args"
-        ).return_value = argparse.Namespace(
-            ckey=None,
-            tkey=None,
-            csec=None,
-            tsec=None,
-            url="http://example.com",
-            config="http://example.com/config",
-            apiver=maas_run_remote_scripts.MD_VERSION,
         )
         self.patch(maas_run_remote_scripts, "get_mac_addresses_for_enlistment")
-        self.patch(maas_run_remote_scripts.Config, "update_from_url")
+
+        def fake_read_config(config, creds):
+            creds["token_secret"] = None
+
+        self.patch(
+            maas_run_remote_scripts, "read_config"
+        ).side_effect = fake_read_config
         mock_get_maas_machines = self.patch(
             maas_run_remote_scripts, "get_maas_machines"
         )
@@ -3993,9 +3935,9 @@ class TestMaasRunRemoteScripts(MAASTestCase):
         self.patch(
             maas_run_remote_scripts.argparse.ArgumentParser, "parse_args"
         )
-        self.patch(maas_run_remote_scripts, "Config")
+        self.patch(maas_run_remote_scripts, "read_config")
         self.patch(maas_run_remote_scripts, "os")
-        self.patch(maas_run_remote_scripts.Path, "open")
+        self.patch(maas_run_remote_scripts, "open")
         self.patch(
             maas_run_remote_scripts, "download_and_extract_tar"
         ).return_value = True

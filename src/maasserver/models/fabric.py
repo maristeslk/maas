@@ -4,6 +4,7 @@
 """Fabric objects."""
 
 
+import datetime
 from operator import attrgetter
 import re
 
@@ -29,6 +30,10 @@ def validate_fabric_name(value):
         raise ValidationError("Invalid fabric name: %s." % value)
 
 
+# Name of the special, default fabric.  This fabric cannot be deleted.
+DEFAULT_FABRIC_NAME = "fabric-0"
+
+
 class FabricQueriesMixin(MAASQueriesMixin):
     def get_specifiers_q(self, specifiers, separator=":", **kwargs):
         # This dict is used by the constraints code to identify objects
@@ -43,7 +48,7 @@ class FabricQueriesMixin(MAASQueriesMixin):
             specifiers,
             specifier_types=specifier_types,
             separator=separator,
-            **kwargs,
+            **kwargs
         )
 
 
@@ -64,7 +69,11 @@ class FabricManager(Manager, FabricQueriesMixin):
 
     def get_default_fabric(self):
         """Return the default fabric."""
-        fabric, created = self.get_or_create(id=0)
+        now = datetime.datetime.now()
+        fabric, created = self.get_or_create(
+            id=0,
+            defaults={"id": 0, "name": None, "created": now, "updated": now},
+        )
         if created:
             fabric._create_default_vlan()
         return fabric
@@ -78,10 +87,11 @@ class FabricManager(Manager, FabricQueriesMixin):
         from maasserver.models import Subnet
 
         default_fabric = self.get_default_fabric()
-        if not (
+        if (
             Subnet.objects.filter(vlan__fabric=default_fabric)
             .exclude(id=subnet.id)
-            .exists()
+            .count()
+            == 0
         ):
             return default_fabric
         else:
@@ -171,7 +181,10 @@ class Fabric(CleanSave, TimestampedModel):
 
     def get_name(self):
         """Return the name of the fabric."""
-        return self.name or f"fabric-{self.id}"
+        if self.name:
+            return self.name
+        else:
+            return "fabric-%s" % self.id
 
     def delete(self):
         if self.is_default():
@@ -197,7 +210,8 @@ class Fabric(CleanSave, TimestampedModel):
         super().delete()
 
     def _create_default_vlan(self):
-        from maasserver.models.vlan import DEFAULT_VID, DEFAULT_VLAN_NAME, VLAN
+        # Circular imports.
+        from maasserver.models.vlan import VLAN, DEFAULT_VLAN_NAME, DEFAULT_VID
 
         VLAN.objects.create(
             name=DEFAULT_VLAN_NAME, vid=DEFAULT_VID, fabric=self
@@ -208,10 +222,10 @@ class Fabric(CleanSave, TimestampedModel):
         # id. We just need to handle names here for creation.
         created = self.id is None
         super().save(*args, **kwargs)
-        if not self.name:
+        if self.name is None or self.name == "":
             # If we got here, then we have a newly created fabric that needs a
             # default name.
-            self.name = f"fabric-{self.id}"
+            self.name = "fabric-%d" % self.id
             self.save()
         # Create default VLAN if this is a fabric creation.
         if created:
@@ -219,14 +233,14 @@ class Fabric(CleanSave, TimestampedModel):
 
     def clean_name(self):
         reserved = re.compile(r"^fabric-\d+$")
-        if self.name:
+        if self.name is not None and self.name != "":
             if reserved.search(self.name):
-                if self.id is None or self.name != f"fabric-{self.id}":
+                if self.id is None or self.name != "fabric-%d" % self.id:
                     raise ValidationError({"name": ["Reserved fabric name."]})
         elif self.id is not None:
             # Since we are not creating the fabric, force the (null or empty)
             # name to be the default name.
-            self.name = f"fabric-{self.id}"
+            self.name = "fabric-%d" % self.id
 
     def clean(self, *args, **kwargs):
         super().clean(*args, **kwargs)

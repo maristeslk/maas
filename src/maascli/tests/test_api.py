@@ -13,7 +13,14 @@ from textwrap import dedent
 from unittest.mock import Mock, sentinel
 
 import httplib2
-import pytest
+from testtools.matchers import (
+    EndsWith,
+    Equals,
+    IsInstance,
+    MatchesAll,
+    MatchesListwise,
+    Not,
+)
 
 from maascli import api
 from maascli.actions.boot_resources_create import BootResourcesCreateAction
@@ -25,6 +32,7 @@ from maascli.testing.config import make_configs
 from maascli.utils import handler_command_name, safe_name
 from maastesting.factory import factory
 from maastesting.fixtures import CaptureStandardIO
+from maastesting.matchers import MockCalledOnceWith
 from maastesting.testcase import MAASTestCase
 
 
@@ -80,11 +88,14 @@ class TestFunctions(MAASTestCase):
         self.assertEqual(
             content, api.fetch_api_description("http://example.com/api/2.0/")
         )
-        request.assert_called_once_with(
-            "http://example.com/api/2.0/describe/",
-            "GET",
-            body=None,
-            headers=None,
+        self.assertThat(
+            request,
+            MockCalledOnceWith(
+                "http://example.com/api/2.0/describe/",
+                "GET",
+                body=None,
+                headers=None,
+            ),
         )
 
     def test_fetch_api_description_not_okay(self):
@@ -197,7 +208,9 @@ class TestAction(MAASTestCase):
         # sequence is a tuple. Of any size. It does this in the name of
         # avoiding *string* input.
         result = api.Action.name_value_pair("foo=bar")
-        self.assertEqual(result, ("foo", "bar"))
+        self.assertThat(
+            result, MatchesAll(Equals(("foo", "bar")), IsInstance(tuple))
+        )
 
     def test_name_value_pair_demands_two_parts(self):
         self.assertRaises(CommandError, api.Action.name_value_pair, "foo bar")
@@ -213,8 +226,8 @@ class TestAction(MAASTestCase):
         response = {"x-maas-api-hash": example_hash}
         with CaptureStandardIO() as stdio:
             api.Action.compare_api_hashes(profile, response)
-        self.assertEqual(stdio.getOutput(), "")
-        self.assertEqual(stdio.getError(), "")
+        self.assertThat(stdio.getOutput(), Equals(""))
+        self.assertThat(stdio.getError(), Equals(""))
 
     def test_compare_api_hashes_prints_nothing_if_remote_has_no_hash(self):
         example_hash = factory.make_name("hash")
@@ -222,8 +235,8 @@ class TestAction(MAASTestCase):
         response = {}
         with CaptureStandardIO() as stdio:
             api.Action.compare_api_hashes(profile, response)
-        self.assertEqual(stdio.getOutput(), "")
-        self.assertEqual(stdio.getError(), "")
+        self.assertThat(stdio.getOutput(), Equals(""))
+        self.assertThat(stdio.getError(), Equals(""))
 
     def test_compare_api_hashes_prints_warning_if_local_has_no_hash(self):
         example_hash = factory.make_name("hash")
@@ -231,17 +244,19 @@ class TestAction(MAASTestCase):
         response = {"x-maas-api-hash": example_hash}
         with CaptureStandardIO() as stdio:
             api.Action.compare_api_hashes(profile, response)
-        self.assertEqual(stdio.getOutput(), "")
-        self.assertEqual(
+        self.assertThat(stdio.getOutput(), Equals(""))
+        self.assertThat(
             stdio.getError(),
-            dedent(
-                """\
+            Equals(
+                dedent(
+                    """\
         **********************************************************************
         *** WARNING! The API on the server differs from the description that
         *** is cached locally. This may result in failed API calls. Refresh
         *** the local API description with `maas refresh`.
         **********************************************************************
         """
+                )
             ),
         )
 
@@ -251,17 +266,19 @@ class TestAction(MAASTestCase):
         response = {"x-maas-api-hash": example_hash + "bar"}
         with CaptureStandardIO() as stdio:
             api.Action.compare_api_hashes(profile, response)
-        self.assertEqual(stdio.getOutput(), "")
-        self.assertEqual(
+        self.assertThat(stdio.getOutput(), Equals(""))
+        self.assertThat(
             stdio.getError(),
-            dedent(
-                """\
+            Equals(
+                dedent(
+                    """\
         **********************************************************************
         *** WARNING! The API on the server differs from the description that
         *** is cached locally. This may result in failed API calls. Refresh
         *** the local API description with `maas refresh`.
         **********************************************************************
-                """
+        """
+                )
             ),
         )
 
@@ -363,10 +380,9 @@ class TestActionHelp(MAASTestCase):
         arg = factory.make_name("arg", sep="_")
         parser = ArgumentParser()
         parser.add_argument(arg)
-        self.assertFalse(
-            "\n".join(api.ActionHelp.compose_positional_args(parser)).endswith(
-                "\n"
-            )
+        self.assertThat(
+            "\n".join(api.ActionHelp.compose_positional_args(parser)),
+            Not(EndsWith("\n")),
         )
 
     def test_compose_epilog_returns_empty_if_no_epilog(self):
@@ -470,7 +486,7 @@ class TestActionHelp(MAASTestCase):
             self.make_values(),
             self.make_option_string(),
         )
-        sys.exit.assert_called_once_with(0)
+        self.assertThat(sys.exit, MockCalledOnceWith(0))
 
     def test_call_shows_full_enchilada(self):
         usage = factory.make_name("usage")
@@ -535,142 +551,236 @@ class TestActionHelp(MAASTestCase):
             self.make_option_string(),
         )
 
-        api.print.assert_called_once_with(expected_text)
+        self.assertThat(api.print, MockCalledOnceWith(expected_text))
 
 
-class TestPayloadPreparation:
-    @pytest.mark.parametrize(
-        "op,method,data,expected_querystring,expected_body,expected_headers",
-        [
-            # ReSTful operations; i.e. without an "op" parameter.
-            #
-            # Without data, all requests have an empty request body and no
-            # extra headers.
-            (None, "POST", [], "", None, []),
-            (None, "GET", [], "", None, []),
-            (None, "PUT", [], "", None, []),
-            (None, "DELETE", [], "", None, []),
-            # With data, PUT, POST, and DELETE requests have their body and
-            # extra headers prepared by build_multipart_message and
-            # encode_multipart_message. For GET requests, the data is encoded
-            # into the query string, and both the request body and extra
-            # headers are empty.
-            (
-                None,
-                "POST",
-                [("foo", "bar"), ("foo", "baz")],
-                "",
-                sentinel.body,
-                sentinel.headers,
-            ),
-            (
-                None,
-                "GET",
-                [("foo", "bar"), ("foo", "baz")],
-                "?foo=bar&foo=baz",
-                None,
-                [],
-            ),
-            (
-                None,
-                "PUT",
-                [("foo", "bar"), ("foo", "baz")],
-                "",
-                sentinel.body,
-                sentinel.headers,
-            ),
-            (
-                None,
-                "DELETE",
-                [("foo", "bar"), ("foo", "baz")],
-                "?foo=bar&foo=baz",
-                None,
-                [],
-            ),
-            #
-            # non-ReSTful operations; i.e. with an "op" parameter.
-            #
-            # Without data, all requests have an empty request body and no extra
-            # headers. The operation is encoded into the query string.
-            ("something", "POST", [], "?op=something", None, []),
-            ("something", "GET", [], "?op=something", None, []),
-            ("something", "PUT", [], "?op=something", None, []),
-            ("something", "DELETE", [], "?op=something", None, []),
-            # With data, PUT, POST, and DELETE requests have their body and
-            # extra headers prepared by build_multipart_message and
-            # encode_multipart_message. For GET requests, the data is encoded
-            # into the query string, and both the request body and extra
-            # headers are empty. The operation is encoded into the query
-            # string.
-            (
-                "something",
-                "POST",
-                [("foo", "bar"), ("foo", "baz")],
-                "?op=something",
-                sentinel.body,
-                sentinel.headers,
-            ),
-            (
-                "something",
-                "GET",
-                [("foo", "bar"), ("foo", "baz")],
-                "?op=something&foo=bar&foo=baz",
-                None,
-                [],
-            ),
-            (
-                "something",
-                "PUT",
-                [("foo", "bar"), ("foo", "baz")],
-                "?op=something",
-                sentinel.body,
-                sentinel.headers,
-            ),
-            (
-                "something",
-                "DELETE",
-                [("foo", "bar"), ("foo", "baz")],
-                "?op=something&foo=bar&foo=baz",
-                None,
-                [],
-            ),
-        ],
+class TestPayloadPreparation(MAASTestCase):
+    """Tests for `maascli.api.Action.prepare_payload`."""
+
+    uri_base = "http://example.com/MAAS/api/2.0/"
+
+    # Scenarios for ReSTful operations; i.e. without an "op" parameter.
+    scenarios_without_op = (
+        # Without data, all requests have an empty request body and no extra
+        # headers.
+        (
+            "create",
+            {
+                "method": "POST",
+                "data": [],
+                "expected_uri": uri_base,
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
+        (
+            "read",
+            {
+                "method": "GET",
+                "data": [],
+                "expected_uri": uri_base,
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
+        (
+            "update",
+            {
+                "method": "PUT",
+                "data": [],
+                "expected_uri": uri_base,
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
+        (
+            "delete",
+            {
+                "method": "DELETE",
+                "data": [],
+                "expected_uri": uri_base,
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
+        # With data, PUT, POST, and DELETE requests have their body and
+        # extra headers prepared by build_multipart_message and
+        # encode_multipart_message. For GET requests, the data is
+        # encoded into the query string, and both the request body and
+        # extra headers are empty.
+        (
+            "create-with-data",
+            {
+                "method": "POST",
+                "data": [("foo", "bar"), ("foo", "baz")],
+                "expected_uri": uri_base,
+                "expected_body": sentinel.body,
+                "expected_headers": sentinel.headers,
+            },
+        ),
+        (
+            "read-with-data",
+            {
+                "method": "GET",
+                "data": [("foo", "bar"), ("foo", "baz")],
+                "expected_uri": uri_base + "?foo=bar&foo=baz",
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
+        (
+            "update-with-data",
+            {
+                "method": "PUT",
+                "data": [("foo", "bar"), ("foo", "baz")],
+                "expected_uri": uri_base,
+                "expected_body": sentinel.body,
+                "expected_headers": sentinel.headers,
+            },
+        ),
+        (
+            "delete-with-data",
+            {
+                "method": "DELETE",
+                "data": [("foo", "bar"), ("foo", "baz")],
+                "expected_uri": uri_base + "?foo=bar&foo=baz",
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
     )
-    def test_prepare_payload(
-        self,
-        mocker,
-        op,
-        method,
-        data,
-        expected_querystring,
-        expected_body,
-        expected_headers,
-    ):
-        build_multipart_message = mocker.patch.object(
-            api, "build_multipart_message"
-        )
+
+    # Scenarios for non-ReSTful operations; i.e. with an "op" parameter.
+    scenarios_with_op = (
+        # Without data, all requests have an empty request body and no extra
+        # headers. The operation is encoded into the query string.
+        (
+            "create",
+            {
+                "method": "POST",
+                "data": [],
+                "expected_uri": uri_base + "?op=something",
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
+        (
+            "read",
+            {
+                "method": "GET",
+                "data": [],
+                "expected_uri": uri_base + "?op=something",
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
+        (
+            "update",
+            {
+                "method": "PUT",
+                "data": [],
+                "expected_uri": uri_base + "?op=something",
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
+        (
+            "delete",
+            {
+                "method": "DELETE",
+                "data": [],
+                "expected_uri": uri_base + "?op=something",
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
+        # With data, PUT, POST, and DELETE requests have their body and
+        # extra headers prepared by build_multipart_message and
+        # encode_multipart_message. For GET requests, the data is
+        # encoded into the query string, and both the request body and
+        # extra headers are empty. The operation is encoded into the
+        # query string.
+        (
+            "create-with-data",
+            {
+                "method": "POST",
+                "data": [("foo", "bar"), ("foo", "baz")],
+                "expected_uri": uri_base + "?op=something",
+                "expected_body": sentinel.body,
+                "expected_headers": sentinel.headers,
+            },
+        ),
+        (
+            "read-with-data",
+            {
+                "method": "GET",
+                "data": [("foo", "bar"), ("foo", "baz")],
+                "expected_uri": uri_base + "?op=something&foo=bar&foo=baz",
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
+        (
+            "update-with-data",
+            {
+                "method": "PUT",
+                "data": [("foo", "bar"), ("foo", "baz")],
+                "expected_uri": uri_base + "?op=something",
+                "expected_body": sentinel.body,
+                "expected_headers": sentinel.headers,
+            },
+        ),
+        (
+            "delete-with-data",
+            {
+                "method": "DELETE",
+                "data": [("foo", "bar"), ("foo", "baz")],
+                "expected_uri": uri_base + "?op=something&foo=bar&foo=baz",
+                "expected_body": None,
+                "expected_headers": [],
+            },
+        ),
+    )
+
+    scenarios_without_op = tuple(
+        ("%s-without-op" % name, dict(scenario, op=None))
+        for name, scenario in scenarios_without_op
+    )
+
+    scenarios_with_op = tuple(
+        ("%s-with-op" % name, dict(scenario, op="something"))
+        for name, scenario in scenarios_with_op
+    )
+
+    scenarios = scenarios_without_op + scenarios_with_op
+
+    def test_prepare_payload(self):
+        # Patch build_multipart_message and encode_multipart_message to
+        # match the scenarios.
+        build_multipart_message = self.patch(api, "build_multipart_message")
         build_multipart_message.return_value = sentinel.message
-        encode_multipart_message = mocker.patch.object(
-            api, "encode_multipart_message"
-        )
+        encode_multipart_message = self.patch(api, "encode_multipart_message")
         encode_multipart_message.return_value = sentinel.headers, sentinel.body
         # The payload returned is a 3-tuple of (uri, body, headers).
         payload = api.Action.prepare_payload(
-            op=op,
-            method=method,
-            uri="http://example.com/MAAS/api/2.0/",
-            data=data,
+            op=self.op, method=self.method, uri=self.uri_base, data=self.data
         )
-        assert payload == (
-            f"http://example.com/MAAS/api/2.0/{expected_querystring}",
-            expected_body,
-            expected_headers,
+        expected = (
+            Equals(self.expected_uri),
+            Equals(self.expected_body),
+            Equals(self.expected_headers),
         )
+        self.assertThat(payload, MatchesListwise(expected))
         # encode_multipart_message, when called, is passed the data
         # unadulterated.
-        if expected_body is sentinel.body:
-            build_multipart_message.assert_called_once_with(data)
-            encode_multipart_message.assert_called_once_with(sentinel.message)
+        if self.expected_body is sentinel.body:
+            self.assertThat(
+                api.build_multipart_message, MockCalledOnceWith(self.data)
+            )
+            self.assertThat(
+                api.encode_multipart_message,
+                MockCalledOnceWith(sentinel.message),
+            )
 
 
 class TestPayloadPreparationWithFiles(MAASTestCase):

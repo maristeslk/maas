@@ -1,4 +1,4 @@
-# Copyright 2012-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Test maasserver models."""
@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import email
 import json
 import logging
+import os
 import random
 import re
 from textwrap import dedent
@@ -32,6 +33,7 @@ from testtools.matchers import (
     Is,
     IsInstance,
     MatchesAll,
+    MatchesSetwise,
     MatchesStructure,
     Not,
 )
@@ -47,7 +49,6 @@ from maasserver.clusterrpc.driver_parameters import get_driver_types
 from maasserver.clusterrpc.power import (
     power_cycle,
     power_off_node,
-    power_on_node,
     power_query,
 )
 from maasserver.clusterrpc.testing.boot_images import make_rpc_boot_image
@@ -60,6 +61,7 @@ from maasserver.enum import (
     INTERFACE_TYPE,
     IPADDRESS_TYPE,
     IPRANGE_TYPE,
+    NODE_CREATION_TYPE,
     NODE_STATUS,
     NODE_STATUS_CHOICES,
     NODE_STATUS_CHOICES_DICT,
@@ -71,25 +73,24 @@ from maasserver.enum import (
 )
 from maasserver.exceptions import (
     IPAddressCheckFailed,
-    NetworkingResetProblem,
     NodeStateViolation,
+    PodProblem,
     PowerProblem,
     StaticIPAddressExhaustion,
 )
 from maasserver.models import (
-    BMCRoutableRackControllerRelationship,
+    BondInterface,
     BootResource,
     BridgeInterface,
     Config,
     Controller,
     Device,
     Domain,
-    Event,
     EventType,
+    Fabric,
     Interface,
     LicenseKey,
     Machine,
-    Neighbour,
     Node,
 )
 from maasserver.models import (
@@ -99,17 +100,20 @@ from maasserver.models import (
     RAID,
     RegionController,
     RegionRackRPCConnection,
-    ResourcePool,
     Service,
     StaticIPAddress,
     Subnet,
     UnknownInterface,
+    VLAN,
+    VLANInterface,
     VolumeGroup,
 )
-from maasserver.models import Bcache, BMC
+from maasserver.models import Bcache
 from maasserver.models import bmc as bmc_module
 from maasserver.models import node as node_module
+from maasserver.models.bmc import BMC, BMCRoutableRackControllerRelationship
 from maasserver.models.config import NetworkDiscoveryConfig
+from maasserver.models.event import Event
 import maasserver.models.interface as interface_module
 from maasserver.models.node import (
     DEFAULT_BIOS_BOOT_METHOD,
@@ -119,6 +123,7 @@ from maasserver.models.node import (
     PowerInfo,
 )
 from maasserver.models.partitiontable import PARTITION_TABLE_EXTRA_SPACE
+from maasserver.models.resourcepool import ResourcePool
 from maasserver.models.signals import power as node_query
 from maasserver.models.timestampedmodel import now
 from maasserver.node_status import (
@@ -137,11 +142,9 @@ from maasserver.preseed_storage import compose_curtin_storage_config
 from maasserver.rbac import FakeRBACClient, rbac
 from maasserver.rpc.testing.fixtures import MockLiveRegionToClusterRPCFixture
 from maasserver.storage_layouts import (
-    MIN_BOOT_PARTITION_SIZE,
     StorageLayoutError,
     StorageLayoutMissingBootDiskError,
     VMFS6StorageLayout,
-    VMFS7StorageLayout,
 )
 from maasserver.testing.eventloop import (
     RegionEventLoopFixture,
@@ -155,6 +158,7 @@ from maasserver.testing.testcase import (
 from maasserver.tests.test_preseed_network import AssertNetworkConfigMixin
 from maasserver.tests.test_preseed_storage import AssertStorageConfigMixin
 from maasserver.utils.orm import (
+    get_one,
     post_commit,
     post_commit_hooks,
     reload_object,
@@ -178,12 +182,18 @@ from metadataserver.enum import (
     SCRIPT_STATUS_RUNNING_OR_PENDING,
     SCRIPT_TYPE,
 )
-from metadataserver.models import NodeUserData, ScriptResult, ScriptSet
+from metadataserver.models import (
+    NodeKey,
+    NodeUserData,
+    ScriptResult,
+    ScriptSet,
+)
 from provisioningserver.drivers.pod import Capabilities, DiscoveredPodHints
 from provisioningserver.drivers.power.ipmi import IPMI_BOOT_TYPE
 from provisioningserver.drivers.power.registry import PowerDriverRegistry
 from provisioningserver.events import EVENT_DETAILS, EVENT_TYPES
 from provisioningserver.refresh.node_info_scripts import (
+    IPADDR_OUTPUT_NAME,
     LXD_OUTPUT_NAME,
     NODE_INFO_SCRIPTS,
 )
@@ -192,18 +202,21 @@ from provisioningserver.rpc.cluster import (
     DecomposeMachine,
     DisableAndShutoffRackd,
     IsImportBootImagesRunning,
+    RefreshRackControllerInfo,
 )
 from provisioningserver.rpc.exceptions import (
     CannotDisableAndShutoffRackd,
     NoConnectionsAvailable,
     PodActionFail,
     PowerActionFail,
+    RefreshAlreadyInProgress,
     UnknownPowerType,
 )
 from provisioningserver.rpc.testing.doubles import DummyConnection
 from provisioningserver.utils import znums
 from provisioningserver.utils.enum import map_enum, map_enum_reverse
 from provisioningserver.utils.env import get_maas_id
+from provisioningserver.utils.fs import NamedLock
 from provisioningserver.utils.network import inet_ntop
 from provisioningserver.utils.testing import MAASIDFixture
 
@@ -663,7 +676,7 @@ class TestRackControllerManager(MAASServerTestCase):
         ip = random.choice(["127.0.0.1", "::1"])
         mock_getaddr_info.return_value = (("", "", "", "", (ip,)),)
         self.useFixture(MAASIDFixture(rack.system_id))
-        self.assertEqual(
+        self.assertEquals(
             [rack], RackController.objects.filter_by_url_accessible(ip, False)
         )
 
@@ -711,7 +724,7 @@ class TestRackControllerManager(MAASServerTestCase):
         url = factory.pick_ip_in_Subnet(accessible_subnet)
         mock_getaddr_info = self.patch(node_module.socket, "getaddrinfo")
         mock_getaddr_info.return_value = (("", "", "", "", (url,)),)
-        self.assertEqual(
+        self.assertEquals(
             None, RackController.objects.get_accessible_by_url(url, False)
         )
 
@@ -756,7 +769,7 @@ class TestRegionControllerManager(MAASServerTestCase):
         config_uuid = Config.objects.get_config("uuid")
         self.assertThat(region_running, IsInstance(RegionController))
         self.assertThat(region_running, Equals(region))
-        self.assertEqual(created_uuid, config_uuid)
+        self.assertEquals(created_uuid, config_uuid)
 
     def test_get_or_create_uuid_returns_stored_uuid(self):
         region = factory.make_RegionController()
@@ -770,8 +783,8 @@ class TestRegionControllerManager(MAASServerTestCase):
         stored_uuid = RegionController.objects.get_or_create_uuid()
         self.assertThat(region_running, IsInstance(RegionController))
         self.assertThat(region_running, Equals(region))
-        self.assertEqual(stored_uuid, config_uuid)
-        self.assertEqual(created_uuid, stored_uuid)
+        self.assertEquals(stored_uuid, config_uuid)
+        self.assertEquals(created_uuid, stored_uuid)
 
 
 class TestRegionControllerManagerGetOrCreateRunningController(
@@ -917,7 +930,7 @@ class TestRegionControllerManagerGetOrCreateRunningController(
 
     def assertControllerCreated(self, region):
         # A controller is created and it is always a region controller.
-        self.assertEqual(NODE_TYPE.REGION_CONTROLLER, region.node_type)
+        self.assertEquals(NODE_TYPE.REGION_CONTROLLER, region.node_type)
         # It's a fresh controller so the worker user is always owner.
         self.assertThat(region.owner, Equals(get_worker_user()))
 
@@ -942,7 +955,7 @@ class TestRegionControllerManagerGetOrCreateRunningController(
 
     def assertControllerNotDiscovered(self, region, host):
         # A controller is created and it is always a region controller.
-        self.assertEqual(NODE_TYPE.REGION_CONTROLLER, region.node_type)
+        self.assertEquals(NODE_TYPE.REGION_CONTROLLER, region.node_type)
         # It's new; the primary key differs from the host we planted.
         self.assertThat(region.id, Not(Equals(host.id)))
         # It's a fresh controller so the worker user is always owner.
@@ -1164,20 +1177,6 @@ class TestNode(MAASServerTestCase):
             ValidationError, factory.make_Node, hostname=bad_hostname
         )
 
-    def test_instance_name_no_vm(self):
-        node = factory.make_Node()
-        self.assertIsNone(node.instance_name)
-
-    def test_instance_name_virsh_vm(self):
-        node = factory.make_Node()
-        node.instance_power_parameters = {"power_id": "vm"}
-        self.assertEqual(node.instance_name, "vm")
-
-    def test_instance_name_lxd_vm(self):
-        node = factory.make_Node()
-        node.instance_power_parameters = {"instance_name": "vm"}
-        self.assertEqual(node.instance_name, "vm")
-
     def test_default_pool_for_machine(self):
         node = factory.make_Node()
         self.assertEqual(
@@ -1289,6 +1288,13 @@ class TestNode(MAASServerTestCase):
         node = factory.make_Node(memory=2560)
         self.assertEqual(2.5, node.display_memory())
 
+    def test_iscsiblockdevice_set_returns_iscsiblockdevices(self):
+        node = factory.make_Node(with_boot_disk=False)
+        device = factory.make_ISCSIBlockDevice(node=node)
+        factory.make_BlockDevice(node=node)
+        factory.make_ISCSIBlockDevice()
+        self.assertItemsEqual([device], node.iscsiblockdevice_set.all())
+
     def test_physicalblockdevice_set_returns_physicalblockdevices(self):
         node = factory.make_Node(with_boot_disk=False)
         device = factory.make_PhysicalBlockDevice(node=node)
@@ -1296,11 +1302,13 @@ class TestNode(MAASServerTestCase):
         factory.make_PhysicalBlockDevice()
         self.assertItemsEqual([device], node.physicalblockdevice_set.all())
 
-    def test_storage_returns_size_of_physical_blockdevices_in_mb(self):
+    def test_storage_returns_size_of_physical_iscsi_blockdevices_in_mb(self):
         node = factory.make_Node(with_boot_disk=False)
         for _ in range(3):
             factory.make_PhysicalBlockDevice(node=node, size=50 * (1000 ** 2))
-        self.assertEqual(50 * 3, node.storage)
+        for _ in range(3):
+            factory.make_ISCSIBlockDevice(node=node, size=50 * (1000 ** 2))
+        self.assertEqual(50 * 6, node.storage)
 
     def test_display_storage_returns_decimal_less_than_1000(self):
         node = factory.make_Node(with_boot_disk=False)
@@ -1315,26 +1323,17 @@ class TestNode(MAASServerTestCase):
     def test_get_boot_disk_returns_set_boot_disk(self):
         node = factory.make_Node(with_boot_disk=False)
         # First disk.
-        factory.make_PhysicalBlockDevice(node=node, bootable=True)
-        boot_disk = factory.make_PhysicalBlockDevice(node=node, bootable=True)
+        factory.make_PhysicalBlockDevice(node=node)
+        boot_disk = factory.make_PhysicalBlockDevice(node=node)
         node.boot_disk = boot_disk
         node.save()
         self.assertEqual(boot_disk, node.get_boot_disk())
 
     def test_get_boot_disk_returns_first(self):
         node = factory.make_Node(with_boot_disk=False)
-        boot_disk = factory.make_PhysicalBlockDevice(node=node, bootable=True)
+        boot_disk = factory.make_PhysicalBlockDevice(node=node)
         # Second disk.
         factory.make_PhysicalBlockDevice(node=node)
-        factory.make_PhysicalBlockDevice(node=node)
-        self.assertEqual(boot_disk, node.get_boot_disk())
-
-    def test_get_boot_disk_returns_big_enough(self):
-        node = factory.make_Node(with_boot_disk=False)
-        factory.make_PhysicalBlockDevice(
-            node=node, size=MIN_BOOT_PARTITION_SIZE / 2
-        )
-        boot_disk = factory.make_PhysicalBlockDevice(node=node, bootable=True)
         factory.make_PhysicalBlockDevice(node=node)
         self.assertEqual(boot_disk, node.get_boot_disk())
 
@@ -1357,10 +1356,6 @@ class TestNode(MAASServerTestCase):
     def test_get_bios_boot_method_returns_powerkvm(self):
         node = factory.make_Node(bios_boot_method="powerkvm")
         self.assertEqual("powerkvm", node.get_bios_boot_method())
-
-    def test_get_bios_boot_method_returns_s390x_partition(self):
-        node = factory.make_Node(bios_boot_method="s390x_partition")
-        self.assertEqual("s390x_partition", node.get_bios_boot_method())
 
     def test_get_bios_boot_method_ipmi_efi_fallback(self):
         ipmi_efi = factory.make_BMC(
@@ -1477,6 +1472,15 @@ class TestNode(MAASServerTestCase):
         self.assertEqual(1, interfaces)
         interfaces = UnknownInterface.objects.filter(mac_address=mac).count()
         self.assertEqual(0, interfaces)
+
+    def test_is_switch_no(self):
+        node = factory.make_Node()
+        self.assertFalse(node.is_switch())
+
+    def test_is_switch_yes(self):
+        node = factory.make_Node()
+        factory.make_Switch(node=node)
+        self.assertTrue(node.is_switch())
 
     def test_get_metadata_empty(self):
         node = factory.make_Node()
@@ -1616,6 +1620,17 @@ class TestNode(MAASServerTestCase):
         node.delete()
         self.assertIsNotNone(reload_object(pod))
 
+    def test_delete_deletes_existing_virtual_machine(self):
+        pod = factory.make_Pod()
+        machine = factory.make_Machine(
+            bmc=pod, creation_type=NODE_CREATION_TYPE.PRE_EXISTING
+        )
+        vm = factory.make_VirtualMachine(bmc=pod, machine=machine)
+        vm.save()
+        with post_commit_hooks:
+            machine.delete()
+        self.assertIsNone(reload_object(vm))
+
     def test_delete_node_deletes_related_interface(self):
         node = factory.make_Node()
         interface = node.add_physical_interface("AA:BB:CC:DD:EE:FF")
@@ -1718,8 +1733,7 @@ class TestNode(MAASServerTestCase):
     def test_get_effective_power_info_is_False_for_unset_power_type(self):
         node = factory.make_Node(power_type="")
         self.assertEqual(
-            (False, False, False, False, None, None),
-            node.get_effective_power_info(),
+            (False, False, False, None, None), node.get_effective_power_info()
         )
 
     def test_get_effective_power_info_is_True_for_set_power_type(self):
@@ -1728,12 +1742,7 @@ class TestNode(MAASServerTestCase):
         gepp.return_value = sentinel.power_parameters
         self.assertEqual(
             PowerInfo(
-                True,
-                True,
-                False,
-                False,
-                node.power_type,
-                sentinel.power_parameters,
+                True, True, False, node.power_type, sentinel.power_parameters
             ),
             node.get_effective_power_info(),
         )
@@ -1744,7 +1753,7 @@ class TestNode(MAASServerTestCase):
         # For manual the power can never be turned off or on.
         gepp.return_value = {}
         self.assertEqual(
-            (False, False, False, False, "manual", {}),
+            (False, False, False, "manual", {}),
             node.get_effective_power_info(),
         )
 
@@ -1762,7 +1771,6 @@ class TestNode(MAASServerTestCase):
                     False,
                     False,
                     True,
-                    False,
                     node.power_type,
                     sentinel.power_parameters,
                 ),
@@ -1783,7 +1791,6 @@ class TestNode(MAASServerTestCase):
                     power_type != "manual",
                     power_type != "manual",
                     False,
-                    False,
                     power_type,
                     gepp(),
                 ),
@@ -1791,20 +1798,17 @@ class TestNode(MAASServerTestCase):
             )
 
     def test_get_effective_power_info_can_be_queried(self):
-        power_driver = random.choice(
-            [driver for _, driver in PowerDriverRegistry if driver.queryable]
+        power_type = random.choice(
+            [
+                driver.name
+                for _, driver in PowerDriverRegistry
+                if driver.queryable
+            ]
         )
-        node = factory.make_Node(power_type=power_driver.name)
+        node = factory.make_Node(power_type=power_type)
         gepp = self.patch(node, "get_effective_power_parameters")
         self.assertEqual(
-            PowerInfo(
-                True,
-                power_driver.name != "manual",
-                True,
-                power_driver.can_set_boot_order,
-                power_driver.name,
-                gepp(),
-            ),
+            PowerInfo(True, power_type != "manual", True, power_type, gepp()),
             node.get_effective_power_info(),
         )
 
@@ -1818,204 +1822,31 @@ class TestNode(MAASServerTestCase):
                 can_be_started=False,
                 can_be_stopped=False,
                 can_be_queried=False,
-                can_set_boot_order=False,
                 power_type="manual",
                 power_parameters={},
             ),
         )
 
-    def test_get_boot_order_network(self):
-        node = factory.make_Node(with_boot_disk=False, power_type="hmcz")
-        interfaces = [factory.make_Interface(node=node) for _ in range(5)]
-        block_devices = [
-            factory.make_PhysicalBlockDevice(node=node) for _ in range(5)
-        ]
-        node.boot_interface = random.choice(interfaces)
-        node.boot_disk = random.choice(block_devices)
-        node.save()
-
-        expected_boot_order = [node.boot_interface.serialize()]
-        expected_boot_order += [
-            iface.serialize()
-            for iface in interfaces
-            if iface.id != node.boot_interface.id
-        ]
-        expected_boot_order += [node.boot_disk.serialize()]
-        expected_boot_order += [
-            bd.serialize()
-            for bd in block_devices
-            if bd.id != node.boot_disk.id
-        ]
-
-        self.assertEqual(expected_boot_order, node._get_boot_order(True))
-
-    def test_get_boot_order_local(self):
-        node = factory.make_Node(with_boot_disk=False, power_type="hmcz")
-        interfaces = [factory.make_Interface(node=node) for _ in range(5)]
-        block_devices = [
-            factory.make_PhysicalBlockDevice(node=node) for _ in range(5)
-        ]
-        node.boot_interface = random.choice(interfaces)
-        node.boot_disk = random.choice(block_devices)
-        node.save()
-
-        expected_boot_order = [node.boot_disk.serialize()]
-        expected_boot_order += [
-            bd.serialize()
-            for bd in block_devices
-            if bd.id != node.boot_disk.id
-        ]
-        expected_boot_order += [node.boot_interface.serialize()]
-        expected_boot_order += [
-            iface.serialize()
-            for iface in interfaces
-            if iface.id != node.boot_interface.id
-        ]
-
-        self.assertEqual(expected_boot_order, node._get_boot_order(False))
-
-    def test_get_boot_order_network_no_boot_devices_set(self):
-        node = factory.make_Node(with_boot_disk=False, power_type="hmcz")
-        interfaces = [factory.make_Interface(node=node) for _ in range(5)]
-        block_devices = [
-            factory.make_PhysicalBlockDevice(node=node) for _ in range(5)
-        ]
-
-        self.assertEqual(
-            [obj.serialize() for obj in interfaces + block_devices],
-            node._get_boot_order(True),
-        )
-
-    def test_get_boot_order_local_no_boot_devices_set(self):
-        node = factory.make_Node(with_boot_disk=False, power_type="hmcz")
-        interfaces = [factory.make_Interface(node=node) for _ in range(5)]
-        block_devices = [
-            factory.make_PhysicalBlockDevice(node=node) for _ in range(5)
-        ]
-
-        self.assertEqual(
-            [obj.serialize() for obj in block_devices + interfaces],
-            node._get_boot_order(False),
-        )
-
-    def test_get_boot_order_auto_ephemeral(self):
-        node = factory.make_Node(
-            with_boot_disk=False, ephemeral_deploy=True, power_type="hmcz"
-        )
-        interfaces = [factory.make_Interface(node=node) for _ in range(5)]
-        block_devices = [
-            factory.make_PhysicalBlockDevice(node=node) for _ in range(5)
-        ]
-
-        self.assertEqual(
-            [obj.serialize() for obj in interfaces + block_devices],
-            node._get_boot_order(),
-        )
-
-    def test_get_boot_order_auto_exiting_rescue_mode(self):
-        node = factory.make_Node(
-            with_boot_disk=False,
-            power_type="hmcz",
-            status=NODE_STATUS.EXITING_RESCUE_MODE,
-            previous_status=NODE_STATUS.FAILED_COMMISSIONING,
-        )
-        interfaces = [factory.make_Interface(node=node) for _ in range(5)]
-        block_devices = [
-            factory.make_PhysicalBlockDevice(node=node) for _ in range(5)
-        ]
-
-        self.assertEqual(
-            [obj.serialize() for obj in interfaces + block_devices],
-            node._get_boot_order(),
-        )
-
-    def test_get_boot_order_auto_exiting_rescue_mode_deployed(self):
-        node = factory.make_Node(
-            with_boot_disk=False,
-            power_type="hmcz",
-            status=NODE_STATUS.EXITING_RESCUE_MODE,
-            previous_status=NODE_STATUS.DEPLOYED,
-        )
-        interfaces = [factory.make_Interface(node=node) for _ in range(5)]
-        block_devices = [
-            factory.make_PhysicalBlockDevice(node=node) for _ in range(5)
-        ]
-
-        self.assertEqual(
-            [obj.serialize() for obj in block_devices + interfaces],
-            node._get_boot_order(),
-        )
-
-    def test_get_boot_order_auto_deployed(self):
-        node = factory.make_Node(
-            with_boot_disk=False,
-            power_type="hmcz",
-            status=NODE_STATUS.DEPLOYED,
-        )
-        interfaces = [factory.make_Interface(node=node) for _ in range(5)]
-        block_devices = [
-            factory.make_PhysicalBlockDevice(node=node) for _ in range(5)
-        ]
-
-        self.assertEqual(
-            [obj.serialize() for obj in block_devices + interfaces],
-            node._get_boot_order(),
-        )
-
-    def test_get_boot_order_auto_not_deployed(self):
-        node = factory.make_Node(
-            with_boot_disk=False,
-            power_type="hmcz",
-            status=factory.pick_choice(
-                NODE_STATUS_CHOICES, but_not=[NODE_STATUS.DEPLOYED]
-            ),
-        )
-        interfaces = [factory.make_Interface(node=node) for _ in range(5)]
-        block_devices = [
-            factory.make_PhysicalBlockDevice(node=node) for _ in range(5)
-        ]
-
-        self.assertEqual(
-            [obj.serialize() for obj in interfaces + block_devices],
-            node._get_boot_order(),
-        )
-
-    def test_set_boot_order(self):
-        node = factory.make_Node(interface=True, power_type="hmcz")
-        mock_power_control_node = self.patch(node, "_power_control_node")
-        mock_power_control_node.return_value = defer.succeed(None)
-        network_boot = factory.pick_bool()
-
-        node.set_boot_order(network_boot)
-
-        mock_power_control_node.assert_called_with(
-            ANY,
-            None,
-            node.get_effective_power_info(),
-            node._get_boot_order(network_boot),
-        )
-        self.assertTrue(mock_power_control_node.return_value.called)
-
-    def test_set_boot_order_does_nothing_if_unsupported(self):
-        node = factory.make_Node(interface=True, power_type="manual")
-        mock_power_control_node = self.patch(node, "_power_control_node")
-
-        node.set_boot_order(factory.pick_bool())
-
-        mock_power_control_node.assert_not_called()
-
     def test_get_effective_kernel_options_with_nothing_set(self):
         node = factory.make_Node()
-        self.assertEqual(node.get_effective_kernel_options(), "")
+        self.assertEqual((None, None), node.get_effective_kernel_options())
+
+    def test_get_effective_kernel_options_sees_global_config(self):
+        node = factory.make_Node()
+        kernel_opts = factory.make_string()
+        Config.objects.set_config("kernel_opts", kernel_opts)
+        self.assertEqual(
+            (None, kernel_opts), node.get_effective_kernel_options()
+        )
 
     def test_get_effective_kernel_options_not_confused_by_None_opts(self):
         node = factory.make_Node()
         tag = factory.make_Tag()
         node.tags.add(tag)
         kernel_opts = factory.make_string()
+        Config.objects.set_config("kernel_opts", kernel_opts)
         self.assertEqual(
-            node.get_effective_kernel_options(default_kernel_opts=kernel_opts),
-            kernel_opts,
+            (None, kernel_opts), node.get_effective_kernel_options()
         )
 
     def test_get_effective_kernel_options_not_confused_by_empty_str_opts(self):
@@ -2023,44 +1854,69 @@ class TestNode(MAASServerTestCase):
         tag = factory.make_Tag(kernel_opts="")
         node.tags.add(tag)
         kernel_opts = factory.make_string()
+        Config.objects.set_config("kernel_opts", kernel_opts)
         self.assertEqual(
-            node.get_effective_kernel_options(default_kernel_opts=kernel_opts),
-            kernel_opts,
+            (None, kernel_opts), node.get_effective_kernel_options()
         )
 
     def test_get_effective_kernel_options_multiple_tags_with_opts(self):
+        # In this scenario:
+        #     global   kernel_opts='fish-n-chips'
+        #     tag_a    kernel_opts=null
+        #     tag_b    kernel_opts=''
+        #     tag_c    kernel_opts='bacon-n-eggs'
+        # we require that 'bacon-n-eggs' is chosen as it is the first
+        # tag with a valid kernel option.
+        Config.objects.set_config("kernel_opts", "fish-n-chips")
         node = factory.make_Node()
         node.tags.add(factory.make_Tag("tag_a"))
         node.tags.add(factory.make_Tag("tag_b", kernel_opts=""))
         tag_c = factory.make_Tag("tag_c", kernel_opts="bacon-n-eggs")
-        tag_d = factory.make_Tag("tag_d", kernel_opts="foo-bar")
         node.tags.add(tag_c)
-        node.tags.add(tag_d)
+
         self.assertEqual(
-            node.get_effective_kernel_options(), "bacon-n-eggs foo-bar"
+            (tag_c, "bacon-n-eggs"), node.get_effective_kernel_options()
         )
 
     def test_get_effective_kernel_options_ignores_unassociated_tag_value(self):
         node = factory.make_Node()
         factory.make_Tag(kernel_opts=factory.make_string())
-        self.assertEqual(node.get_effective_kernel_options(), "")
+        self.assertEqual((None, None), node.get_effective_kernel_options())
 
     def test_get_effective_kernel_options_uses_tag_value(self):
         node = factory.make_Node()
         tag = factory.make_Tag(kernel_opts=factory.make_string())
         node.tags.add(tag)
-        self.assertEqual(node.get_effective_kernel_options(), tag.kernel_opts)
+        self.assertEqual(
+            (tag, tag.kernel_opts), node.get_effective_kernel_options()
+        )
 
-    def test_get_effective_kernel_options_tag_includes_default(self):
+    def test_get_effective_kernel_options_tag_overrides_global(self):
         node = factory.make_Node()
-        default_opts = factory.make_string()
+        global_opts = factory.make_string()
+        Config.objects.set_config("kernel_opts", global_opts)
         tag = factory.make_Tag(kernel_opts=factory.make_string())
         node.tags.add(tag)
         self.assertEqual(
-            node.get_effective_kernel_options(
-                default_kernel_opts=default_opts
-            ),
-            f"{default_opts} {tag.kernel_opts}",
+            (tag, tag.kernel_opts), node.get_effective_kernel_options()
+        )
+
+    def test_get_effective_kernel_options_uses_first_real_tag_value(self):
+        node = factory.make_Node()
+        # Intentionally create them in reverse order, so the default 'db' order
+        # doesn't work, and we have asserted that we sort them.
+        tag3 = factory.make_Tag(
+            factory.make_name("tag-03-"), kernel_opts=factory.make_string()
+        )
+        tag2 = factory.make_Tag(
+            factory.make_name("tag-02-"), kernel_opts=factory.make_string()
+        )
+        tag1 = factory.make_Tag(factory.make_name("tag-01-"), kernel_opts=None)
+        self.assertTrue(tag1.name < tag2.name)
+        self.assertTrue(tag2.name < tag3.name)
+        node.tags.add(tag1, tag2, tag3)
+        self.assertEqual(
+            (tag2, tag2.kernel_opts), node.get_effective_kernel_options()
         )
 
     def test_acquire(self):
@@ -2745,7 +2601,7 @@ class TestNode(MAASServerTestCase):
         expected_power_info.power_parameters["power_off_mode"] = "hard"
         self.expectThat(
             node._power_control_node,
-            MockCalledOnceWith(d, power_off_node, expected_power_info, []),
+            MockCalledOnceWith(d, power_off_node, expected_power_info),
         )
 
     def test_release_node_that_has_power_on_and_uncontrolled_power_type(self):
@@ -3615,25 +3471,6 @@ class TestNode(MAASServerTestCase):
         self.assertEqual(0, script_result.exit_status)
         self.assertEqual(SCRIPT_STATUS.SKIPPED, script_result.status)
 
-    def test_start_commissioning_skip_bmc_config_s390x(self):
-        script = factory.make_Script(
-            script_type=SCRIPT_TYPE.COMMISSIONING, tags=["bmc-config"]
-        )
-        node = factory.make_Node(architecture="s390x/generic")
-        admin = factory.make_admin()
-        self.patch(Node, "_start").return_value = None
-
-        node.start_commissioning(admin)
-        post_commit_hooks.reset()  # Ignore these for now.
-
-        script_result = (
-            node.current_commissioning_script_set.scriptresult_set.get(
-                script=script
-            )
-        )
-        self.assertEqual(0, script_result.exit_status)
-        self.assertEqual(SCRIPT_STATUS.SKIPPED, script_result.status)
-
     def test_start_commissioning_reverts_to_sane_state_on_error(self):
         # When start_commissioning encounters an error when trying to
         # start the node, it will revert the node to its previous
@@ -3733,8 +3570,8 @@ class TestNode(MAASServerTestCase):
             user=admin,
             commissioning_scripts=[script.name],
         )
-        self.assertEqual(0, ScriptSet.objects.count())
-        self.assertEqual(0, ScriptResult.objects.count())
+        self.assertEquals(0, ScriptSet.objects.count())
+        self.assertEquals(0, ScriptResult.objects.count())
 
     def test_start_commissioning_fails_on_xenial_with_network_testing_t(self):
         Config.objects.set_config("commissioning_distro_series", "xenial")
@@ -3749,8 +3586,8 @@ class TestNode(MAASServerTestCase):
             user=admin,
             testing_scripts=[script.name],
         )
-        self.assertEqual(0, ScriptSet.objects.count())
-        self.assertEqual(0, ScriptResult.objects.count())
+        self.assertEquals(0, ScriptSet.objects.count())
+        self.assertEquals(0, ScriptResult.objects.count())
 
     def test_abort_commissioning_reverts_to_sane_state_on_error(self):
         # If abort commissioning hits an error when trying to stop the
@@ -3993,7 +3830,7 @@ class TestNode(MAASServerTestCase):
         node.start_testing(admin, testing_scripts=[script.name])
         post_commit_hooks.reset()  # Ignore these for now.
         node = reload_object(node)
-        self.assertEqual(NODE_STATUS.TESTING, node.status)
+        self.assertEquals(NODE_STATUS.TESTING, node.status)
         self.assertThat(mock_node_start, MockCalledOnce())
 
     def test_start_testing_changes_status_and_starts_new_node(self):
@@ -4013,7 +3850,7 @@ class TestNode(MAASServerTestCase):
         node.start_testing(admin, testing_scripts=[script.name])
         post_commit_hooks.reset()  # Ignore these for now.
         node = reload_object(node)
-        self.assertEqual(NODE_STATUS.TESTING, node.status)
+        self.assertEquals(NODE_STATUS.TESTING, node.status)
         self.assertThat(mock_node_start, MockCalledOnce())
 
     def test_start_testing_sets_options(self):
@@ -4033,7 +3870,7 @@ class TestNode(MAASServerTestCase):
         )
         post_commit_hooks.reset()  # Ignore these for now.
         node = reload_object(node)
-        self.assertEqual(enable_ssh, node.enable_ssh)
+        self.assertEquals(enable_ssh, node.enable_ssh)
 
     def test_start_testing_sets_user_data(self):
         script = factory.make_Script(script_type=SCRIPT_TYPE.TESTING)
@@ -4228,8 +4065,8 @@ class TestNode(MAASServerTestCase):
             admin,
             testing_scripts=[script.name],
         )
-        self.assertEqual(0, ScriptSet.objects.count())
-        self.assertEqual(0, ScriptResult.objects.count())
+        self.assertEquals(0, ScriptSet.objects.count())
+        self.assertEquals(0, ScriptResult.objects.count())
 
     def test_save_logs_node_status_transition(self):
         self.disable_node_query()
@@ -4357,10 +4194,6 @@ class TestNode(MAASServerTestCase):
         node = factory.make_Node(architecture=full_arch)
         self.assertEqual((main_arch, sub_arch), node.split_arch())
 
-    def test_split_arch_always_2_tuple(self):
-        node = factory.make_Node(architecture="foo/bar/baz")
-        self.assertEqual(node.split_arch(), ("foo", "bar/baz"))
-
     def test_mark_failed_updates_status(self):
         self.disable_node_query()
         nodes_mapping = {
@@ -4424,11 +4257,11 @@ class TestNode(MAASServerTestCase):
         node.mark_failed(script_result_status=script_result_status)
 
         for script_result in updated_script_results:
-            self.assertEqual(
+            self.assertEquals(
                 script_result_status, reload_object(script_result).status
             )
         for script_result in untouched_script_results:
-            self.assertEqual(
+            self.assertEquals(
                 script_result.status, reload_object(script_result).status
             )
 
@@ -4942,6 +4775,10 @@ class TestNode(MAASServerTestCase):
             factory.make_PhysicalBlockDevice(node=node, size=10 * 1000 ** 3)
             for _ in range(3)
         ]
+        iscsi_block_devices = [
+            factory.make_ISCSIBlockDevice(node=node, size=10 * 1000 ** 3)
+            for _ in range(3)
+        ]
         filesystem = factory.make_Filesystem(
             block_device=physical_block_devices[0]
         )
@@ -4949,9 +4786,21 @@ class TestNode(MAASServerTestCase):
             block_device=physical_block_devices[1]
         )
         partition = factory.make_Partition(partition_table=partition_table)
+        iscsi_filesystem = factory.make_Filesystem(
+            block_device=iscsi_block_devices[0]
+        )
+        iscsi_partition_table = factory.make_PartitionTable(
+            block_device=iscsi_block_devices[1]
+        )
+        iscsi_partition = factory.make_Partition(
+            partition_table=iscsi_partition_table
+        )
         fslvm = factory.make_Filesystem(
             block_device=physical_block_devices[2],
             fstype=FILESYSTEM_TYPE.LVM_PV,
+        )
+        iscsi_fslvm = factory.make_Filesystem(
+            block_device=iscsi_block_devices[2], fstype=FILESYSTEM_TYPE.LVM_PV
         )
         vgroup = factory.make_FilesystemGroup(
             group_type=FILESYSTEM_GROUP_TYPE.LVM_VG, filesystems=[fslvm]
@@ -4961,6 +4810,15 @@ class TestNode(MAASServerTestCase):
         )
         vbd2 = factory.make_VirtualBlockDevice(
             filesystem_group=vgroup, size=3 * 1000 ** 3
+        )
+        iscsi_vgroup = factory.make_FilesystemGroup(
+            group_type=FILESYSTEM_GROUP_TYPE.LVM_VG, filesystems=[iscsi_fslvm]
+        )
+        iscsi_vbd1 = factory.make_VirtualBlockDevice(
+            filesystem_group=iscsi_vgroup, size=2 * 1000 ** 3
+        )
+        iscsi_vbd2 = factory.make_VirtualBlockDevice(
+            filesystem_group=iscsi_vgroup, size=3 * 1000 ** 3
         )
         filesystem_on_vbd1 = factory.make_Filesystem(
             block_device=vbd1, fstype=FILESYSTEM_TYPE.LVM_PV
@@ -4972,12 +4830,21 @@ class TestNode(MAASServerTestCase):
         vbd3_on_vbd1 = factory.make_VirtualBlockDevice(
             filesystem_group=vgroup_on_vgroup, size=1 * 1000 ** 3
         )
+        filesystem_on_iscsi_vbd1 = factory.make_Filesystem(
+            block_device=iscsi_vbd1, fstype=FILESYSTEM_TYPE.LVM_PV
+        )
         node._clear_full_storage_configuration()
         for pbd in physical_block_devices:
             self.expectThat(
                 reload_object(pbd),
                 Not(Is(None)),
                 "Physical block device should not have been deleted.",
+            )
+        for ibd in iscsi_block_devices:
+            self.expectThat(
+                reload_object(ibd),
+                Not(Is(None)),
+                "ISCSI block device should not have been deleted.",
             )
         self.expectThat(
             reload_object(filesystem),
@@ -4995,7 +4862,27 @@ class TestNode(MAASServerTestCase):
             "Partition should have been removed.",
         )
         self.expectThat(
+            reload_object(iscsi_filesystem),
+            Is(None),
+            "Filesystem should have been removed.",
+        )
+        self.expectThat(
+            reload_object(iscsi_partition_table),
+            Is(None),
+            "PartitionTable should have been removed.",
+        )
+        self.expectThat(
+            reload_object(iscsi_partition),
+            Is(None),
+            "Partition should have been removed.",
+        )
+        self.expectThat(
             reload_object(fslvm),
+            Is(None),
+            "LVM PV Filesystem should have been removed.",
+        )
+        self.expectThat(
+            reload_object(iscsi_fslvm),
             Is(None),
             "LVM PV Filesystem should have been removed.",
         )
@@ -5015,6 +4902,21 @@ class TestNode(MAASServerTestCase):
             "Virtual block device should have been removed.",
         )
         self.expectThat(
+            reload_object(iscsi_vgroup),
+            Is(None),
+            "Volume group should have been removed.",
+        )
+        self.expectThat(
+            reload_object(iscsi_vbd1),
+            Is(None),
+            "Virtual block device should have been removed.",
+        )
+        self.expectThat(
+            reload_object(iscsi_vbd2),
+            Is(None),
+            "Virtual block device should have been removed.",
+        )
+        self.expectThat(
             reload_object(filesystem_on_vbd1),
             Is(None),
             "Filesystem on virtual block device should have been removed.",
@@ -5029,6 +4931,11 @@ class TestNode(MAASServerTestCase):
             Is(None),
             "Virtual block device on another virtual block device should have "
             "been removed.",
+        )
+        self.expectThat(
+            reload_object(filesystem_on_iscsi_vbd1),
+            Is(None),
+            "Filesystem on virtual block device should have been removed.",
         )
 
     def test_clear_full_storage_configuration_lp1815091(self):
@@ -5279,7 +5186,6 @@ class TestNode(MAASServerTestCase):
                 EVENT_TYPES.REQUEST_NODE_START,
                 type_level=event_details.level,
                 type_description=event_details.description,
-                user=user,
                 event_action=event_action,
                 event_description=event_description,
                 system_id=node.system_id,
@@ -5303,7 +5209,6 @@ class TestNode(MAASServerTestCase):
                 EVENT_TYPES.REQUEST_NODE_START,
                 type_level=event_details.level,
                 type_description=event_details.description,
-                user=None,
                 event_action=event_action,
                 event_description=event_description,
                 system_id=node.system_id,
@@ -5444,7 +5349,7 @@ class TestNode(MAASServerTestCase):
 
     def test_storage_layout_issues_returns_valid_with_boot_and_bcache(self):
         node = factory.make_Node(with_boot_disk=False)
-        boot_partition = factory.make_Partition(node=node, bootable=True)
+        boot_partition = factory.make_Partition(node=node)
         factory.make_Filesystem(partition=boot_partition, mount_point="/boot")
         fs_group = factory.make_FilesystemGroup(
             node=node, group_type=FILESYSTEM_GROUP_TYPE.BCACHE
@@ -5487,9 +5392,7 @@ class TestNode(MAASServerTestCase):
 
     def test_storage_layout_issues_is_invalid_when_root_on_bcache(self):
         node = factory.make_Node(with_boot_disk=False, osystem="ubuntu")
-        factory.make_Partition(
-            node=node, block_device_size=MIN_BOOT_PARTITION_SIZE
-        )
+        factory.make_Partition(node=node)
         fs_group = factory.make_FilesystemGroup(
             node=node, group_type=FILESYSTEM_GROUP_TYPE.BCACHE
         )
@@ -6102,6 +6005,14 @@ class TestDecomposeMachine(MAASServerTestCase, TestDecomposeMachineMixin):
         machine.delete()
         self.assertThat(client, MockNotCalled())
 
+    def test_does_nothing_if_pre_existing_machine(self):
+        client = self.fake_rpc_client()
+        machine = factory.make_Node()
+        machine.bmc = self.make_composable_pod()
+        machine.save()
+        machine.delete()
+        self.assertThat(client, MockNotCalled())
+
 
 class TestDecomposeMachineTransactional(
     MAASTransactionServerTestCase, TestDecomposeMachineMixin
@@ -6126,17 +6037,9 @@ class TestDecomposeMachineTransactional(
         }
         return pod, machine, hints, client
 
-    def test_delete_deletes_virtual_machine(self):
-        pod, machine, hints, client = self.create_pod_machine_and_hints()
-        vm = factory.make_VirtualMachine(bmc=pod, machine=machine)
-        with post_commit_hooks:
-            machine.delete()
-        self.assertIsNone(reload_object(vm))
-        client.assert_called_once()
-
     def test_performs_decompose_machine(self):
         pod, machine, hints, client = self.create_pod_machine_and_hints(
-            interface=True
+            creation_type=NODE_CREATION_TYPE.MANUAL, interface=True
         )
         interface = transactional(machine.interface_set.first)()
         with post_commit_hooks:
@@ -6165,25 +6068,23 @@ class TestDecomposeMachineTransactional(
         interface = transactional(reload_object)(interface)
         self.assertIsNone(interface)
 
-    def test_delete_doesnt_fail_removal(self):
-        mock_log_warning = self.patch(node_module.maaslog, "warning")
-        pod, machine, hints, client = self.create_pod_machine_and_hints()
-        client.return_value = defer.fail(PodActionFail("bang!"))
-        with post_commit_hooks:
-            machine.delete()
-        mock_log_warning.assert_called_with(
-            f"{machine.hostname}: Failure decomposing machine: "
-            "Unable to decompose machine because: bang!"
+    def test_errors_raised_up(self):
+        pod, machine, hints, client = self.create_pod_machine_and_hints(
+            creation_type=NODE_CREATION_TYPE.MANUAL
         )
-        # the machine is still deleted
-        self.assertIsNone(transactional(reload_object)(machine))
+        client.return_value = defer.fail(PodActionFail())
+        with ExpectedException(PodProblem):
+            with post_commit_hooks:
+                machine.delete()
+        machine = transactional(reload_object)(machine)
+        self.assertIsNotNone(machine)
 
     def test_release_deletes_dynamic_machine(self):
         owner = transactional(factory.make_User)()
         pod, machine, hints, client = self.create_pod_machine_and_hints(
             status=NODE_STATUS.ALLOCATED,
             owner=owner,
-            dynamic=True,
+            creation_type=NODE_CREATION_TYPE.DYNAMIC,
             power_state=POWER_STATE.OFF,
             interface=True,
         )
@@ -6215,7 +6116,9 @@ class TestDecomposeMachineTransactional(
         self.assertIsNone(interface)
 
     def test_delete_virtual_machine_for_machine(self):
-        pod, machine, hints, client = self.create_pod_machine_and_hints()
+        pod, machine, hints, client = self.create_pod_machine_and_hints(
+            creation_type=NODE_CREATION_TYPE.MANUAL
+        )
         vm = transactional(factory.make_VirtualMachine)(
             bmc=pod, machine=machine
         )
@@ -7231,41 +7134,6 @@ class TestNodeNetworking(MAASTransactionServerTestCase):
             [parent.id], [nic.id for nic in static_ip.interface_set.all()]
         )
 
-    def test_release_interface_config_removes_acquired_vlan(self):
-        node = factory.make_Node()
-        interface = factory.make_Interface(INTERFACE_TYPE.PHYSICAL, node=node)
-        vlan_if = factory.make_Interface(
-            INTERFACE_TYPE.VLAN, parents=[interface]
-        )
-        vlan_if.acquired = True
-        vlan_if.save()
-        subnet = factory.make_Subnet()
-        static_ip = factory.make_StaticIPAddress(
-            alloc_type=IPADDRESS_TYPE.AUTO,
-            ip=factory.pick_ip_in_Subnet(subnet),
-            subnet=subnet,
-            interface=vlan_if,
-        )
-        node.release_interface_config()
-        self.assertIsNone(reload_object(vlan_if))
-        self.assertIsNone(reload_object(static_ip))
-
-    def test_release_interface_config_removes_acquired_physical(self):
-        node = factory.make_Node()
-        interface = factory.make_Interface(INTERFACE_TYPE.PHYSICAL, node=node)
-        interface.acquired = True
-        interface.save()
-        subnet = factory.make_Subnet()
-        static_ip = factory.make_StaticIPAddress(
-            alloc_type=IPADDRESS_TYPE.AUTO,
-            ip=factory.pick_ip_in_Subnet(subnet),
-            subnet=subnet,
-            interface=interface,
-        )
-        node.release_interface_config()
-        self.assertIsNone(reload_object(interface))
-        self.assertIsNone(reload_object(static_ip))
-
     def test_clear_networking_configuration(self):
         node = factory.make_Node()
         nic0 = factory.make_Interface(INTERFACE_TYPE.PHYSICAL, node=node)
@@ -7492,16 +7360,24 @@ class TestNodeNetworking(MAASTransactionServerTestCase):
 
     def test_restore_commissioned_network_interfaces(self):
         node = factory.make_Node()
+        IP_ADDR_OUTPUT_FILE = os.path.join(
+            os.path.dirname(test_hooks.__file__), "ip_addr_results_xenial.txt"
+        )
+        with open(IP_ADDR_OUTPUT_FILE, "rb") as fd:
+            IP_ADDR_OUTPUT_XENIAL = fd.read()
         lxd_script = factory.make_Script(
             name=LXD_OUTPUT_NAME, script_type=SCRIPT_TYPE.COMMISSIONING
         )
+        ip_addr_script = factory.make_Script(
+            name=IPADDR_OUTPUT_NAME, script_type=SCRIPT_TYPE.COMMISSIONING
+        )
         commissioning_script_set = (
             ScriptSet.objects.create_commissioning_script_set(
-                node, scripts=[lxd_script.name]
+                node, scripts=[lxd_script.name, ip_addr_script.name]
             )
         )
         node.current_commissioning_script_set = commissioning_script_set
-        output = test_hooks.make_lxd_output_json()
+        output = test_hooks.make_lxd_output_json(with_xenial_network=True)
         factory.make_ScriptResult(
             script_set=commissioning_script_set,
             script=lxd_script,
@@ -7509,55 +7385,42 @@ class TestNodeNetworking(MAASTransactionServerTestCase):
             output=output,
             stdout=output,
         )
+        factory.make_ScriptResult(
+            script_set=commissioning_script_set,
+            script=ip_addr_script,
+            exit_status=0,
+            output=IP_ADDR_OUTPUT_XENIAL,
+        )
         # Create NUMA nodes.
         test_hooks.create_numa_nodes(node)
-        # reset network intefaces from commissioning data
+        # restore_network_interfaces() will set up the network intefaces
+        # specified in ip_addr_results_xenial.txt
         node.restore_network_interfaces()
         self.assertEqual(
-            ["eth0", "eth1", "eth2"],
+            ["ens10", "ens11", "ens12", "ens3"],
             sorted(interface.name for interface in node.interface_set.all()),
-        )
-
-    def test_restore_commissioned_network_interfaces_missing_data(self):
-        node = factory.make_Node()
-        lxd_script = factory.make_Script(
-            name=LXD_OUTPUT_NAME, script_type=SCRIPT_TYPE.COMMISSIONING
-        )
-        commissioning_script_set = (
-            ScriptSet.objects.create_commissioning_script_set(
-                node, scripts=[lxd_script.name]
-            )
-        )
-        node.current_commissioning_script_set = commissioning_script_set
-        data = test_hooks.make_lxd_output()
-        # emulate missing networks information in LXD output (<<2.10)
-        del data["networks"]
-        output = json.dumps(data).encode()
-        factory.make_ScriptResult(
-            script_set=commissioning_script_set,
-            script=lxd_script,
-            exit_status=0,
-            output=output,
-            stdout=output,
-        )
-        # Create NUMA nodes.
-        test_hooks.create_numa_nodes(node)
-        self.assertRaises(
-            NetworkingResetProblem, node.restore_network_interfaces
         )
 
     def test_restore_network_interfaces_ignores_stderr(self):
         node = factory.make_Node()
+        IP_ADDR_OUTPUT_FILE = os.path.join(
+            os.path.dirname(test_hooks.__file__), "ip_addr_results_xenial.txt"
+        )
+        with open(IP_ADDR_OUTPUT_FILE, "rb") as fd:
+            IP_ADDR_OUTPUT_XENIAL = fd.read()
         lxd_script = factory.make_Script(
             name=LXD_OUTPUT_NAME, script_type=SCRIPT_TYPE.COMMISSIONING
         )
+        ip_addr_script = factory.make_Script(
+            name=IPADDR_OUTPUT_NAME, script_type=SCRIPT_TYPE.COMMISSIONING
+        )
         commissioning_script_set = (
             ScriptSet.objects.create_commissioning_script_set(
-                node, scripts=[lxd_script.name]
+                node, scripts=[lxd_script.name, ip_addr_script.name]
             )
         )
         node.current_commissioning_script_set = commissioning_script_set
-        output = test_hooks.make_lxd_output_json()
+        output = test_hooks.make_lxd_output_json(with_xenial_network=True)
         error_message = b"some error message"
         factory.make_ScriptResult(
             script_set=commissioning_script_set,
@@ -7567,33 +7430,54 @@ class TestNodeNetworking(MAASTransactionServerTestCase):
             stdout=output,
             stderr=error_message,
         )
+        factory.make_ScriptResult(
+            script_set=commissioning_script_set,
+            script=ip_addr_script,
+            exit_status=0,
+            output=IP_ADDR_OUTPUT_XENIAL,
+        )
         # Create NUMA nodes.
         test_hooks.create_numa_nodes(node)
-        # reset network intefaces from commissioning data
+        # restore_network_interfaces() will set up the network intefaces
+        # specified in ip_addr_results_xenial.txt
         node.restore_network_interfaces()
         self.assertEqual(
-            ["eth0", "eth1", "eth2"],
+            ["ens10", "ens11", "ens12", "ens3"],
             sorted(interface.name for interface in node.interface_set.all()),
         )
 
     def test_restore_network_interfaces_extra(self):
         node = factory.make_Node()
+        IP_ADDR_OUTPUT_FILE = os.path.join(
+            os.path.dirname(test_hooks.__file__), "ip_addr_results_xenial.txt"
+        )
+        with open(IP_ADDR_OUTPUT_FILE, "rb") as fd:
+            IP_ADDR_OUTPUT_XENIAL = fd.read()
         lxd_script = factory.make_Script(
             name=LXD_OUTPUT_NAME, script_type=SCRIPT_TYPE.COMMISSIONING
         )
+        ip_addr_script = factory.make_Script(
+            name=IPADDR_OUTPUT_NAME, script_type=SCRIPT_TYPE.COMMISSIONING
+        )
         commissioning_script_set = (
             ScriptSet.objects.create_commissioning_script_set(
-                node, scripts=[lxd_script.name]
+                node, scripts=[lxd_script.name, ip_addr_script.name]
             )
         )
         node.current_commissioning_script_set = commissioning_script_set
-        output = test_hooks.make_lxd_output_json()
+        output = test_hooks.make_lxd_output_json(with_xenial_network=True)
         factory.make_ScriptResult(
             script_set=commissioning_script_set,
             script=lxd_script,
             exit_status=0,
             output=output,
             stdout=output,
+        )
+        factory.make_ScriptResult(
+            script_set=commissioning_script_set,
+            script=ip_addr_script,
+            exit_status=0,
+            output=IP_ADDR_OUTPUT_XENIAL,
         )
         # Create NUMA nodes.
         test_hooks.create_numa_nodes(node)
@@ -7613,7 +7497,7 @@ class TestNodeNetworking(MAASTransactionServerTestCase):
         factory.make_Interface(INTERFACE_TYPE.PHYSICAL, node=node)
         node.restore_network_interfaces()
         self.assertEqual(
-            ["eth0", "eth1", "eth2"],
+            ["ens10", "ens11", "ens12", "ens3"],
             sorted(interface.name for interface in node.interface_set.all()),
         )
 
@@ -8389,7 +8273,6 @@ class TestNode_Start(MAASTransactionServerTestCase):
         network=None,
         with_boot_disk=True,
         install_kvm=False,
-        register_vmhost=False,
         ephemeral_deploy=False,
     ):
         if network is None:
@@ -8420,7 +8303,6 @@ class TestNode_Start(MAASTransactionServerTestCase):
             osystem=osystem,
             distro_series=distro_series,
             install_kvm=install_kvm,
-            register_vmhost=register_vmhost,
             ephemeral_deploy=ephemeral_deploy,
         )
         node.acquire(user)
@@ -8459,20 +8341,6 @@ class TestNode_Start(MAASTransactionServerTestCase):
             with_boot_disk=False,
             ephemeral_deploy=True,
             install_kvm=True,
-        )
-        with ExpectedException(ValidationError):
-            node.start(admin)
-
-    def test_raises_ValidationError_if_ephemeral_deploy_and_register_vmhost(
-        self,
-    ):
-        admin = factory.make_admin()
-        node = self.make_acquired_node_with_interface(
-            admin,
-            power_type="manual",
-            with_boot_disk=False,
-            ephemeral_deploy=True,
-            register_vmhost=True,
         )
         with ExpectedException(ValidationError):
             node.start(admin)
@@ -8655,7 +8523,7 @@ class TestNode_Start(MAASTransactionServerTestCase):
             user, power_type="manual"
         )
         node.start(user)
-        self.assertEqual(NODE_STATUS.DEPLOYING, node.status)
+        self.assertEquals(NODE_STATUS.DEPLOYING, node.status)
 
     def test_creates_acquired_bridges_for_install_kvm(self):
         user = factory.make_User()
@@ -8675,37 +8543,12 @@ class TestNode_Start(MAASTransactionServerTestCase):
         node = reload_object(node)
         bridge = BridgeInterface.objects.get(node=node)
         interface = node.interface_set.first()
-        self.assertEqual(NODE_STATUS.DEPLOYING, node.status)
-        self.assertEqual(bridge.mac_address, interface.mac_address)
-        self.assertEqual(bridge.params["bridge_type"], bridge_type)
-        self.assertEqual(bridge.params["bridge_stp"], bridge_stp)
-        self.assertEqual(bridge.params["bridge_fd"], bridge_fd)
+        self.assertEquals(NODE_STATUS.DEPLOYING, node.status)
+        self.assertEquals(bridge.mac_address, interface.mac_address)
+        self.assertEquals(bridge.params["bridge_type"], bridge_type)
+        self.assertEquals(bridge.params["bridge_stp"], bridge_stp)
+        self.assertEquals(bridge.params["bridge_fd"], bridge_fd)
         self.assertTrue(node.install_kvm)
-
-    def test_creates_acquired_bridges_for_register_vmhost(self):
-        user = factory.make_User()
-        node = self.make_acquired_node_with_interface(
-            user, power_type="manual"
-        )
-        bridge_type = factory.pick_choice(BRIDGE_TYPE_CHOICES)
-        bridge_stp = factory.pick_bool()
-        bridge_fd = random.randint(0, 500)
-        node.start(
-            user,
-            register_vmhost=True,
-            bridge_type=bridge_type,
-            bridge_stp=bridge_stp,
-            bridge_fd=bridge_fd,
-        )
-        node = reload_object(node)
-        bridge = BridgeInterface.objects.get(node=node)
-        interface = node.interface_set.first()
-        self.assertEqual(NODE_STATUS.DEPLOYING, node.status)
-        self.assertEqual(bridge.mac_address, interface.mac_address)
-        self.assertEqual(bridge.params["bridge_type"], bridge_type)
-        self.assertEqual(bridge.params["bridge_stp"], bridge_stp)
-        self.assertEqual(bridge.params["bridge_fd"], bridge_fd)
-        self.assertTrue(node.register_vmhost)
 
     def test_doesnt_change_broken(self):
         user = factory.make_User()
@@ -8715,7 +8558,7 @@ class TestNode_Start(MAASTransactionServerTestCase):
         node.status = NODE_STATUS.BROKEN
         node.save()
         node.start(user)
-        self.assertEqual(NODE_STATUS.BROKEN, node.status)
+        self.assertEquals(NODE_STATUS.BROKEN, node.status)
 
     def test_claims_auto_ip_addresses(self):
         user = factory.make_User()
@@ -8850,74 +8693,6 @@ class TestNode_Start(MAASTransactionServerTestCase):
         auto_ip = reload_object(auto_ip)
         self.assertThat(auto_ip.ip, Equals(third_ip.ip))
         self.assertThat(auto_ip.temp_expires_on, Is(None))
-
-    def test_claims_auto_ip_addresses_skips_used_ip_discovery_disabled(self):
-        user = factory.make_User()
-        node = self.make_acquired_node_with_interface(
-            user, power_type="manual"
-        )
-        node_interface = node.get_boot_interface()
-        [auto_ip] = node_interface.ip_addresses.filter(
-            alloc_type=IPADDRESS_TYPE.AUTO
-        )
-
-        # Create a rack controller that has an interface on the same subnet
-        # as the node. Don't enable neighbour discovery
-        rack = factory.make_RackController()
-        rack.interface_set.all().delete()
-        rackif = factory.make_Interface(vlan=node_interface.vlan, node=rack)
-        rackif_ip = factory.pick_ip_in_Subnet(auto_ip.subnet)
-        rackif.link_subnet(
-            INTERFACE_LINK_TYPE.STATIC, auto_ip.subnet, rackif_ip
-        )
-
-        # Mock the rack controller connected to the region controller.
-        client = Mock()
-        client.ident = rack.system_id
-        self.patch(node_module, "getAllClients").return_value = [client]
-
-        # Must be executed in a transaction as `allocate_new` uses savepoints.
-        with transaction.atomic():
-            # Get two IPs and remove them so they're unknown
-            ip = StaticIPAddress.objects.allocate_new(
-                subnet=auto_ip.subnet, alloc_type=IPADDRESS_TYPE.AUTO
-            )
-            ip1 = ip.ip
-            ip.delete()
-            ip = StaticIPAddress.objects.allocate_new(
-                subnet=auto_ip.subnet,
-                alloc_type=IPADDRESS_TYPE.AUTO,
-                exclude_addresses=[ip1],
-            )
-            ip2 = ip.ip
-            ip.delete()
-
-        client.side_effect = [
-            defer.succeed(
-                {
-                    "ip_addresses": [
-                        {
-                            "ip_address": ip1,
-                            "used": True,
-                            "mac_address": factory.make_mac_address(),
-                        }
-                    ]
-                }
-            ),
-            defer.succeed(
-                {"ip_addresses": [{"ip_address": ip2, "used": False}]}
-            ),
-        ]
-
-        with post_commit_hooks:
-            node.start(user)
-
-        auto_ip = reload_object(auto_ip)
-        self.assertThat(auto_ip.ip, Equals(ip2))
-        self.assertThat(auto_ip.temp_expires_on, Is(None))
-        self.assertCountEqual(
-            [ip1], Neighbour.objects.values_list("ip", flat=True)
-        )
 
     def test_claims_auto_ip_addresses_retries_on_failure_from_rack(self):
         user = factory.make_User()
@@ -9196,7 +8971,9 @@ class TestNode_Start(MAASTransactionServerTestCase):
         self.assertThat(mock_claim_auto_ips, MockCalledOnce())
 
         # Calls _power_control_node when power_cycle.
-        mock_power_control.assert_called_once_with(ANY, power_cycle, ANY, [])
+        self.assertThat(
+            mock_power_control, MockCalledOnceWith(ANY, power_cycle, ANY)
+        )
 
     def test_claims_auto_ips_when_script_needs_it(self):
         user = factory.make_User()
@@ -9276,26 +9053,6 @@ class TestNode_Start(MAASTransactionServerTestCase):
 
         self.assertThat(mock_claim_auto_ips, MockNotCalled())
 
-    def test_includes_boot_order_when_supported_by_power_driver(self):
-        user = factory.make_User()
-        on = factory.pick_bool()
-        node = self.make_acquired_node_with_interface(
-            user,
-            power_type="hmcz",
-            power_state=POWER_STATE.ON if on else POWER_STATE.OFF,
-        )
-        self.patch(Node, "_claim_auto_ips")
-        mock_power_control = self.patch(Node, "_power_control_node")
-
-        node.start(user)
-
-        mock_power_control.assert_called_once_with(
-            ANY,
-            power_cycle if on else power_on_node,
-            node.get_effective_power_info(),
-            node._get_boot_order(True),
-        )
-
     def test_manual_power_type_doesnt_call__power_control_node(self):
         user = factory.make_User()
         node = self.make_acquired_node_with_interface(
@@ -9359,7 +9116,9 @@ class TestNode_Start(MAASTransactionServerTestCase):
         node.start(user)
 
         # Calls _power_control_node when power_cycle.
-        mock_power_control.assert_called_once_with(ANY, power_cycle, ANY, [])
+        self.assertThat(
+            mock_power_control, MockCalledOnceWith(ANY, power_cycle, ANY)
+        )
 
     def test_aborts_all_scripts_and_logs(self):
         user = factory.make_User()
@@ -9377,14 +9136,14 @@ class TestNode_Start(MAASTransactionServerTestCase):
             name=EVENT_TYPES.NODE_POWER_QUERY_FAILED
         )
         event = node.event_set.get(type=event_type)
-        self.assertEqual(
+        self.assertEquals(
             "(%s) - Aborting NEW and reverting to NEW. Unable to power "
             "control the node. Please check power credentials." % user,
             event.description,
         )
 
         for script_result in script_results:
-            self.assertEqual(
+            self.assertEquals(
                 SCRIPT_STATUS.ABORTED, reload_object(script_result).status
             )
 
@@ -9412,8 +9171,7 @@ class TestNode_Start(MAASTransactionServerTestCase):
             osystem="esxi", distro_series="6.7", with_boot_disk=False
         )
         factory.make_PhysicalBlockDevice(node=node, size=(100 * 1024 ** 3))
-        layout_class = random.choice([VMFS6StorageLayout, VMFS7StorageLayout])
-        layout = layout_class(node)
+        layout = VMFS6StorageLayout(node)
         layout.configure()
         self.assertItemsEqual([], node.storage_layout_issues())
 
@@ -9422,8 +9180,7 @@ class TestNode_Start(MAASTransactionServerTestCase):
             osystem="esxi", distro_series="6.7", with_boot_disk=False
         )
         factory.make_PhysicalBlockDevice(node=node, size=(100 * 1024 ** 3))
-        layout_class = random.choice([VMFS6StorageLayout, VMFS7StorageLayout])
-        layout = layout_class(node)
+        layout = VMFS6StorageLayout(node)
         layout.configure()
         node.virtualblockdevice_set.delete()
         self.assertEqual(
@@ -9437,8 +9194,7 @@ class TestNode_Start(MAASTransactionServerTestCase):
             with_boot_disk=False,
         )
         factory.make_PhysicalBlockDevice(node=node, size=(100 * 1024 ** 3))
-        layout_class = random.choice([VMFS6StorageLayout, VMFS7StorageLayout])
-        layout = layout_class(node)
+        layout = VMFS6StorageLayout(node)
         layout.configure()
         self.assertItemsEqual(
             [
@@ -9464,7 +9220,7 @@ class TestGetBMCClientConnectionInfo(MAASServerTestCase):
         fallback.system_id = fake_fallback_id
         mock_fallbacks.return_value = [fallback]
 
-        self.assertEqual(
+        self.assertEquals(
             ([fake_bmc_id], [fake_fallback_id]),
             node._get_bmc_client_connection_info(),
         )
@@ -9477,7 +9233,7 @@ class TestGetBMCClientConnectionInfo(MAASServerTestCase):
             name=EVENT_TYPES.NODE_POWER_QUERY_FAILED
         )
         event = node.event_set.get(type=event_type)
-        self.assertEqual(
+        self.assertEquals(
             (
                 "No rack controllers can access the BMC of node %s"
                 % node.hostname
@@ -9553,7 +9309,7 @@ class TestNode_Stop(MAASServerTestCase):
         expected_power_info.power_parameters["power_off_mode"] = stop_mode
         self.assertThat(
             mock_power_control,
-            MockCalledOnceWith(d, power_off_node, expected_power_info, []),
+            MockCalledOnceWith(d, power_off_node, expected_power_info),
         )
 
     def test_stop_allows_no_user(self):
@@ -9567,7 +9323,7 @@ class TestNode_Stop(MAASServerTestCase):
         expected_power_info.power_parameters["power_off_mode"] = stop_mode
         self.assertThat(
             mock_power_control,
-            MockCalledOnceWith(d, power_off_node, expected_power_info, []),
+            MockCalledOnceWith(d, power_off_node, expected_power_info),
         )
 
 
@@ -9686,19 +9442,9 @@ class TestNode_PowerCycle(MAASServerTestCase):
         mock_power_control = self.patch_autospec(node, "_power_control_node")
         node._power_cycle()
         expected_power_info = node.get_effective_power_info()
-        mock_power_control.assert_called_once_with(
-            d, power_cycle, expected_power_info, []
-        )
-
-    def test_calls__power_control_node_with_power_cycle_and_boot_order(self):
-        d = self.patch_post_commit()
-        admin = factory.make_admin()
-        node = self.make_acquired_node_with_interface(admin, power_type="hmcz")
-        mock_power_control = self.patch_autospec(node, "_power_control_node")
-        node._power_cycle()
-        expected_power_info = node.get_effective_power_info()
-        mock_power_control.assert_called_once_with(
-            d, power_cycle, expected_power_info, node._get_boot_order(True)
+        self.assertThat(
+            mock_power_control,
+            MockCalledOnceWith(d, power_cycle, expected_power_info),
         )
 
 
@@ -10083,112 +9829,6 @@ class TestNode_PostCommit_PowerControl(MAASTransactionServerTestCase):
             none_routable_racks,
         )
 
-    @wait_for_reactor
-    @defer.inlineCallbacks
-    def test_sets_boot_order_if_given(self):
-        d = self.patch_post_commit()
-        rack_controller = yield deferToDatabase(self.make_rack_controller)
-        node, power_info = yield deferToDatabase(
-            self.make_node,
-            layer2_rack=rack_controller,
-        )
-        boot_order = yield deferToDatabase(node._get_boot_order)
-
-        client = Mock()
-        client.ident = rack_controller.system_id
-        mock_getClientFromIdentifiers = self.patch(
-            node_module, "getClientFromIdentifiers"
-        )
-        mock_getClientFromIdentifiers.return_value = defer.succeed(client)
-
-        # Add the client to getAllClients in so that its considered a to be a
-        # valid connection.
-        self.patch(node_module, "getAllClients").return_value = [client]
-
-        # Mock the confirm power driver check, we check in the test to make
-        # sure it gets called.
-        mock_confirm_power_driver = self.patch(
-            Node, "confirm_power_driver_operable"
-        )
-        mock_confirm_power_driver.return_value = defer.succeed(None)
-
-        mock_set_boot_order = self.patch(node_module, "set_boot_order")
-        mock_set_boot_order.return_value = defer.succeed(client)
-
-        # Testing only allows one thread at a time, but the way we are testing
-        # this would actually require multiple to be started at once. To
-        # by-pass this issue we mock `is_accessible` on the BMC model to return
-        # the value we are expecting.
-        self.patch(node.bmc, "is_accessible").return_value = True
-
-        mock_power_method = Mock()
-        yield node._power_control_node(
-            d, mock_power_method, power_info, boot_order
-        )
-
-        mock_getClientFromIdentifiers.assert_called_with(
-            [rack_controller.system_id]
-        )
-        mock_confirm_power_driver.assert_called_with(
-            client, power_info.power_type, client.ident
-        )
-        mock_set_boot_order.assert_called_with(
-            client, node.system_id, node.hostname, power_info, boot_order
-        )
-        mock_power_method.assert_called_with(
-            client, node.system_id, node.hostname, power_info
-        )
-
-    @wait_for_reactor
-    @defer.inlineCallbacks
-    def test_sets_boot_order_if_given_with_no_power_method(self):
-        d = self.patch_post_commit()
-        rack_controller = yield deferToDatabase(self.make_rack_controller)
-        node, power_info = yield deferToDatabase(
-            self.make_node,
-            layer2_rack=rack_controller,
-        )
-        boot_order = yield deferToDatabase(node._get_boot_order)
-
-        client = Mock()
-        client.ident = rack_controller.system_id
-        mock_getClientFromIdentifiers = self.patch(
-            node_module, "getClientFromIdentifiers"
-        )
-        mock_getClientFromIdentifiers.return_value = defer.succeed(client)
-
-        # Add the client to getAllClients in so that its considered a to be a
-        # valid connection.
-        self.patch(node_module, "getAllClients").return_value = [client]
-
-        # Mock the confirm power driver check, we check in the test to make
-        # sure it gets called.
-        mock_confirm_power_driver = self.patch(
-            Node, "confirm_power_driver_operable"
-        )
-        mock_confirm_power_driver.return_value = defer.succeed(None)
-
-        mock_set_boot_order = self.patch(node_module, "set_boot_order")
-        mock_set_boot_order.return_value = defer.succeed(client)
-
-        # Testing only allows one thread at a time, but the way we are testing
-        # this would actually require multiple to be started at once. To
-        # by-pass this issue we mock `is_accessible` on the BMC model to return
-        # the value we are expecting.
-        self.patch(node.bmc, "is_accessible").return_value = True
-
-        yield node._power_control_node(d, None, power_info, boot_order)
-
-        mock_getClientFromIdentifiers.assert_called_with(
-            [rack_controller.system_id]
-        )
-        mock_confirm_power_driver.assert_called_with(
-            client, power_info.power_type, client.ident
-        )
-        mock_set_boot_order.assert_called_with(
-            client, node.system_id, node.hostname, power_info, boot_order
-        )
-
 
 class TestNode_Delete_With_Transactional_Events(MAASTransactionServerTestCase):
     """
@@ -10247,78 +9887,48 @@ class TestController(MAASServerTestCase):
 class TestControllerUpdateDiscoveryState(MAASServerTestCase):
     def test_calls_update_discovery_state_per_interface(self):
         controller = factory.make_RegionRackController()
-        eth1 = factory.make_Interface(
-            node=controller,
-            neighbour_discovery_state=False,
-            mdns_discovery_state=False,
+        eth1 = factory.make_Interface(node=controller)
+        factory.make_Interface(
+            iftype=INTERFACE_TYPE.VLAN, node=controller, parents=[eth1]
         )
-        eth1_vlan = factory.make_Interface(
-            iftype=INTERFACE_TYPE.VLAN,
-            node=controller,
-            parents=[eth1],
-            neighbour_discovery_state=False,
-            mdns_discovery_state=False,
-        )
+        enable_passive = random.choice([True, False])
+        enable_active = random.choice([True, False])
         discovery_config = NetworkDiscoveryConfig(
-            passive=True, active=random.choice([True, False])
+            passive=enable_passive, active=enable_active
         )
-        controller.update_discovery_state(discovery_config)
-        eth1 = reload_object(eth1)
-        eth1_vlan = reload_object(eth1_vlan)
-        self.assertTrue(eth1.neighbour_discovery_state)
-        self.assertFalse(eth1_vlan.neighbour_discovery_state)
-        self.assertTrue(eth1.mdns_discovery_state)
-        self.assertTrue(eth1_vlan.mdns_discovery_state)
+        mock_update_discovery_state = self.patch(
+            interface_module.Interface, "update_discovery_state"
+        )
+        interfaces = controller.update_discovery_state(discovery_config)
+        self.expectThat(
+            mock_update_discovery_state,
+            MockCallsMatch(
+                *[
+                    call(discovery_config, interfaces[ifname])
+                    for ifname in interfaces.keys()
+                ]
+            ),
+        )
 
 
 class TestReportNeighbours(MAASServerTestCase):
     """Tests for `Controller.report_neighbours()."""
 
-    def test_no_update_neighbours_calls_if_discovery_disabled(self):
-        rack = factory.make_RackController()
-        factory.make_Interface(name="eth0", node=rack)
-        update_neighbour = self.patch(
-            interface_module.Interface, "update_neighbour"
-        )
-        neighbours = [
-            {
-                "interface": "eth0",
-                "mac": factory.make_mac_address(),
-                "ip": factory.make_ipv4_address(),
-                "time": datetime.now(),
-            },
-        ]
-        rack.report_neighbours(neighbours)
-        update_neighbour.assert_not_called()
-
     def test_calls_update_neighbour_for_each_neighbour(self):
         rack = factory.make_RackController()
-        if1 = factory.make_Interface(name="eth0", node=rack)
-        if1.neighbour_discovery_state = True
-        if1.save()
-        if2 = factory.make_Interface(name="eth1", node=rack)
-        if2.neighbour_discovery_state = True
-        if2.save()
+        factory.make_Interface(name="eth0", node=rack)
+        factory.make_Interface(name="eth1", node=rack)
         update_neighbour = self.patch(
             interface_module.Interface, "update_neighbour"
         )
         neighbours = [
-            {
-                "interface": "eth0",
-                "mac": factory.make_mac_address(),
-                "ip": factory.make_ipv4_address(),
-                "time": datetime.now(),
-            },
-            {
-                "interface": "eth1",
-                "mac": factory.make_mac_address(),
-                "ip": factory.make_ipv4_address(),
-                "time": datetime.now(),
-            },
+            {"interface": "eth0", "mac": factory.make_mac_address()},
+            {"interface": "eth1", "mac": factory.make_mac_address()},
         ]
         rack.report_neighbours(neighbours)
-        update_neighbour.assert_has_calls(
-            [call(n["ip"], n["mac"], n["time"], vid=None) for n in neighbours]
+        self.assertThat(
+            update_neighbour,
+            MockCallsMatch(*[call(neighbour) for neighbour in neighbours]),
         )
 
     def test_calls_report_vid_for_each_vid(self):
@@ -10329,23 +9939,11 @@ class TestReportNeighbours(MAASServerTestCase):
         self.patch(interface_module.Interface, "update_neighbour")
         report_vid = self.patch(interface_module.Interface, "report_vid")
         neighbours = [
-            {
-                "interface": "eth0",
-                "ip": factory.make_ipv4_address(),
-                "time": datetime.now(),
-                "mac": factory.make_mac_address(),
-                "vid": 3,
-            },
-            {
-                "interface": "eth1",
-                "ip": factory.make_ipv4_address(),
-                "time": datetime.now(),
-                "mac": factory.make_mac_address(),
-                "vid": 7,
-            },
+            {"interface": "eth0", "mac": factory.make_mac_address(), "vid": 3},
+            {"interface": "eth1", "mac": factory.make_mac_address(), "vid": 7},
         ]
         rack.report_neighbours(neighbours)
-        report_vid.assert_has_calls([call(3), call(7)])
+        self.assertThat(report_vid, MockCallsMatch(call(3), call(7)))
 
 
 class TestReportMDNSEntries(MAASServerTestCase):
@@ -10369,6 +9967,3489 @@ class TestReportMDNSEntries(MAASServerTestCase):
         )
 
 
+class UpdateInterfacesMixin:
+
+    scenarios = (
+        (
+            "rack",
+            dict(
+                node_type=NODE_TYPE.RACK_CONTROLLER,
+                with_beaconing=False,
+                passes=1,
+            ),
+        ),
+        (
+            "region",
+            dict(
+                node_type=NODE_TYPE.REGION_CONTROLLER,
+                with_beaconing=False,
+                passes=2,
+            ),
+        ),
+        (
+            "region+rack",
+            dict(
+                node_type=NODE_TYPE.REGION_AND_RACK_CONTROLLER,
+                with_beaconing=False,
+                passes=1,
+            ),
+        ),
+        (
+            "rack_with_beaconing",
+            dict(
+                node_type=NODE_TYPE.RACK_CONTROLLER,
+                with_beaconing=True,
+                passes=2,
+            ),
+        ),
+        (
+            "region_with_beaconing",
+            dict(
+                node_type=NODE_TYPE.REGION_CONTROLLER,
+                with_beaconing=True,
+                passes=1,
+            ),
+        ),
+        (
+            "region+rack_with_beaconing",
+            dict(
+                node_type=NODE_TYPE.REGION_AND_RACK_CONTROLLER,
+                with_beaconing=True,
+                passes=2,
+            ),
+        ),
+    )
+
+    def create_empty_controller(self, **kwargs):
+        return factory.make_Node(node_type=self.node_type, **kwargs).as_self()
+
+    def update_interfaces(self, controller, interfaces, topology_hints=None):
+        for _ in range(self.passes):
+            if not self.with_beaconing:
+                controller.update_interfaces(interfaces)
+            else:
+                controller.update_interfaces(
+                    interfaces, topology_hints=None, create_fabrics=False
+                )
+                controller.update_interfaces(
+                    interfaces,
+                    topology_hints=topology_hints,
+                    create_fabrics=True,
+                )
+
+
+class TestUpdateInterfaces(MAASServerTestCase, UpdateInterfacesMixin):
+
+    scenarios = UpdateInterfacesMixin.scenarios
+
+    def test_order_of_calls_to_update_interface_is_always_the_same(self):
+        controller = self.create_empty_controller()
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "bond0": {
+                "type": "bond",
+                "mac_address": factory.make_mac_address(),
+                "parents": ["eth1", "eth0"],
+                "links": [],
+                "enabled": True,
+            },
+            "bond0.10": {
+                "type": "vlan",
+                "vid": 10,
+                "parents": ["bond0"],
+                "links": [],
+                "enabled": True,
+            },
+            "eth2": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+        }
+        if not self.with_beaconing:
+            expected_call_order = [
+                call(
+                    "eth0", interfaces["eth0"], create_fabrics=True, hints=None
+                ),
+                call(
+                    "eth1", interfaces["eth1"], create_fabrics=True, hints=None
+                ),
+                call(
+                    "eth2", interfaces["eth2"], create_fabrics=True, hints=None
+                ),
+                call(
+                    "bond0",
+                    interfaces["bond0"],
+                    create_fabrics=True,
+                    hints=None,
+                ),
+                call(
+                    "bond0.10",
+                    interfaces["bond0.10"],
+                    create_fabrics=True,
+                    hints=None,
+                ),
+            ] * self.passes
+        else:
+            expected_call_order = [
+                call(
+                    "eth0",
+                    interfaces["eth0"],
+                    create_fabrics=False,
+                    hints=None,
+                ),
+                call(
+                    "eth1",
+                    interfaces["eth1"],
+                    create_fabrics=False,
+                    hints=None,
+                ),
+                call(
+                    "eth2",
+                    interfaces["eth2"],
+                    create_fabrics=False,
+                    hints=None,
+                ),
+                call(
+                    "bond0",
+                    interfaces["bond0"],
+                    create_fabrics=False,
+                    hints=None,
+                ),
+                call(
+                    "bond0.10",
+                    interfaces["bond0.10"],
+                    create_fabrics=False,
+                    hints=None,
+                ),
+                call(
+                    "eth0", interfaces["eth0"], create_fabrics=True, hints=None
+                ),
+                call(
+                    "eth1", interfaces["eth1"], create_fabrics=True, hints=None
+                ),
+                call(
+                    "eth2", interfaces["eth2"], create_fabrics=True, hints=None
+                ),
+                call(
+                    "bond0",
+                    interfaces["bond0"],
+                    create_fabrics=True,
+                    hints=None,
+                ),
+                call(
+                    "bond0.10",
+                    interfaces["bond0.10"],
+                    create_fabrics=True,
+                    hints=None,
+                ),
+            ] * self.passes
+        # Perform multiple times to make sure the call order is always
+        # the same.
+        for _ in range(5):
+            mock_update_interface = self.patch(controller, "_update_interface")
+            self.update_interfaces(controller, interfaces)
+            self.assertThat(
+                mock_update_interface, MockCallsMatch(*expected_call_order)
+            )
+
+    def test_all_new_physical_interfaces_no_links(self):
+        controller = self.create_empty_controller()
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": False,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+            ),
+        )
+        self.assertThat(list(eth0.parents.all()), Equals([]))
+        eth1 = Interface.objects.get(name="eth1", node=controller)
+        self.assertThat(
+            eth1,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth1",
+                mac_address=interfaces["eth1"]["mac_address"],
+                enabled=False,
+            ),
+        )
+        self.assertThat(list(eth1.parents.all()), Equals([]))
+        # Since order is not kept in dictionary and it doesn't matter in this
+        # case, we check that at least two different VLANs and one is the
+        # default from the default fabric.
+        observed_vlans = {eth0.vlan, eth1.vlan}
+        self.assertThat(observed_vlans, HasLength(2))
+        self.assertThat(
+            observed_vlans,
+            Contains(Fabric.objects.get_default_fabric().get_default_vlan()),
+        )
+
+    def test_vlans_with_alternate_naming_conventions(self):
+        controller = self.create_empty_controller()
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "vlan0100": {
+                "type": "vlan",
+                "vid": 100,
+                "mac_address": factory.make_mac_address(),
+                "parents": ["eth0"],
+                "links": [{"address": "192.168.0.1/24", "mode": "static"}],
+                "enabled": True,
+            },
+            "vlan101": {
+                "type": "vlan",
+                "vid": 101,
+                "mac_address": factory.make_mac_address(),
+                "parents": ["eth0"],
+                "links": [{"address": "192.168.0.2/24", "mode": "static"}],
+                "enabled": True,
+            },
+            "eth0.0102": {
+                "type": "vlan",
+                "vid": 102,
+                "mac_address": factory.make_mac_address(),
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+        }
+        # Do this twice so we make sure we can both create and update.
+        # And duplicate the code so it's easy to tell from a traceback which
+        # failed.
+        self._test_vlans_with_alternate_naming_conventions(
+            controller, interfaces
+        )
+        self._test_vlans_with_alternate_naming_conventions(
+            controller, interfaces
+        )
+
+    def _test_vlans_with_alternate_naming_conventions(
+        self, controller, interfaces
+    ):
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                # Note: we expect the VLAN MAC to be ignored; VLAN interfaces
+                # always inherit the parent MAC address.
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+            ),
+        )
+        self.assertThat(list(eth0.parents.all()), Equals([]))
+        vlan0100 = Interface.objects.get(name="vlan0100", node=controller)
+        self.assertThat(
+            vlan0100,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="vlan0100",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+            ),
+        )
+        self.assertThat(list(vlan0100.parents.all()), Equals([eth0]))
+        vlan101 = Interface.objects.get(name="vlan101", node=controller)
+        self.assertThat(
+            vlan101,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="vlan101",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+            ),
+        )
+        self.assertThat(list(vlan101.parents.all()), Equals([eth0]))
+        eth0_0102 = Interface.objects.get(name="eth0.0102", node=controller)
+        self.assertThat(
+            eth0_0102,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.0102",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+            ),
+        )
+        self.assertThat(list(eth0_0102.parents.all()), Equals([eth0]))
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                # Note: we expect the VLAN MAC to be ignored; VLAN interfaces
+                # always inherit the parent MAC address.
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+            ),
+        )
+        self.assertThat(list(eth0.parents.all()), Equals([]))
+        vlan0100 = Interface.objects.get(name="vlan0100", node=controller)
+        self.assertThat(
+            vlan0100,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="vlan0100",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+            ),
+        )
+        self.assertThat(list(vlan0100.parents.all()), Equals([eth0]))
+        vlan101 = Interface.objects.get(name="vlan101", node=controller)
+        self.assertThat(
+            vlan101,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="vlan101",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+            ),
+        )
+        self.assertThat(list(vlan101.parents.all()), Equals([eth0]))
+        eth0_0102 = Interface.objects.get(name="eth0.0102", node=controller)
+        self.assertThat(
+            eth0_0102,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.0102",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+            ),
+        )
+        self.assertThat(list(eth0_0102.parents.all()), Equals([eth0]))
+
+    def test_sets_discovery_parameters(self):
+        controller = self.create_empty_controller()
+        eth0_mac = factory.make_mac_address()
+        bond_mac = factory.make_mac_address()
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0_mac,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+                "monitored": True,
+            },
+            "eth0.100": {
+                "type": "vlan",
+                "mac_address": eth0_mac,
+                "parents": ["eth0"],
+                "vid": 100,
+                "links": [],
+                "enabled": True,
+                "monitored": False,
+            },
+            "bond0": {
+                "type": "bond",
+                "mac_address": bond_mac,
+                "parents": [],
+                "links": [],
+                "enabled": False,
+                "monitored": False,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+                neighbour_discovery_state=True,
+                mdns_discovery_state=True,
+            ),
+        )
+        self.assertThat(list(eth0.parents.all()), Equals([]))
+        eth0_vlan = Interface.objects.get(name="eth0.100", node=controller)
+        self.assertThat(
+            eth0_vlan,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.100",
+                mac_address=interfaces["eth0.100"]["mac_address"],
+                enabled=True,
+                neighbour_discovery_state=False,
+                mdns_discovery_state=True,
+            ),
+        )
+
+    def test_clears_discovery_parameters(self):
+        controller = self.create_empty_controller()
+        eth0_mac = factory.make_mac_address()
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0_mac,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+                "monitored": True,
+            },
+            "eth0.100": {
+                "type": "vlan",
+                "mac_address": eth0_mac,
+                "parents": ["eth0"],
+                "vid": 100,
+                "links": [],
+                "enabled": True,
+                "monitored": False,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        # Disable the interfaces so that we can make sure neighbour discovery
+        # is properly disabled on update.
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0_mac,
+                "parents": [],
+                "links": [],
+                "enabled": False,
+                "monitored": False,
+            },
+            "eth0.100": {
+                "type": "vlan",
+                "mac_address": eth0_mac,
+                "parents": ["eth0"],
+                "vid": 100,
+                "links": [],
+                "enabled": False,
+                "monitored": False,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=False,
+                neighbour_discovery_state=False,
+                mdns_discovery_state=True,
+            ),
+        )
+        self.assertThat(list(eth0.parents.all()), Equals([]))
+        eth0_vlan = Interface.objects.get(name="eth0.100", node=controller)
+        self.assertThat(
+            eth0_vlan,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.100",
+                mac_address=interfaces["eth0.100"]["mac_address"],
+                enabled=False,
+                neighbour_discovery_state=False,
+                mdns_discovery_state=True,
+            ),
+        )
+
+    def test_new_physical_with_new_subnet_link(self):
+        controller = self.create_empty_controller()
+        network = factory.make_ip4_or_6_network()
+        ip = factory.pick_ip_in_network(network)
+        gateway_ip = factory.pick_ip_in_network(network, but_not=[ip])
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d" % (str(ip), network.prefixlen),
+                        "gateway": str(gateway_ip),
+                    }
+                ],
+                "enabled": True,
+            }
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        default_vlan = Fabric.objects.get_default_fabric().get_default_vlan()
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+                vlan=default_vlan,
+            ),
+        )
+        subnet = Subnet.objects.get(cidr=str(network.cidr))
+        self.assertThat(
+            subnet,
+            MatchesStructure.byEquality(
+                name=str(network.cidr),
+                cidr=str(network.cidr),
+                vlan=default_vlan,
+                gateway_ip=gateway_ip,
+            ),
+        )
+        eth0_addresses = list(eth0.ip_addresses.all())
+        self.assertThat(eth0_addresses, HasLength(1))
+        self.assertThat(
+            eth0_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip, subnet=subnet
+            ),
+        )
+
+    def test_new_physical_with_dhcp_link(self):
+        controller = self.create_empty_controller()
+        network = factory.make_ip4_or_6_network()
+        ip = factory.pick_ip_in_network(network)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "dhcp",
+                        "address": "%s/%d" % (str(ip), network.prefixlen),
+                    }
+                ],
+                "enabled": True,
+            }
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        default_vlan = Fabric.objects.get_default_fabric().get_default_vlan()
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+                vlan=default_vlan,
+            ),
+        )
+        dhcp_addresses = list(
+            eth0.ip_addresses.filter(alloc_type=IPADDRESS_TYPE.DHCP)
+        )
+        self.assertThat(dhcp_addresses, HasLength(1))
+        self.assertThat(
+            dhcp_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.DHCP, ip=None
+            ),
+        )
+        subnet = Subnet.objects.get(cidr=str(network.cidr))
+        self.assertThat(
+            subnet,
+            MatchesStructure.byEquality(
+                name=str(network.cidr),
+                cidr=str(network.cidr),
+                vlan=default_vlan,
+            ),
+        )
+        discovered_addresses = list(
+            eth0.ip_addresses.filter(alloc_type=IPADDRESS_TYPE.DISCOVERED)
+        )
+        self.assertThat(discovered_addresses, HasLength(1))
+        self.assertThat(
+            discovered_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.DISCOVERED, ip=ip, subnet=subnet
+            ),
+        )
+
+    def test_new_physical_with_multiple_dhcp_link(self):
+        controller = self.create_empty_controller()
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [{"mode": "dhcp"}, {"mode": "dhcp"}],
+                "enabled": True,
+            }
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        default_vlan = Fabric.objects.get_default_fabric().get_default_vlan()
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+                vlan=default_vlan,
+            ),
+        )
+        eth0_addresses = list(eth0.ip_addresses.all())
+        self.assertThat(eth0_addresses, HasLength(2))
+        self.assertThat(
+            eth0_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.DHCP, ip=None
+            ),
+        )
+        self.assertThat(
+            eth0_addresses[1],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.DHCP, ip=None
+            ),
+        )
+
+    def test_new_physical_with_multiple_dhcp_link_with_resource_info(self):
+        controller = self.create_empty_controller(with_empty_script_sets=True)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": "00:00:00:00:00:01",
+                "parents": [],
+                "links": [{"mode": "dhcp"}, {"mode": "dhcp"}],
+                "enabled": True,
+            }
+        }
+        vendor = factory.make_name("vendor")
+        product = factory.make_name("product")
+        firmware_version = factory.make_name("firmware_version")
+
+        test_hooks.create_IPADDR_OUTPUT_NAME_script(
+            controller, test_hooks.IP_ADDR_OUTPUT
+        )
+        lxd_script = (
+            controller.current_commissioning_script_set.find_script_result(
+                script_name=LXD_OUTPUT_NAME
+            )
+        )
+        lxd_script_output = test_hooks.make_lxd_output()
+        lxd_script_output["resources"]["network"] = {
+            "cards": [
+                {
+                    "ports": [
+                        {
+                            "id": "eth0",
+                            "address": "00:00:00:00:00:01",
+                            "port": 0,
+                        }
+                    ],
+                    "vendor": vendor,
+                    "product": product,
+                    "firmware_version": firmware_version,
+                }
+            ]
+        }
+        lxd_script.store_result(
+            0, stdout=json.dumps(lxd_script_output).encode("utf-8")
+        )
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        self.assertEqual(vendor, eth0.vendor)
+        self.assertEqual(product, eth0.product)
+        self.assertEqual(firmware_version, eth0.firmware_version)
+
+    def test_new_physical_with_existing_subnet_link_with_gateway(self):
+        controller = self.create_empty_controller()
+        subnet = factory.make_Subnet()
+        network = subnet.get_ipnetwork()
+        gateway_ip = factory.pick_ip_in_network(network)
+        subnet.gateway_ip = gateway_ip
+        subnet.save()
+        ip = factory.pick_ip_in_network(network, but_not=[gateway_ip])
+        diff_gateway_ip = factory.pick_ip_in_network(
+            network, but_not=[gateway_ip, ip]
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d" % (str(ip), network.prefixlen),
+                        "gateway": str(diff_gateway_ip),
+                    }
+                ],
+                "enabled": True,
+            }
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+                vlan=subnet.vlan,
+            ),
+        )
+        # Check that the gateway IP didn't change.
+        self.assertThat(
+            subnet, MatchesStructure.byEquality(gateway_ip=gateway_ip)
+        )
+        eth0_addresses = list(eth0.ip_addresses.all())
+        self.assertThat(eth0_addresses, HasLength(1))
+        self.assertThat(
+            eth0_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip, subnet=subnet
+            ),
+        )
+
+    def test_new_physical_with_existing_subnet_link_without_gateway(self):
+        controller = self.create_empty_controller()
+        subnet = factory.make_Subnet()
+        subnet.gateway_ip = None
+        subnet.save()
+        network = subnet.get_ipnetwork()
+        gateway_ip = factory.pick_ip_in_network(network)
+        ip = factory.pick_ip_in_network(network, but_not=[gateway_ip])
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d" % (str(ip), network.prefixlen),
+                        "gateway": str(gateway_ip),
+                    }
+                ],
+                "enabled": True,
+            }
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+                vlan=subnet.vlan,
+            ),
+        )
+        # Check that the gateway IP did get set.
+        self.assertThat(
+            reload_object(subnet),
+            MatchesStructure.byEquality(gateway_ip=gateway_ip),
+        )
+        eth0_addresses = list(eth0.ip_addresses.all())
+        self.assertThat(eth0_addresses, HasLength(1))
+        self.assertThat(
+            eth0_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip, subnet=subnet
+            ),
+        )
+
+    def test_new_physical_with_multiple_subnets(self):
+        controller = self.create_empty_controller()
+        vlan = factory.make_VLAN()
+        subnet1 = factory.make_Subnet(vlan=vlan)
+        ip1 = factory.pick_ip_in_Subnet(subnet1)
+        subnet2 = factory.make_Subnet(vlan=vlan)
+        ip2 = factory.pick_ip_in_Subnet(subnet2)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(ip1), subnet1.get_ipnetwork().prefixlen),
+                    },
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(ip2), subnet2.get_ipnetwork().prefixlen),
+                    },
+                ],
+                "enabled": True,
+            }
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = Interface.objects.get(name="eth0", node=controller)
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        eth0_addresses = list(eth0.ip_addresses.order_by("id"))
+        self.assertThat(eth0_addresses, HasLength(2))
+        self.assertThat(
+            eth0_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip1, subnet=subnet1
+            ),
+        )
+        self.assertThat(
+            eth0_addresses[1],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip2, subnet=subnet2
+            ),
+        )
+
+    def test_existing_physical_with_existing_static_link(self):
+        controller = self.create_empty_controller()
+        vlan = factory.make_VLAN()
+        subnet = factory.make_Subnet(vlan=vlan)
+        ip = factory.pick_ip_in_Subnet(subnet)
+        interface = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        factory.make_StaticIPAddress(
+            alloc_type=IPADDRESS_TYPE.STICKY,
+            ip=ip,
+            subnet=subnet,
+            interface=interface,
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": interface.mac_address,
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(ip), subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            }
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(1))
+        self.assertThat(
+            reload_object(interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interface.mac_address,
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        addresses = list(interface.ip_addresses.all())
+        self.assertThat(addresses, HasLength(1))
+        self.assertThat(
+            addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip, subnet=subnet
+            ),
+        )
+
+    def test_existing_physical_with_existing_auto_link(self):
+        controller = self.create_empty_controller()
+        vlan = factory.make_VLAN()
+        subnet = factory.make_Subnet(vlan=vlan)
+        ip = factory.pick_ip_in_Subnet(subnet)
+        interface = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        factory.make_StaticIPAddress(
+            alloc_type=IPADDRESS_TYPE.AUTO,
+            ip=ip,
+            subnet=subnet,
+            interface=interface,
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": interface.mac_address,
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(ip), subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            }
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(1))
+        self.assertThat(
+            reload_object(interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interface.mac_address,
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        addresses = list(interface.ip_addresses.all())
+        self.assertThat(addresses, HasLength(1))
+        self.assertThat(
+            addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip, subnet=subnet
+            ),
+        )
+
+    def test_existing_physical_removes_old_links(self):
+        controller = self.create_empty_controller()
+        vlan = factory.make_VLAN()
+        subnet = factory.make_Subnet(vlan=vlan)
+        ip = factory.pick_ip_in_Subnet(subnet)
+        interface = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        factory.make_StaticIPAddress(
+            alloc_type=IPADDRESS_TYPE.AUTO,
+            ip=ip,
+            subnet=subnet,
+            interface=interface,
+        )
+        extra_ips = [
+            factory.make_StaticIPAddress(
+                alloc_type=IPADDRESS_TYPE.AUTO,
+                subnet=subnet,
+                interface=interface,
+            )
+            for _ in range(3)
+        ]
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": interface.mac_address,
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(ip), subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            }
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(1))
+        self.assertThat(
+            reload_object(interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interface.mac_address,
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        addresses = list(interface.ip_addresses.all())
+        self.assertThat(addresses, HasLength(1))
+        self.assertThat(
+            addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip, subnet=subnet
+            ),
+        )
+        for extra_ip in extra_ips:
+            self.expectThat(reload_object(extra_ip), Is(None))
+
+    def test_existing_physical_with_links_new_vlan_no_links(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        subnet = factory.make_Subnet(vlan=vlan)
+        ip = factory.pick_ip_in_Subnet(subnet)
+        interface = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        factory.make_StaticIPAddress(
+            alloc_type=IPADDRESS_TYPE.AUTO,
+            ip=ip,
+            subnet=subnet,
+            interface=interface,
+        )
+        vid_on_fabric = random.randint(1, 4094)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": interface.mac_address,
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(ip), subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            }
+        }
+        interfaces["eth0.%d" % vid_on_fabric] = {
+            "type": "vlan",
+            "parents": ["eth0"],
+            "links": [],
+            "enabled": True,
+            "vid": vid_on_fabric,
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(2))
+        self.assertThat(
+            reload_object(interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interface.mac_address,
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        addresses = list(interface.ip_addresses.all())
+        self.assertThat(addresses, HasLength(1))
+        self.assertThat(
+            addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip, subnet=subnet
+            ),
+        )
+        created_vlan = VLAN.objects.get(fabric=fabric, vid=vid_on_fabric)
+        vlan_interface = VLANInterface.objects.get(
+            node=controller, vlan=created_vlan
+        )
+        self.assertThat(
+            vlan_interface,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.%d" % vid_on_fabric,
+                enabled=True,
+                vlan=created_vlan,
+            ),
+        )
+
+    def test_existing_physical_with_links_new_vlan_new_links(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        subnet = factory.make_Subnet(vlan=vlan)
+        ip = factory.pick_ip_in_Subnet(subnet)
+        interface = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        factory.make_StaticIPAddress(
+            alloc_type=IPADDRESS_TYPE.AUTO,
+            ip=ip,
+            subnet=subnet,
+            interface=interface,
+        )
+        vid_on_fabric = random.randint(1, 4094)
+        vlan_network = factory.make_ip4_or_6_network()
+        vlan_ip = factory.pick_ip_in_network(vlan_network)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": interface.mac_address,
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(ip), subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            }
+        }
+        interfaces["eth0.%d" % vid_on_fabric] = {
+            "type": "vlan",
+            "parents": ["eth0"],
+            "links": [
+                {
+                    "mode": "static",
+                    "address": "%s/%d"
+                    % (str(vlan_ip), vlan_network.prefixlen),
+                }
+            ],
+            "enabled": True,
+            "vid": vid_on_fabric,
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(2))
+        self.assertThat(
+            reload_object(interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interface.mac_address,
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        parent_addresses = list(interface.ip_addresses.all())
+        self.assertThat(parent_addresses, HasLength(1))
+        self.assertThat(
+            parent_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip, subnet=subnet
+            ),
+        )
+        created_vlan = VLAN.objects.get(fabric=fabric, vid=vid_on_fabric)
+        vlan_interface = VLANInterface.objects.get(
+            node=controller, vlan=created_vlan
+        )
+        self.assertThat(
+            vlan_interface,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.%d" % vid_on_fabric,
+                enabled=True,
+                vlan=created_vlan,
+            ),
+        )
+        vlan_subnet = Subnet.objects.get(cidr=str(vlan_network.cidr))
+        self.assertThat(
+            vlan_subnet,
+            MatchesStructure.byEquality(
+                name=str(vlan_network.cidr),
+                cidr=str(vlan_network.cidr),
+                vlan=created_vlan,
+            ),
+        )
+        vlan_addresses = list(vlan_interface.ip_addresses.all())
+        self.assertThat(vlan_addresses, HasLength(1))
+        self.assertThat(
+            vlan_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY,
+                ip=vlan_ip,
+                subnet=vlan_subnet,
+            ),
+        )
+
+    def test_existing_physical_with_links_new_vlan_other_subnet_vid(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        subnet = factory.make_Subnet(vlan=vlan)
+        ip = factory.pick_ip_in_Subnet(subnet)
+        interface = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        factory.make_StaticIPAddress(
+            alloc_type=IPADDRESS_TYPE.AUTO,
+            ip=ip,
+            subnet=subnet,
+            interface=interface,
+        )
+        vid_on_fabric = random.randint(1, 4094)
+        other_subnet = factory.make_Subnet()
+        vlan_ip = factory.pick_ip_in_Subnet(other_subnet)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": interface.mac_address,
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(ip), subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            }
+        }
+        interfaces["eth0.%d" % vid_on_fabric] = {
+            "type": "vlan",
+            "parents": ["eth0"],
+            "links": [
+                {
+                    "mode": "static",
+                    "address": "%s/%d"
+                    % (str(vlan_ip), other_subnet.get_ipnetwork().prefixlen),
+                }
+            ],
+            "enabled": True,
+            "vid": vid_on_fabric,
+        }
+        maaslog = self.patch(node_module, "maaslog")
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(2))
+        self.assertThat(
+            reload_object(interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interface.mac_address,
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        parent_addresses = list(interface.ip_addresses.all())
+        self.assertThat(parent_addresses, HasLength(1))
+        self.assertThat(
+            parent_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip, subnet=subnet
+            ),
+        )
+        self.assertFalse(
+            VLAN.objects.filter(fabric=fabric, vid=vid_on_fabric).exists()
+        )
+        other_vlan = other_subnet.vlan
+        vlan_interface = VLANInterface.objects.get(
+            node=controller, vlan=other_vlan
+        )
+        self.assertThat(
+            vlan_interface,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.%d" % vid_on_fabric,
+                enabled=True,
+                vlan=other_vlan,
+            ),
+        )
+        self.assertEqual(vlan_interface.ip_addresses.count(), 1)
+        self.assertThat(
+            maaslog.error,
+            MockCallsMatch(
+                *[
+                    call(
+                        f"Interface 'eth0' on controller '{controller.hostname}' "
+                        f"is not on the same fabric as VLAN interface '{vlan_interface.name}'."
+                    ),
+                    call(
+                        f"VLAN interface '{vlan_interface.name}' reports VLAN {vid_on_fabric} "
+                        f"but links are on VLAN {other_vlan.vid}"
+                    ),
+                ]
+                * self.passes
+            ),
+        )
+
+    def test_existing_physical_with_no_links_new_vlan_no_links(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        interface = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        vid_on_fabric = random.randint(1, 4094)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": interface.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            }
+        }
+        interfaces["eth0.%d" % vid_on_fabric] = {
+            "type": "vlan",
+            "parents": ["eth0"],
+            "links": [],
+            "enabled": True,
+            "vid": vid_on_fabric,
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(2))
+        self.assertThat(
+            reload_object(interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interface.mac_address,
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        created_vlan = VLAN.objects.get(fabric=fabric, vid=vid_on_fabric)
+        vlan_interface = VLANInterface.objects.get(
+            node=controller, vlan=created_vlan
+        )
+        self.assertThat(
+            vlan_interface,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.%d" % vid_on_fabric,
+                enabled=True,
+                vlan=created_vlan,
+            ),
+        )
+
+    def test_existing_physical_with_no_links_new_vlan_with_links(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        interface = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        other_fabric = factory.make_Fabric()
+        new_vlan = factory.make_VLAN(fabric=other_fabric)
+        subnet = factory.make_Subnet(vlan=new_vlan)
+        ip = factory.pick_ip_in_Subnet(subnet)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": interface.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            }
+        }
+        interfaces["eth0.%d" % new_vlan.vid] = {
+            "type": "vlan",
+            "parents": ["eth0"],
+            "links": [
+                {
+                    "mode": "static",
+                    "address": "%s/%d"
+                    % (str(ip), subnet.get_ipnetwork().prefixlen),
+                }
+            ],
+            "enabled": True,
+            "vid": new_vlan.vid,
+        }
+        maaslog = self.patch(node_module, "maaslog")
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(2))
+        self.assertThat(
+            reload_object(interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interface.mac_address,
+                enabled=True,
+                vlan=fabric.get_default_vlan(),
+            ),
+        )
+        vlan_interface = VLANInterface.objects.get(
+            node=controller, vlan=new_vlan
+        )
+        self.assertThat(
+            vlan_interface,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.%d" % new_vlan.vid,
+                enabled=True,
+                vlan=new_vlan,
+            ),
+        )
+        vlan_addresses = list(vlan_interface.ip_addresses.all())
+        self.assertThat(vlan_addresses, HasLength(1))
+        self.assertThat(
+            vlan_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=ip, subnet=subnet
+            ),
+        )
+        self.assertThat(
+            maaslog.error,
+            MockCallsMatch(
+                *[
+                    call(
+                        f"Interface 'eth0' on controller '{controller.hostname}' "
+                        f"is not on the same fabric as VLAN interface '{vlan_interface.name}'."
+                    )
+                ]
+                * self.passes
+            ),
+        )
+
+    def test_existing_physical_with_no_links_vlan_with_other_subnet(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        interface = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, name="eth0", vlan=vlan
+        )
+        other_vlan = factory.make_VLAN(fabric=fabric)
+        vlan_interface = factory.make_Interface(
+            INTERFACE_TYPE.VLAN,
+            name=f"eth0.{other_vlan.vid}",
+            vlan=other_vlan,
+            parents=[interface],
+        )
+
+        new_fabric = factory.make_Fabric()
+        new_vlan = factory.make_VLAN(fabric=new_fabric)
+        new_subnet = factory.make_Subnet(vlan=new_vlan)
+        ip = factory.pick_ip_in_Subnet(new_subnet)
+        links_to_remove = [
+            factory.make_StaticIPAddress(
+                alloc_type=IPADDRESS_TYPE.STICKY, interface=vlan_interface
+            )
+            for _ in range(3)
+        ]
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": interface.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            }
+        }
+        interfaces["eth0.%d" % other_vlan.vid] = {
+            "type": "vlan",
+            "parents": ["eth0"],
+            "links": [
+                {
+                    "mode": "static",
+                    "address": "%s/%d"
+                    % (str(ip), new_subnet.get_ipnetwork().prefixlen),
+                }
+            ],
+            "enabled": True,
+            "vid": other_vlan.vid,
+        }
+        maaslog = self.patch(node_module, "maaslog")
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(2))
+        self.assertThat(
+            reload_object(interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interface.mac_address,
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        self.assertThat(
+            reload_object(vlan_interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.%d" % other_vlan.vid,
+                enabled=True,
+                vlan=new_vlan,
+            ),
+        )
+        self.assertCountEqual(
+            vlan_interface.ip_addresses.values_list("ip", flat=True), [ip]
+        )
+        self.assertThat(
+            maaslog.error,
+            MockCallsMatch(
+                *[
+                    call(
+                        f"Interface 'eth0' on controller '{controller.hostname}' "
+                        f"is not on the same fabric as VLAN interface '{vlan_interface.name}'."
+                    ),
+                    call(
+                        f"VLAN interface '{vlan_interface.name}' reports VLAN {other_vlan.vid} "
+                        f"but links are on VLAN {new_vlan.vid}"
+                    ),
+                ]
+                * self.passes
+            ),
+        )
+        for link in links_to_remove:
+            self.expectThat(reload_object(link), Is(None))
+
+    def test_existing_vlan_interface_different_fabric_from_parent(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        interface = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, name="eth0", vlan=vlan
+        )
+        subnet = factory.make_Subnet(vlan=vlan)
+        ip = factory.pick_ip_in_Subnet(subnet)
+        factory.make_StaticIPAddress(
+            alloc_type=IPADDRESS_TYPE.AUTO,
+            ip=ip,
+            subnet=subnet,
+            interface=interface,
+        )
+        new_fabric = factory.make_Fabric()
+        new_vlan = factory.make_VLAN(fabric=new_fabric)
+        vlan_subnet = factory.make_Subnet(vlan=new_vlan)
+        vlan_ip = factory.pick_ip_in_Subnet(vlan_subnet)
+        vlan_interface = factory.make_Interface(
+            INTERFACE_TYPE.VLAN,
+            vlan=new_vlan,
+            parents=[interface],
+        )
+        vlan_name = vlan_interface.name
+
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": interface.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            vlan_name: {
+                "type": "vlan",
+                "parents": ["eth0"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (
+                            str(vlan_ip),
+                            vlan_subnet.get_ipnetwork().prefixlen,
+                        ),
+                    }
+                ],
+                "enabled": True,
+                "vid": new_vlan.vid,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(2))
+        self.assertThat(
+            reload_object(interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interface.mac_address,
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        self.assertThat(
+            reload_object(vlan_interface),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name=vlan_name,
+                enabled=True,
+                vlan=new_vlan,
+            ),
+        )
+        vlan_addresses = list(vlan_interface.ip_addresses.all())
+        self.assertThat(vlan_addresses, HasLength(1))
+        self.assertThat(
+            vlan_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY,
+                ip=vlan_ip,
+                subnet=vlan_subnet,
+            ),
+        )
+
+    def test_bond_with_existing_parents(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        eth1 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": eth1.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "bond0": {
+                "type": "bond",
+                "mac_address": factory.make_mac_address(),
+                "parents": ["eth0", "eth1"],
+                "links": [],
+                "enabled": True,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(3))
+        bond_interface = BondInterface.objects.get(
+            node=controller, mac_address=interfaces["bond0"]["mac_address"]
+        )
+        self.assertThat(
+            bond_interface,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BOND,
+                name="bond0",
+                mac_address=interfaces["bond0"]["mac_address"],
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        self.assertThat(
+            [parent.name for parent in bond_interface.parents.all()],
+            MatchesSetwise(Equals("eth0"), Equals("eth1")),
+        )
+
+    def test_bridge_with_existing_parents(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        eth1 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": eth1.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "br0": {
+                "type": "bridge",
+                "mac_address": factory.make_mac_address(),
+                "parents": ["eth0", "eth1"],
+                "links": [],
+                "enabled": True,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(3))
+        bond_interface = BridgeInterface.objects.get(
+            node=controller, mac_address=interfaces["br0"]["mac_address"]
+        )
+        self.assertThat(
+            bond_interface,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BRIDGE,
+                name="br0",
+                mac_address=interfaces["br0"]["mac_address"],
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        self.assertThat(
+            [parent.name for parent in bond_interface.parents.all()],
+            MatchesSetwise(Equals("eth0"), Equals("eth1")),
+        )
+
+    def test_bond_updates_existing_bond(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        eth1 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        bond0 = factory.make_Interface(
+            INTERFACE_TYPE.BOND,
+            vlan=vlan,
+            parents=[eth0, eth1],
+            node=controller,
+            name="bond0",
+            mac_address=factory.make_mac_address(),
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": eth1.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "bond0": {
+                "type": "bond",
+                "mac_address": factory.make_mac_address(),
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(3))
+        self.assertThat(
+            reload_object(bond0),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BOND,
+                name="bond0",
+                mac_address=interfaces["bond0"]["mac_address"],
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        self.assertThat(
+            [parent.name for parent in bond0.parents.all()], Equals(["eth0"])
+        )
+
+    def test_bridge_updates_existing_bridge(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        eth1 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        br0 = factory.make_Interface(
+            INTERFACE_TYPE.BRIDGE,
+            vlan=vlan,
+            parents=[eth0, eth1],
+            node=controller,
+            name="br0",
+            mac_address=factory.make_mac_address(),
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": eth1.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "br0": {
+                "type": "bridge",
+                "mac_address": factory.make_mac_address(),
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(3))
+        self.assertThat(
+            reload_object(br0),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BRIDGE,
+                name="br0",
+                mac_address=interfaces["br0"]["mac_address"],
+                enabled=True,
+                vlan=vlan,
+            ),
+        )
+        self.assertThat(
+            [parent.name for parent in br0.parents.all()], Equals(["eth0"])
+        )
+
+    def test_bond_creates_link_updates_parent_vlan(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        eth1 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        bond0 = factory.make_Interface(
+            INTERFACE_TYPE.BOND, parents=[eth0, eth1], vlan=vlan
+        )
+        other_fabric = factory.make_Fabric()
+        bond0_vlan = other_fabric.get_default_vlan()
+        subnet = factory.make_Subnet(vlan=bond0_vlan)
+        ip = factory.pick_ip_in_Subnet(subnet)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": eth1.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "bond0": {
+                "type": "bond",
+                "mac_address": bond0.mac_address,
+                "parents": ["eth0", "eth1"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(ip), subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(3))
+        self.assertThat(
+            reload_object(eth0),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=eth0.mac_address,
+                enabled=True,
+                vlan=bond0_vlan,
+            ),
+        )
+        self.assertThat(
+            reload_object(eth1),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth1",
+                mac_address=eth1.mac_address,
+                enabled=True,
+                vlan=bond0_vlan,
+            ),
+        )
+        bond0 = get_one(Interface.objects.filter_by_ip(str(ip)))
+        self.assertThat(
+            bond0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BOND,
+                name="bond0",
+                mac_address=bond0.mac_address,
+                enabled=True,
+                node=controller,
+                vlan=bond0_vlan,
+            ),
+        )
+        self.assertThat(
+            [parent.name for parent in bond0.parents.all()],
+            MatchesSetwise(Equals("eth0"), Equals("eth1")),
+        )
+
+    def test_bridge_creates_link_updates_parent_vlan(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        eth1 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        br0 = factory.make_Interface(
+            INTERFACE_TYPE.BRIDGE, parents=[eth0, eth1], vlan=vlan
+        )
+        other_fabric = factory.make_Fabric()
+        br0_vlan = other_fabric.get_default_vlan()
+        subnet = factory.make_Subnet(vlan=br0_vlan)
+        ip = factory.pick_ip_in_Subnet(subnet)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": eth1.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "br0": {
+                "type": "bridge",
+                "mac_address": br0.mac_address,
+                "parents": ["eth0", "eth1"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(ip), subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(controller.interface_set.count(), Equals(3))
+        self.assertThat(
+            reload_object(eth0),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=eth0.mac_address,
+                enabled=True,
+                vlan=br0_vlan,
+            ),
+        )
+        self.assertThat(
+            reload_object(eth1),
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth1",
+                mac_address=eth1.mac_address,
+                enabled=True,
+                vlan=br0_vlan,
+            ),
+        )
+        br0 = get_one(Interface.objects.filter_by_ip(str(ip)))
+        self.assertThat(
+            br0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BRIDGE,
+                name="br0",
+                mac_address=br0.mac_address,
+                enabled=True,
+                node=controller,
+                vlan=br0_vlan,
+            ),
+        )
+        self.assertThat(
+            [parent.name for parent in br0.parents.all()],
+            MatchesSetwise(Equals("eth0"), Equals("eth1")),
+        )
+
+    def test_bridge_with_mac_as_phyisical_not_updated(self):
+        controller = self.create_empty_controller(with_empty_script_sets=True)
+        controller = self.create_empty_controller()
+        mac_address = factory.make_mac_address()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, mac_address=mac_address
+        )
+        factory.make_Interface(
+            INTERFACE_TYPE.BRIDGE, parents=[eth0], mac_address=mac_address
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "br0": {
+                "type": "bridge",
+                "mac_address": mac_address,
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+        }
+
+        vendor = factory.make_name("vendor")
+        product = factory.make_name("product")
+        firmware_version = factory.make_name("firmware_version")
+        test_hooks.create_IPADDR_OUTPUT_NAME_script(
+            controller, test_hooks.IP_ADDR_OUTPUT
+        )
+        lxd_script = (
+            controller.current_commissioning_script_set.find_script_result(
+                script_name=LXD_OUTPUT_NAME
+            )
+        )
+        lxd_script_output = {
+            "network": {
+                "cards": [
+                    {
+                        "ports": [
+                            {"id": "eth0", "address": mac_address, "port": 0}
+                        ],
+                        "vendor": vendor,
+                        "product": product,
+                        "firmware_version": firmware_version,
+                    }
+                ]
+            }
+        }
+        lxd_script.store_result(
+            0, stdout=json.dumps(lxd_script_output).encode("utf-8")
+        )
+        self.update_interfaces(controller, interfaces)
+        br0 = Interface.objects.get(name="br0", node=controller)
+        self.assertNotEqual(vendor, br0.vendor)
+        self.assertNotEqual(product, br0.product)
+        self.assertNotEqual(firmware_version, br0.firmware_version)
+
+    def test_removes_missing_interfaces(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        eth1 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        bond0 = factory.make_Interface(
+            INTERFACE_TYPE.BOND, parents=[eth0, eth1], vlan=vlan
+        )
+        controller.update_interfaces({})
+        self.assertThat(reload_object(eth0), Is(None))
+        self.assertThat(reload_object(eth1), Is(None))
+        self.assertThat(reload_object(bond0), Is(None))
+
+    def test_removes_one_bond_parent(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        eth1 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        bond0 = factory.make_Interface(
+            INTERFACE_TYPE.BOND, name="bond0", parents=[eth0, eth1], vlan=vlan
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "bond0": {
+                "type": "bond",
+                "mac_address": bond0.mac_address,
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(reload_object(eth0), Not(Is(None)))
+        self.assertThat(reload_object(eth1), Is(None))
+        self.assertThat(reload_object(bond0), Not(Is(None)))
+
+    def test_removes_one_bridge_parent(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        eth1 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        br0 = factory.make_Interface(
+            INTERFACE_TYPE.BRIDGE, name="br0", parents=[eth0, eth1], vlan=vlan
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "br0": {
+                "type": "bridge",
+                "mac_address": br0.mac_address,
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(reload_object(eth0), Not(Is(None)))
+        self.assertThat(reload_object(eth1), Is(None))
+        self.assertThat(reload_object(br0), Not(Is(None)))
+
+    def test_removes_one_bond_and_one_parent(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        eth1 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        bond0 = factory.make_Interface(
+            INTERFACE_TYPE.BOND, parents=[eth0, eth1], vlan=vlan
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            }
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(reload_object(eth0), Not(Is(None)))
+        self.assertThat(reload_object(eth1), Is(None))
+        self.assertThat(reload_object(bond0), Is(None))
+
+    def test_removes_one_bridge_and_one_parent(self):
+        controller = self.create_empty_controller()
+        fabric = factory.make_Fabric()
+        vlan = fabric.get_default_vlan()
+        eth0 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        eth1 = factory.make_Interface(
+            INTERFACE_TYPE.PHYSICAL, node=controller, vlan=vlan
+        )
+        br0 = factory.make_Interface(
+            INTERFACE_TYPE.BRIDGE, parents=[eth0, eth1], vlan=vlan
+        )
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0.mac_address,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            }
+        }
+        self.update_interfaces(controller, interfaces)
+        self.assertThat(reload_object(eth0), Not(Is(None)))
+        self.assertThat(reload_object(eth1), Is(None))
+        self.assertThat(reload_object(br0), Is(None))
+
+    def test_all_new_bond_with_vlan(self):
+        controller = self.create_empty_controller()
+        bond0_fabric = factory.make_Fabric()
+        bond0_untagged = bond0_fabric.get_default_vlan()
+        bond0_subnet = factory.make_Subnet(vlan=bond0_untagged)
+        bond0_ip = factory.pick_ip_in_Subnet(bond0_subnet)
+        bond0_vlan = factory.make_VLAN(fabric=bond0_fabric)
+        bond0_vlan_subnet = factory.make_Subnet(vlan=bond0_vlan)
+        bond0_vlan_ip = factory.pick_ip_in_Subnet(bond0_vlan_subnet)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "bond0": {
+                "type": "bond",
+                "mac_address": factory.make_mac_address(),
+                "parents": ["eth0", "eth1"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (
+                            str(bond0_ip),
+                            bond0_subnet.get_ipnetwork().prefixlen,
+                        ),
+                    }
+                ],
+                "enabled": True,
+            },
+        }
+        interfaces["bond0.%d" % bond0_vlan.vid] = {
+            "type": "vlan",
+            "parents": ["bond0"],
+            "links": [
+                {
+                    "mode": "static",
+                    "address": "%s/%d"
+                    % (
+                        str(bond0_vlan_ip),
+                        bond0_vlan_subnet.get_ipnetwork().prefixlen,
+                    ),
+                }
+            ],
+            "vid": bond0_vlan.vid,
+            "enabled": True,
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = PhysicalInterface.objects.get(
+            node=controller, mac_address=interfaces["eth0"]["mac_address"]
+        )
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+                vlan=bond0_untagged,
+            ),
+        )
+        eth1 = PhysicalInterface.objects.get(
+            node=controller, mac_address=interfaces["eth1"]["mac_address"]
+        )
+        self.assertThat(
+            eth1,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth1",
+                mac_address=interfaces["eth1"]["mac_address"],
+                enabled=True,
+                vlan=bond0_untagged,
+            ),
+        )
+        bond0 = BondInterface.objects.get(
+            node=controller, mac_address=interfaces["bond0"]["mac_address"]
+        )
+        self.assertThat(
+            bond0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BOND,
+                name="bond0",
+                mac_address=interfaces["bond0"]["mac_address"],
+                enabled=True,
+                vlan=bond0_untagged,
+            ),
+        )
+        self.assertThat(
+            [parent.name for parent in bond0.parents.all()],
+            MatchesSetwise(Equals("eth0"), Equals("eth1")),
+        )
+        bond0_addresses = list(bond0.ip_addresses.all())
+        self.assertThat(bond0_addresses, HasLength(1))
+        self.assertThat(
+            bond0_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY,
+                ip=bond0_ip,
+                subnet=bond0_subnet,
+            ),
+        )
+        bond0_vlan_nic = VLANInterface.objects.get(
+            node=controller, vlan=bond0_vlan
+        )
+        self.assertThat(
+            bond0_vlan_nic,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="bond0.%d" % bond0_vlan.vid,
+                enabled=True,
+                vlan=bond0_vlan,
+            ),
+        )
+        self.assertThat(
+            [parent.name for parent in bond0_vlan_nic.parents.all()],
+            Equals(["bond0"]),
+        )
+        bond0_vlan_nic_addresses = list(bond0_vlan_nic.ip_addresses.all())
+        self.assertThat(bond0_vlan_nic_addresses, HasLength(1))
+        self.assertThat(
+            bond0_vlan_nic_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY,
+                ip=bond0_vlan_ip,
+                subnet=bond0_vlan_subnet,
+            ),
+        )
+
+    def test_all_new_bridge_with_vlan(self):
+        controller = self.create_empty_controller()
+        br0_fabric = factory.make_Fabric()
+        br0_untagged = br0_fabric.get_default_vlan()
+        br0_subnet = factory.make_Subnet(vlan=br0_untagged)
+        br0_ip = factory.pick_ip_in_Subnet(br0_subnet)
+        br0_vlan = factory.make_VLAN(fabric=br0_fabric)
+        br0_vlan_subnet = factory.make_Subnet(vlan=br0_vlan)
+        br0_vlan_ip = factory.pick_ip_in_Subnet(br0_vlan_subnet)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "br0": {
+                "type": "bridge",
+                "mac_address": factory.make_mac_address(),
+                "parents": ["eth0", "eth1"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(br0_ip), br0_subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            },
+        }
+        interfaces["br0.%d" % br0_vlan.vid] = {
+            "type": "vlan",
+            "parents": ["br0"],
+            "links": [
+                {
+                    "mode": "static",
+                    "address": "%s/%d"
+                    % (
+                        str(br0_vlan_ip),
+                        br0_vlan_subnet.get_ipnetwork().prefixlen,
+                    ),
+                }
+            ],
+            "vid": br0_vlan.vid,
+            "enabled": True,
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = PhysicalInterface.objects.get(
+            node=controller, mac_address=interfaces["eth0"]["mac_address"]
+        )
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+                vlan=br0_untagged,
+            ),
+        )
+        eth1 = PhysicalInterface.objects.get(
+            node=controller, mac_address=interfaces["eth1"]["mac_address"]
+        )
+        self.assertThat(
+            eth1,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth1",
+                mac_address=interfaces["eth1"]["mac_address"],
+                enabled=True,
+                vlan=br0_untagged,
+            ),
+        )
+        br0 = BridgeInterface.objects.get(
+            node=controller, mac_address=interfaces["br0"]["mac_address"]
+        )
+        self.assertThat(
+            br0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BRIDGE,
+                name="br0",
+                mac_address=interfaces["br0"]["mac_address"],
+                enabled=True,
+                vlan=br0_untagged,
+            ),
+        )
+        self.assertThat(
+            [parent.name for parent in br0.parents.all()],
+            MatchesSetwise(Equals("eth0"), Equals("eth1")),
+        )
+        br0_addresses = list(br0.ip_addresses.all())
+        self.assertThat(br0_addresses, HasLength(1))
+        self.assertThat(
+            br0_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=br0_ip, subnet=br0_subnet
+            ),
+        )
+        br0_vlan_nic = VLANInterface.objects.get(
+            node=controller, vlan=br0_vlan
+        )
+        self.assertThat(
+            br0_vlan_nic,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="br0.%d" % br0_vlan.vid,
+                enabled=True,
+                vlan=br0_vlan,
+            ),
+        )
+        self.assertThat(
+            [parent.name for parent in br0_vlan_nic.parents.all()],
+            Equals(["br0"]),
+        )
+        br0_vlan_nic_addresses = list(br0_vlan_nic.ip_addresses.all())
+        self.assertThat(br0_vlan_nic_addresses, HasLength(1))
+        self.assertThat(
+            br0_vlan_nic_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY,
+                ip=br0_vlan_ip,
+                subnet=br0_vlan_subnet,
+            ),
+        )
+
+    def test_two_controllers_with_similar_configurations_bug_1563701(self):
+        interfaces1 = {
+            "ens3": {
+                "enabled": True,
+                "links": [{"address": "10.2.0.2/20", "mode": "static"}],
+                "mac_address": "52:54:00:ff:0a:cf",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "ens4": {
+                "enabled": True,
+                "links": [
+                    {
+                        "address": "192.168.35.43/22",
+                        "gateway": "192.168.32.2",
+                        "mode": "dhcp",
+                    }
+                ],
+                "mac_address": "52:54:00:ab:da:de",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "ens5": {
+                "enabled": True,
+                "links": [],
+                "mac_address": "52:54:00:70:8f:5b",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "ens5.10": {
+                "enabled": True,
+                "links": [{"address": "10.10.0.2/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 10,
+            },
+            "ens5.11": {
+                "enabled": True,
+                "links": [{"address": "10.11.0.2/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 11,
+            },
+            "ens5.12": {
+                "enabled": True,
+                "links": [{"address": "10.12.0.2/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 12,
+            },
+            "ens5.13": {
+                "enabled": True,
+                "links": [{"address": "10.13.0.2/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 13,
+            },
+            "ens5.14": {
+                "enabled": True,
+                "links": [{"address": "10.14.0.2/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 14,
+            },
+            "ens5.15": {
+                "enabled": True,
+                "links": [{"address": "10.15.0.2/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 15,
+            },
+            "ens5.16": {
+                "enabled": True,
+                "links": [{"address": "10.16.0.2/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 16,
+            },
+        }
+
+        interfaces2 = {
+            "ens3": {
+                "enabled": True,
+                "links": [{"address": "10.2.0.3/20", "mode": "static"}],
+                "mac_address": "52:54:00:02:eb:bc",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "ens4": {
+                "enabled": True,
+                "links": [
+                    {
+                        "address": "192.168.33.246/22",
+                        "gateway": "192.168.32.2",
+                        "mode": "dhcp",
+                    }
+                ],
+                "mac_address": "52:54:00:bc:b0:85",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "ens5": {
+                "enabled": True,
+                "links": [],
+                "mac_address": "52:54:00:cf:f3:7f",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "ens5.10": {
+                "enabled": True,
+                "links": [{"address": "10.10.0.3/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 10,
+            },
+            "ens5.11": {
+                "enabled": True,
+                "links": [{"address": "10.11.0.3/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 11,
+            },
+            "ens5.12": {
+                "enabled": True,
+                "links": [{"address": "10.12.0.3/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 12,
+            },
+            "ens5.13": {
+                "enabled": True,
+                "links": [{"address": "10.13.0.3/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 13,
+            },
+            "ens5.14": {
+                "enabled": True,
+                "links": [{"address": "10.14.0.3/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 14,
+            },
+            "ens5.15": {
+                "enabled": True,
+                "links": [{"address": "10.15.0.3/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 15,
+            },
+            "ens5.16": {
+                "enabled": True,
+                "links": [{"address": "10.16.0.3/20", "mode": "static"}],
+                "parents": ["ens5"],
+                "source": "ipaddr",
+                "type": "vlan",
+                "vid": 16,
+            },
+        }
+        controller1 = self.create_empty_controller()
+        controller2 = self.create_empty_controller()
+        controller1.update_interfaces(interfaces1)
+        controller2.update_interfaces(interfaces2)
+        r1_ens5_16 = get_one(Interface.objects.filter_by_ip("10.16.0.2"))
+        self.assertIsNotNone(r1_ens5_16)
+        r2_ens5_16 = get_one(Interface.objects.filter_by_ip("10.16.0.3"))
+        self.assertIsNotNone(r2_ens5_16)
+
+    def test_all_new_bridge_on_vlan_interface_with_identical_macs(self):
+        controller = self.create_empty_controller()
+        default_vlan = VLAN.objects.get_default_vlan()
+        br0_fabric = factory.make_Fabric()
+        eth0_100_vlan = factory.make_VLAN(vid=100, fabric=br0_fabric)
+        br0_subnet = factory.make_Subnet(vlan=eth0_100_vlan)
+        br0_ip = factory.pick_ip_in_Subnet(br0_subnet)
+        eth0_mac = factory.make_mac_address()
+        br1_fabric = factory.make_Fabric()
+        eth1_100_vlan = factory.make_VLAN(vid=100, fabric=br1_fabric)
+        br1_subnet = factory.make_Subnet(vlan=eth1_100_vlan)
+        br1_ip = factory.pick_ip_in_Subnet(br1_subnet)
+        eth1_mac = factory.make_mac_address()
+        eth0_101_vlan = factory.make_VLAN(vid=101, fabric=br1_fabric)
+        br101_subnet = factory.make_Subnet(vlan=eth0_101_vlan)
+        br101_ip = factory.pick_ip_in_Subnet(br101_subnet)
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0_mac,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth0.100": {
+                "type": "vlan",
+                "vid": 100,
+                "mac_address": eth0_mac,
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+            "eth0.101": {
+                "type": "vlan",
+                "vid": 101,
+                "mac_address": eth0_mac,
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+            "br0": {
+                "type": "bridge",
+                "mac_address": eth0_mac,
+                "parents": ["eth0.100"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(br0_ip), br0_subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            },
+            "br101": {
+                "type": "bridge",
+                "mac_address": eth0_mac,
+                "parents": ["eth0.101"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (
+                            str(br101_ip),
+                            br101_subnet.get_ipnetwork().prefixlen,
+                        ),
+                    }
+                ],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": eth1_mac,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1.100": {
+                "type": "vlan",
+                "vid": 100,
+                "mac_address": eth1_mac,
+                "parents": ["eth1"],
+                "links": [],
+                "enabled": True,
+            },
+            "br1": {
+                "type": "bridge",
+                "mac_address": eth1_mac,
+                "parents": ["eth1.100"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(br1_ip), br1_subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = PhysicalInterface.objects.get(
+            node=controller, mac_address=interfaces["eth0"]["mac_address"]
+        )
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+                vlan=default_vlan,
+            ),
+        )
+        eth0_100 = VLANInterface.objects.get(
+            node=controller,
+            name="eth0.100",
+            mac_address=interfaces["eth0.100"]["mac_address"],
+        )
+        self.assertThat(
+            eth0_100,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.100",
+                mac_address=interfaces["eth0.100"]["mac_address"],
+                enabled=True,
+                vlan=eth0_100_vlan,
+            ),
+        )
+        br0 = BridgeInterface.objects.get(
+            node=controller,
+            name="br0",
+            mac_address=interfaces["br0"]["mac_address"],
+        )
+        self.assertThat(
+            br0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BRIDGE,
+                name="br0",
+                mac_address=interfaces["br0"]["mac_address"],
+                enabled=True,
+                vlan=eth0_100_vlan,
+            ),
+        )
+        br0_addresses = list(br0.ip_addresses.all())
+        self.assertThat(br0_addresses, HasLength(1))
+        self.assertThat(
+            br0_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=br0_ip, subnet=br0_subnet
+            ),
+        )
+        br0_nic = BridgeInterface.objects.get(
+            node=controller, vlan=eth0_100_vlan
+        )
+        self.assertThat(
+            br0_nic,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BRIDGE,
+                name="br0",
+                enabled=True,
+                vlan=eth0_100_vlan,
+            ),
+        )
+
+    def test_bridge_on_vlan_interface_with_identical_macs_replacing_phy(self):
+        controller = self.create_empty_controller()
+        br0_fabric = factory.make_Fabric()
+        eth0_100_vlan = factory.make_VLAN(vid=100, fabric=br0_fabric)
+        br0_subnet = factory.make_Subnet(vlan=eth0_100_vlan)
+        br0_ip = factory.pick_ip_in_Subnet(br0_subnet)
+        eth0_mac = factory.make_mac_address()
+        # Before the fix for bug #1555679, bridges were modeled as "physical".
+        # Therefore, MAAS users needed to change the MAC of their bridge
+        # interfaces, rather than using the common practice of making it the
+        # same as the MAC of the parent interface.
+        bogus_br0_mac = factory.make_mac_address()
+        bogus_br1_mac = factory.make_mac_address()
+        bogus_br101_mac = factory.make_mac_address()
+        br1_fabric = factory.make_Fabric()
+        eth1_100_vlan = factory.make_VLAN(vid=100, fabric=br1_fabric)
+        br1_subnet = factory.make_Subnet(vlan=eth1_100_vlan)
+        br1_ip = factory.pick_ip_in_Subnet(br1_subnet)
+        eth1_mac = factory.make_mac_address()
+        eth0_101_vlan = factory.make_VLAN(vid=101, fabric=br1_fabric)
+        br101_subnet = factory.make_Subnet(vlan=eth0_101_vlan)
+        br101_ip = factory.pick_ip_in_Subnet(br101_subnet)
+        interfaces_old = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0_mac,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth0.100": {
+                "type": "vlan",
+                "vid": 100,
+                "mac_address": eth0_mac,
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+            "eth0.101": {
+                "type": "vlan",
+                "vid": 101,
+                "mac_address": eth0_mac,
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+            "br0": {
+                "type": "physical",
+                "mac_address": bogus_br0_mac,
+                "parents": [],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(br0_ip), br0_subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            },
+            "br101": {
+                "type": "bridge",
+                "mac_address": bogus_br101_mac,
+                "parents": ["eth0.101"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (
+                            str(br101_ip),
+                            br101_subnet.get_ipnetwork().prefixlen,
+                        ),
+                    }
+                ],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": eth1_mac,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1.100": {
+                "type": "vlan",
+                "vid": 100,
+                "mac_address": eth1_mac,
+                "parents": ["eth1"],
+                "links": [],
+                "enabled": True,
+            },
+            "br1": {
+                "type": "bridge",
+                "mac_address": bogus_br1_mac,
+                "parents": ["eth1.100"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(br1_ip), br1_subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            },
+        }
+        controller.update_interfaces(interfaces_old)
+        eth0 = PhysicalInterface.objects.get(
+            node=controller, mac_address=interfaces_old["eth0"]["mac_address"]
+        )
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces_old["eth0"]["mac_address"],
+                enabled=True,
+                vlan=eth0.vlan,
+            ),
+        )
+        # This is weird because it results in a model where eth0.100 is not
+        # on the same VLAN as br0. But it's something that the admin will need
+        # to fix after-the-fact, unfortunately...
+        br0 = get_one(Interface.objects.filter_by_ip(br0_ip))
+        br0_vlan = br0.vlan
+        interfaces = {
+            "eth0": {
+                "type": "physical",
+                "mac_address": eth0_mac,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth0.100": {
+                "type": "vlan",
+                "vid": 100,
+                "mac_address": eth0_mac,
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+            "eth0.101": {
+                "type": "vlan",
+                "vid": 101,
+                "mac_address": eth0_mac,
+                "parents": ["eth0"],
+                "links": [],
+                "enabled": True,
+            },
+            "br0": {
+                "type": "bridge",
+                "mac_address": eth0_mac,
+                "parents": ["eth0.100"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(br0_ip), br0_subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            },
+            "br101": {
+                "type": "bridge",
+                "mac_address": eth0_mac,
+                "parents": ["eth0.101"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (
+                            str(br101_ip),
+                            br101_subnet.get_ipnetwork().prefixlen,
+                        ),
+                    }
+                ],
+                "enabled": True,
+            },
+            "eth1": {
+                "type": "physical",
+                "mac_address": eth1_mac,
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            },
+            "eth1.100": {
+                "type": "vlan",
+                "vid": 100,
+                "mac_address": eth1_mac,
+                "parents": ["eth1"],
+                "links": [],
+                "enabled": True,
+            },
+            "br1": {
+                "type": "bridge",
+                "mac_address": eth1_mac,
+                "parents": ["eth1.100"],
+                "links": [
+                    {
+                        "mode": "static",
+                        "address": "%s/%d"
+                        % (str(br1_ip), br1_subnet.get_ipnetwork().prefixlen),
+                    }
+                ],
+                "enabled": True,
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = PhysicalInterface.objects.get(
+            node=controller, mac_address=interfaces["eth0"]["mac_address"]
+        )
+        self.assertThat(
+            eth0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.PHYSICAL,
+                name="eth0",
+                mac_address=interfaces["eth0"]["mac_address"],
+                enabled=True,
+                vlan=eth0.vlan,
+            ),
+        )
+        eth0_100 = VLANInterface.objects.get(
+            node=controller,
+            name="eth0.100",
+            mac_address=interfaces["eth0.100"]["mac_address"],
+        )
+        self.assertThat(
+            eth0_100,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.VLAN,
+                name="eth0.100",
+                mac_address=interfaces["eth0.100"]["mac_address"],
+                enabled=True,
+                vlan=eth0_100_vlan,
+            ),
+        )
+        br0 = BridgeInterface.objects.get(
+            node=controller,
+            name="br0",
+            mac_address=interfaces["br0"]["mac_address"],
+        )
+        self.assertThat(
+            br0,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BRIDGE,
+                name="br0",
+                mac_address=interfaces["br0"]["mac_address"],
+                enabled=True,
+                vlan=br0_vlan,
+            ),
+        )
+        br0_addresses = list(br0.ip_addresses.all())
+        self.assertThat(br0_addresses, HasLength(1))
+        self.assertThat(
+            br0_addresses[0],
+            MatchesStructure.byEquality(
+                alloc_type=IPADDRESS_TYPE.STICKY, ip=br0_ip, subnet=br0_subnet
+            ),
+        )
+        br0_nic = BridgeInterface.objects.get(
+            node=controller, vlan=eth0_100_vlan
+        )
+        self.assertThat(
+            br0_nic,
+            MatchesStructure.byEquality(
+                type=INTERFACE_TYPE.BRIDGE,
+                name="br0",
+                enabled=True,
+                vlan=br0_vlan,
+            ),
+        )
+
+    def test_registers_bridge_with_disabled_parent(self):
+        controller = self.create_empty_controller()
+        interfaces = {
+            "eth0": {
+                "enabled": True,
+                "links": [
+                    {
+                        "address": "10.0.0.2/24",
+                        "gateway": "10.0.0.1",
+                        "mode": "static",
+                    }
+                ],
+                "mac_address": "52:54:00:3a:01:35",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "virbr0": {
+                "enabled": True,
+                "links": [{"address": "192.168.122.1/24", "mode": "static"}],
+                "mac_address": "52:54:00:3a:01:36",
+                "parents": ["virbr0-nic"],
+                "source": "ipaddr",
+                "type": "bridge",
+            },
+            "virbr0-nic": {
+                "enabled": False,
+                "mac_address": "52:54:00:3a:01:36",
+                "links": [],
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        subnet = get_one(Subnet.objects.filter(cidr="10.0.0.0/24"))
+        self.assertIsNotNone(subnet)
+        subnet = get_one(Subnet.objects.filter(cidr="192.168.122.0/24"))
+        self.assertIsNotNone(subnet)
+
+    def test_registers_bridge_with_no_parents_and_links(self):
+        controller = self.create_empty_controller()
+        interfaces = {
+            "br0": {
+                "enabled": True,
+                "mac_address": "4e:4d:9a:a8:a5:5f",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "bridge",
+                "links": [{"mode": "static", "address": "192.168.0.1/24"}],
+            },
+            "eth0": {
+                "enabled": True,
+                "mac_address": "52:54:00:77:15:e3",
+                "links": [],
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = get_one(
+            PhysicalInterface.objects.filter(node=controller, name="eth0")
+        )
+        br0 = get_one(
+            BridgeInterface.objects.filter(node=controller, name="br0")
+        )
+        self.assertIsNotNone(eth0)
+        self.assertIsNotNone(br0)
+        subnet = get_one(Subnet.objects.filter(cidr="192.168.0.0/24"))
+        self.assertIsNotNone(subnet)
+        self.assertThat(subnet.vlan, Equals(br0.vlan))
+
+    def test_registers_bridge_with_no_parents_and_no_links(self):
+        controller = self.create_empty_controller()
+        interfaces = {
+            "br0": {
+                "enabled": True,
+                "links": [],
+                "mac_address": "4e:4d:9a:a8:a5:5f",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "bridge",
+            },
+            "eth0": {
+                "enabled": True,
+                "links": [],
+                "mac_address": "52:54:00:77:15:e3",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = get_one(
+            PhysicalInterface.objects.filter(node=controller, name="eth0")
+        )
+        br0 = get_one(
+            BridgeInterface.objects.filter(node=controller, name="br0")
+        )
+        self.assertIsNotNone(eth0)
+        self.assertIsNotNone(br0)
+
+    def test_disabled_interfaces_do_not_create_fabrics(self):
+        controller = self.create_empty_controller()
+        interfaces = {
+            "eth0": {
+                "enabled": True,
+                "links": [],
+                "mac_address": "52:54:00:77:15:e3",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "eth1": {
+                "enabled": False,
+                "links": [],
+                "mac_address": "52:54:00:77:15:e4",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+        }
+        self.update_interfaces(controller, interfaces)
+        eth0 = get_one(
+            PhysicalInterface.objects.filter(node=controller, name="eth0")
+        )
+        eth1 = get_one(
+            PhysicalInterface.objects.filter(node=controller, name="eth1")
+        )
+        self.assertIsNotNone(eth0.vlan)
+        self.assertIsNone(eth1.vlan)
+
+    def test_subnet_seen_on_second_controller_does_not_create_fabric(self):
+        alice = self.create_empty_controller()
+        bob = self.create_empty_controller()
+        alice_interfaces = {
+            "eth0": {
+                "enabled": True,
+                "links": [{"address": "192.168.0.1/24", "mode": "dhcp"}],
+                "mac_address": "52:54:00:77:15:e3",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "eth1": {
+                "enabled": False,
+                "links": [],
+                "mac_address": "52:54:00:77:15:e4",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+        }
+        bob_interfaces = {
+            "eth0": {
+                "enabled": True,
+                "links": [{"address": "192.168.0.2/24", "mode": "dhcp"}],
+                "mac_address": "52:54:00:87:25:f3",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "eth1": {
+                "enabled": False,
+                "links": [],
+                "mac_address": "52:54:00:87:25:f4",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+        }
+        self.update_interfaces(alice, alice_interfaces)
+        self.update_interfaces(bob, bob_interfaces)
+        alice_eth0 = get_one(
+            PhysicalInterface.objects.filter(node=alice, name="eth0")
+        )
+        bob_eth0 = get_one(
+            PhysicalInterface.objects.filter(node=bob, name="eth0")
+        )
+        self.assertThat(alice_eth0.vlan, Equals(bob_eth0.vlan))
+
+
+class TestUpdateInterfacesWithHints(
+    MAASTransactionServerTestCase, UpdateInterfacesMixin
+):
+
+    scenarios = UpdateInterfacesMixin.scenarios
+
+    def test_seen_on_second_controller_with_hints(self):
+        alice = self.create_empty_controller()
+        bob = self.create_empty_controller()
+        factory.make_Node()
+        alice_interfaces = {
+            "eth0": {
+                "enabled": True,
+                "links": [{"address": "192.168.0.1/24", "mode": "dhcp"}],
+                "mac_address": "52:54:00:77:15:e3",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "eth1": {
+                "enabled": False,
+                "links": [],
+                "mac_address": "52:54:00:77:15:e4",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+        }
+        bob_interfaces = {
+            "eth0": {
+                "enabled": True,
+                "links": [],
+                "mac_address": "52:54:00:87:25:f3",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "eth1": {
+                "enabled": True,
+                "links": [],
+                "mac_address": "52:54:00:87:25:f4",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+        }
+        bob_hints = [
+            {
+                "hint": "same_local_fabric_as",
+                "ifname": "eth0",
+                "related_ifname": "eth1",
+            },
+            {
+                "hint": "on_remote_network",
+                "ifname": "eth0",
+                "related_ifname": "eth0",
+                "related_mac": "52:54:00:77:15:e3",
+            },
+            {
+                "hint": "routable_to",
+                "ifname": "eth0",
+                "related_ifname": "eth0",
+                "related_mac": "52:54:00:77:15:e3",
+            },
+            {
+                "hint": "rx_own_beacon_on_other_interface",
+                "ifname": "eth1",
+                "related_ifname": "eth0",
+            },
+        ]
+        self.update_interfaces(alice, alice_interfaces)
+        self.update_interfaces(bob, bob_interfaces, bob_hints)
+        alice_eth0 = get_one(
+            PhysicalInterface.objects.filter(node=alice, name="eth0")
+        )
+        bob_eth0 = get_one(
+            PhysicalInterface.objects.filter(node=bob, name="eth0")
+        )
+        bob_eth1 = get_one(
+            PhysicalInterface.objects.filter(node=bob, name="eth1")
+        )
+        if not self.with_beaconing:
+            # Legacy mode; we'll see lots of VLANs and fabrics if an older
+            # rack registers with this configuration.
+            self.assertThat(alice_eth0.vlan, Not(Equals(bob_eth0.vlan)))
+            self.assertThat(bob_eth1.vlan, Not(Equals(bob_eth0.vlan)))
+        else:
+            # Registration with beaconing; we should see all these interfaces
+            # appear on the same VLAN.
+            self.assertThat(alice_eth0.vlan, Equals(bob_eth0.vlan))
+            self.assertThat(bob_eth1.vlan, Equals(bob_eth0.vlan))
+
+    def test_bridge_seen_on_second_controller_with_hints(self):
+        alice = self.create_empty_controller()
+        bob = self.create_empty_controller()
+        factory.make_Node()
+        alice_interfaces = {
+            "br0": {
+                "enabled": True,
+                "links": [{"address": "192.168.0.1/24", "mode": "dhcp"}],
+                "mac_address": "52:54:00:77:15:e3",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "bridge",
+            },
+            "eth1": {
+                "enabled": False,
+                "links": [],
+                "mac_address": "52:54:00:77:15:e4",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+        }
+        bob_interfaces = {
+            "eth0": {
+                "enabled": True,
+                "links": [],
+                "mac_address": "52:54:00:87:25:f3",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+            "eth1": {
+                "enabled": True,
+                "links": [],
+                "mac_address": "52:54:00:87:25:f4",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            },
+        }
+        bob_hints = [
+            {
+                "hint": "same_local_fabric_as",
+                "ifname": "eth0",
+                "related_ifname": "eth1",
+            },
+            {
+                "hint": "on_remote_network",
+                "ifname": "eth0",
+                "related_ifname": "br0",
+                "related_mac": "52:54:00:77:15:e3",
+            },
+            {
+                "hint": "routable_to",
+                "ifname": "eth0",
+                "related_ifname": "br0",
+                "related_mac": "52:54:00:77:15:e3",
+            },
+            {
+                "hint": "rx_own_beacon_on_other_interface",
+                "ifname": "eth1",
+                "related_ifname": "eth0",
+            },
+        ]
+        self.update_interfaces(alice, alice_interfaces)
+        self.update_interfaces(bob, bob_interfaces, bob_hints)
+        alice_br0 = get_one(
+            BridgeInterface.objects.filter(node=alice, name="br0")
+        )
+        bob_eth0 = get_one(
+            PhysicalInterface.objects.filter(node=bob, name="eth0")
+        )
+        bob_eth1 = get_one(
+            PhysicalInterface.objects.filter(node=bob, name="eth1")
+        )
+        if not self.with_beaconing:
+            # Legacy mode; we'll see lots of VLANs and fabrics if an older
+            # rack registers with this configuration.
+            self.assertThat(alice_br0.vlan, Not(Equals(bob_eth0.vlan)))
+            self.assertThat(bob_eth1.vlan, Not(Equals(bob_eth0.vlan)))
+        else:
+            # Registration with beaconing; we should see all these interfaces
+            # appear on the same VLAN.
+            self.assertThat(alice_br0.vlan, Equals(bob_eth0.vlan))
+            self.assertThat(bob_eth1.vlan, Equals(bob_eth0.vlan))
+
+    def test_update_interfaces_iface_changed_mac(self):
+        node = self.create_empty_controller()
+        interfaces = {
+            "eth1": {
+                "enabled": True,
+                "links": [],
+                "mac_address": "aa:bb:cc:dd:ee:ff",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            }
+        }
+        self.update_interfaces(node, interfaces)
+        interfaces = {
+            "eth1": {
+                "enabled": True,
+                "links": [],
+                "mac_address": "aa:bb:cc:dd:ee:00",
+                "parents": [],
+                "source": "ipaddr",
+                "type": "physical",
+            }
+        }
+        self.update_interfaces(node, interfaces)
+
+
 class TestRackControllerRefresh(MAASTransactionServerTestCase):
     def setUp(self):
         super().setUp()
@@ -10376,32 +13457,73 @@ class TestRackControllerRefresh(MAASTransactionServerTestCase):
         self.useFixture(RunningEventLoopFixture())
         self.rpc = self.useFixture(MockLiveRegionToClusterRPCFixture())
         self.rackcontroller = factory.make_RackController()
+        self.protocol = self.rpc.makeCluster(
+            self.rackcontroller, RefreshRackControllerInfo
+        )
+
+    def get_token_for_rackcontroller(self):
+        token = NodeKey.objects.get_token_for_node(self.rackcontroller)
+        token.consumer.key  # Fetch this now while we're in the database.
+        return token
+
+    def test_refresh_calls_region_refresh_when_on_node(self):
+        rack = factory.make_RackController()
+        self.patch(node_module, "get_maas_id").return_value = rack.system_id
+        mock_refresh = self.patch(node_module.RegionController, "refresh")
+        rack.refresh()
+        self.assertThat(mock_refresh, MockCalledOnce())
 
     @wait_for_reactor
     @defer.inlineCallbacks
-    def test_prepares_for_refresh(self):
-        def get_events(rack):
-            return [
-                (event.type.name, event.owner, event.action)
-                for event in Event.objects.filter(
-                    node_system_id=rack.system_id
-                )
-            ]
-
-        rack = yield deferToDatabase(factory.make_RackController)
-        credentials = yield rack.start_refresh()
-        self.assertCountEqual(
-            ["consumer_key", "token_key", "token_secret"], credentials.keys()
+    def test_refresh_issues_rpc_call(self):
+        self.protocol.RefreshRackControllerInfo.return_value = defer.succeed(
+            {"maas_version": factory.make_name("maas_version")}
         )
 
-        events = yield deferToDatabase(get_events, rack)
-        [(event_name, event_owner, event_action)] = [
-            (event_name, event_owner, event_action)
-            for (event_name, event_owner, event_action) in events
-            if event_name == "REQUEST_CONTROLLER_REFRESH"
-        ]
-        self.assertEqual(rack.owner.username, event_owner)
-        self.assertEqual("starting refresh", event_action)
+        yield self.rackcontroller.refresh()
+        token = yield deferToDatabase(self.get_token_for_rackcontroller)
+
+        self.expectThat(
+            self.protocol.RefreshRackControllerInfo,
+            MockCalledOnceWith(
+                ANY,
+                system_id=self.rackcontroller.system_id,
+                consumer_key=token.consumer.key,
+                token_key=token.key,
+                token_secret=token.secret,
+            ),
+        )
+
+    @wait_for_reactor
+    @defer.inlineCallbacks
+    def test_refresh_logs_user_request(self):
+        self.protocol.RefreshRackControllerInfo.return_value = defer.succeed(
+            {"maas_version": factory.make_name("maas_version")}
+        )
+
+        register_event = self.patch(
+            self.rackcontroller, "_register_request_event"
+        )
+
+        yield self.rackcontroller.refresh()
+        self.assertThat(
+            register_event,
+            MockCalledOnceWith(
+                self.rackcontroller.owner,
+                EVENT_TYPES.REQUEST_CONTROLLER_REFRESH,
+                action="starting refresh",
+            ),
+        )
+
+    @wait_for_reactor
+    @defer.inlineCallbacks
+    def test_refresh_does_nothing_when_locked(self):
+        self.protocol.RefreshRackControllerInfo.return_value = defer.fail(
+            RefreshAlreadyInProgress()
+        )
+        mock_save = self.patch(self.rackcontroller, "save")
+        yield self.rackcontroller.refresh()
+        self.assertThat(mock_save, MockNotCalled())
 
 
 class TestRackController(MAASTransactionServerTestCase):
@@ -10425,9 +13547,6 @@ class TestRackController(MAASTransactionServerTestCase):
         power_control = factory.make_name("power_control")
         port = random.randint(0, 65535)
         given_protocol = factory.make_name("protocol")
-        token_name = factory.make_name("token_name")
-        token_secret = factory.make_name("token_secret")
-        verify_ssl = factory.pick_bool()
 
         rackcontroller.add_chassis(
             user,
@@ -10441,9 +13560,6 @@ class TestRackController(MAASTransactionServerTestCase):
             power_control,
             port,
             given_protocol,
-            token_name,
-            token_secret,
-            verify_ssl,
         )
 
         self.expectThat(
@@ -10461,9 +13577,6 @@ class TestRackController(MAASTransactionServerTestCase):
                 power_control=power_control,
                 port=port,
                 protocol=given_protocol,
-                token_name=token_name,
-                token_secret=token_secret,
-                verify_ssl=verify_ssl,
             ),
         )
 
@@ -10487,9 +13600,6 @@ class TestRackController(MAASTransactionServerTestCase):
         power_control = factory.make_name("power_control")
         port = random.randint(0, 65535)
         given_protocol = factory.make_name("protocol")
-        token_name = factory.make_name("token_name")
-        token_secret = factory.make_name("token_secret")
-        verify_ssl = factory.pick_bool()
 
         register_event = self.patch(rackcontroller, "_register_request_event")
         rackcontroller.add_chassis(
@@ -10504,9 +13614,6 @@ class TestRackController(MAASTransactionServerTestCase):
             power_control,
             port,
             given_protocol,
-            token_name,
-            token_secret,
-            verify_ssl,
         )
         post_commit_hooks.reset()  # Ignore these for now.
         self.assertThat(
@@ -10700,7 +13807,7 @@ class TestRackController(MAASTransactionServerTestCase):
         )
         system_id = region_and_rack.system_id
         region_and_rack.as_rack_controller().delete()
-        self.assertEqual(
+        self.assertEquals(
             NODE_TYPE.REGION_CONTROLLER,
             Node.objects.get(system_id=system_id).node_type,
         )
@@ -10710,7 +13817,7 @@ class TestRackController(MAASTransactionServerTestCase):
         rack.bmc = factory.make_BMC()
         rack.save()
         rack.delete()
-        self.assertEqual(
+        self.assertEquals(
             NODE_TYPE.MACHINE,
             Node.objects.get(system_id=rack.system_id).node_type,
         )
@@ -10820,16 +13927,16 @@ class TestRackController(MAASTransactionServerTestCase):
         images = rack_controller.list_boot_images()
         self.assertTrue(images["connected"])
         self.assertItemsEqual(self.expected_images, images["images"])
-        self.assertEqual("synced", images["status"])
-        self.assertEqual("synced", rack_controller.get_image_sync_status())
+        self.assertEquals("synced", images["status"])
+        self.assertEquals("synced", rack_controller.get_image_sync_status())
 
     def test_list_boot_images_when_disconnected(self):
         rack_controller = factory.make_RackController()
         images = rack_controller.list_boot_images()
-        self.assertEqual(False, images["connected"])
+        self.assertEquals(False, images["connected"])
         self.assertItemsEqual([], images["images"])
-        self.assertEqual("unknown", images["status"])
-        self.assertEqual("unknown", rack_controller.get_image_sync_status())
+        self.assertEquals("unknown", images["status"])
+        self.assertEquals("unknown", rack_controller.get_image_sync_status())
 
     def test_list_boot_images_when_connection_closed(self):
         rack_controller = factory.make_RackController()
@@ -10837,10 +13944,10 @@ class TestRackController(MAASTransactionServerTestCase):
             boot_images, "get_boot_images"
         ).side_effect = ConnectionClosed()
         images = rack_controller.list_boot_images()
-        self.assertEqual(False, images["connected"])
+        self.assertEquals(False, images["connected"])
         self.assertItemsEqual([], images["images"])
-        self.assertEqual("unknown", images["status"])
-        self.assertEqual("unknown", rack_controller.get_image_sync_status())
+        self.assertEquals("unknown", images["status"])
+        self.assertEquals("unknown", rack_controller.get_image_sync_status())
 
     def test_list_boot_images_region_importing(self):
         rack_controller = factory.make_RackController()
@@ -10855,8 +13962,8 @@ class TestRackController(MAASTransactionServerTestCase):
         self.assertThat(fake_is_import_resources_running, MockCalledOnce())
         self.assertTrue(images["connected"])
         self.assertItemsEqual(self.expected_images, images["images"])
-        self.assertEqual("region-importing", images["status"])
-        self.assertEqual(
+        self.assertEquals("region-importing", images["status"])
+        self.assertEquals(
             "region-importing", rack_controller.get_image_sync_status()
         )
 
@@ -10874,8 +13981,8 @@ class TestRackController(MAASTransactionServerTestCase):
         images = rack_controller.list_boot_images()
         self.assertTrue(images["connected"])
         self.assertItemsEqual(self.expected_images, images["images"])
-        self.assertEqual("syncing", images["status"])
-        self.assertEqual("syncing", rack_controller.get_image_sync_status())
+        self.assertEquals("syncing", images["status"])
+        self.assertEquals("syncing", rack_controller.get_image_sync_status())
 
     def test_list_boot_images_out_of_sync(self):
         rack_controller = factory.make_RackController()
@@ -10891,8 +13998,8 @@ class TestRackController(MAASTransactionServerTestCase):
         images = rack_controller.list_boot_images()
         self.assertTrue(images["connected"])
         self.assertItemsEqual(self.expected_images, images["images"])
-        self.assertEqual("out-of-sync", images["status"])
-        self.assertEqual(
+        self.assertEquals("out-of-sync", images["status"])
+        self.assertEquals(
             "out-of-sync", rack_controller.get_image_sync_status()
         )
 
@@ -10908,7 +14015,7 @@ class TestRackController(MAASTransactionServerTestCase):
         images = rack_controller.list_boot_images()
         self.assertTrue(images["connected"])
         self.assertItemsEqual([], images["images"])
-        self.assertEqual("syncing", images["status"])
+        self.assertEquals("syncing", images["status"])
 
     def test_is_import_images_running(self):
         running = factory.pick_bool()
@@ -10922,7 +14029,7 @@ class TestRackController(MAASTransactionServerTestCase):
         protocol.IsImportBootImagesRunning.return_value = defer.succeed(
             {"running": running}
         )
-        self.assertEqual(
+        self.assertEquals(
             running, rackcontroller.is_import_boot_images_running()
         )
 
@@ -10938,7 +14045,7 @@ class TestRegionController(MAASServerTestCase):
             node_type=NODE_TYPE.REGION_AND_RACK_CONTROLLER
         )
         region_and_rack.as_region_controller().delete()
-        self.assertEqual(
+        self.assertEquals(
             NODE_TYPE.RACK_CONTROLLER,
             Node.objects.get(system_id=region_and_rack.system_id).node_type,
         )
@@ -10948,7 +14055,7 @@ class TestRegionController(MAASServerTestCase):
         region.bmc = factory.make_BMC()
         region.save()
         region.delete()
-        self.assertEqual(
+        self.assertEquals(
             NODE_TYPE.MACHINE,
             Node.objects.get(system_id=region.system_id).node_type,
         )
@@ -10957,6 +14064,104 @@ class TestRegionController(MAASServerTestCase):
         region = factory.make_RegionController()
         region.delete()
         self.assertIsNone(reload_object(region))
+
+
+class TestRegionControllerRefresh(MAASTransactionServerTestCase):
+    @wait_for_reactor
+    @defer.inlineCallbacks
+    def test_only_runs_on_running_region(self):
+        region = yield deferToDatabase(factory.make_RegionController)
+
+        with ExpectedException(NotImplementedError):
+            yield region.refresh()
+
+    @wait_for_reactor
+    @defer.inlineCallbacks
+    def test_acquires_and_releases_lock(self):
+        region = yield deferToDatabase(factory.make_RegionController)
+        mock_lock = self.patch_autospec(node_module, "NamedLock", NamedLock)
+        self.patch_autospec(node_module, "refresh")
+        self.patch_autospec(
+            node_module, "get_maas_id"
+        ).return_value = region.system_id
+
+        yield region.refresh()
+        mock_lock.assert_called_once_with("refresh")
+        mock_lock("refresh").__enter__.assert_called_once_with()
+        mock_lock("refresh").__exit__.assert_called_once_with(None, None, None)
+
+    @wait_for_reactor
+    @defer.inlineCallbacks
+    def test_lock_released_on_error(self):
+        exception = factory.make_exception()
+        self.patch_autospec(node_module, "refresh").side_effect = exception
+        region = yield deferToDatabase(factory.make_RegionController)
+        self.patch_autospec(
+            node_module, "get_maas_id"
+        ).return_value = region.system_id
+
+        with ExpectedException(type(exception)):
+            yield region.refresh()
+        lock = NamedLock("refresh")
+        self.assertFalse(lock.is_locked())
+
+    @wait_for_reactor
+    @defer.inlineCallbacks
+    def test_does_nothing_when_locked(self):
+        region = yield deferToDatabase(factory.make_RegionController)
+        self.patch(node_module, "get_maas_id").return_value = region.system_id
+        mock_deferToDatabase = self.patch(node_module, "deferToDatabase")
+        with NamedLock("refresh"):
+            yield region.refresh()
+        self.assertThat(mock_deferToDatabase, MockNotCalled())
+
+    @wait_for_reactor
+    @defer.inlineCallbacks
+    def test_logs_user_request(self):
+        region = yield deferToDatabase(factory.make_RegionController)
+        self.patch_autospec(
+            node_module, "get_maas_id"
+        ).return_value = region.system_id
+        self.patch_autospec(node_module, "refresh")
+        register_event = self.patch(region, "_register_request_event")
+
+        yield region.refresh()
+        self.assertThat(
+            register_event,
+            MockCalledOnceWith(
+                region.owner,
+                EVENT_TYPES.REQUEST_CONTROLLER_REFRESH,
+                action="starting refresh",
+            ),
+        )
+
+    @wait_for_reactor
+    @defer.inlineCallbacks
+    def test_runs_refresh(self):
+        def get_token_for_controller(region):
+            token = NodeKey.objects.get_token_for_node(region)
+            token.consumer.key  # Fetch this now while we're in the database.
+            return token
+
+        region = yield deferToDatabase(factory.make_RegionController)
+        self.patch(node_module, "get_maas_id").return_value = region.system_id
+        mock_refresh = self.patch(node_module, "refresh")
+        self.patch(node_module, "get_sys_info").return_value = {
+            "hostname": region.hostname,
+            "architecture": region.architecture,
+            "osystem": "",
+            "distro_series": "",
+            "interfaces": {},
+        }
+        yield region.refresh()
+        token = yield deferToDatabase(get_token_for_controller, region)
+
+        self.expectThat(
+            mock_refresh,
+            MockCalledOnceWith(
+                region.system_id, token.consumer.key, token.key, token.secret
+            ),
+        )
 
 
 class TestControllerGetDiscoveryState(MAASServerTestCase):
@@ -11816,7 +15021,7 @@ class TestNodeInterfaceClone__MappingBetweenNodes(MAASServerTestCase):
         error = self.assertRaises(
             ValidationError, node2._get_interface_mapping_between_nodes, node1
         )
-        self.assertEqual(
+        self.assertEquals(
             "destination node physical interfaces do not match the "
             "source nodes physical interfaces: other, match",
             error.message,

@@ -11,7 +11,6 @@ from maasserver.models.virtualmachine import VirtualMachine
 DISPLAYED_VM_FIELDS = (
     "id",
     "identifier",
-    "project",
     "pinned_cores",
     "unpinned_cores",
     "memory",
@@ -29,7 +28,6 @@ class VirtualMachineHandler(ModelOperationsHandler):
     """
 
     api_doc_section_name = "Virtual Machine"
-    hidden = True
 
     update = delete = None
     model = VirtualMachine
@@ -45,7 +43,6 @@ class VirtualMachinesHandler(ModelCollectionOperationsHandler):
     """
 
     api_doc_section_name = "Virtual Machines"
-    hidden = True
 
     model_manager = VirtualMachine.objects
     handler_url_name = "virtual_machines_handler"

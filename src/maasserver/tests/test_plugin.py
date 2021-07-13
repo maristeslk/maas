@@ -256,7 +256,6 @@ class TestRegionMasterServiceMaker(TestServiceMaker):
             "reverse-dns",
             "ntp",
             "syslog",
-            "version-check",
             "workers",
             "ipc-master",
         ]
@@ -363,7 +362,6 @@ class TestRegionAllInOneServiceMaker(TestServiceMaker):
             "rpc",
             "service-monitor",
             "status-worker",
-            "version-check",
             "web",
             "ipc-worker",
             # Master services.

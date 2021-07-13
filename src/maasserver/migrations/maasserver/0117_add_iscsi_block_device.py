@@ -3,6 +3,8 @@ from __future__ import unicode_literals
 
 from django.db import migrations, models
 
+import maasserver.models.iscsiblockdevice
+
 
 class Migration(migrations.Migration):
 
@@ -26,6 +28,9 @@ class Migration(migrations.Migration):
                 (
                     "target",
                     models.CharField(
+                        validators=[
+                            maasserver.models.iscsiblockdevice.validate_iscsi_target
+                        ],
                         max_length=4096,
                         unique=True,
                     ),

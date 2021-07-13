@@ -14,14 +14,13 @@ from twisted.internet.defer import fail
 
 from maasserver import stats
 from maasserver.enum import IPADDRESS_TYPE, IPRANGE_TYPE, NODE_STATUS
-from maasserver.models import Config, Fabric, OwnerData, Space, Subnet, VLAN
+from maasserver.models import Config, Fabric, Space, Subnet, VLAN
 from maasserver.stats import (
+    get_kvm_pods_stats,
     get_maas_stats,
     get_machine_stats,
     get_machines_by_architecture,
     get_request_params,
-    get_vm_hosts_stats,
-    get_workload_annotations_stats,
     make_maas_user_agent_request,
 )
 from maasserver.testing.factory import factory
@@ -36,14 +35,7 @@ from provisioningserver.utils.twisted import asynchronous
 
 
 class TestMAASStats(MAASServerTestCase):
-    def make_pod(
-        self,
-        cpu=0,
-        mem=0,
-        cpu_over_commit=1,
-        mem_over_commit=1,
-        pod_type="virsh",
-    ):
+    def make_pod(self, cpu=0, mem=0, cpu_over_commit=1, mem_over_commit=1):
         # Make one pod
         zone = factory.make_Zone()
         pool = factory.make_ResourcePool()
@@ -53,7 +45,7 @@ class TestMAASStats(MAASServerTestCase):
             "power_pass": "pass",
         }
         return factory.make_Pod(
-            pod_type=pod_type,
+            pod_type="virsh",
             zone=zone,
             pool=pool,
             cores=cpu,
@@ -75,9 +67,9 @@ class TestMAASStats(MAASServerTestCase):
             factory.make_Machine(architecture=arch)
         stats = get_machines_by_architecture()
         compare = {"amd64": 1, "i386": 1, "arm64": 1, "ppc64el": 1, "s390x": 1}
-        self.assertEqual(stats, compare)
+        self.assertEquals(stats, compare)
 
-    def test_get_vm_hosts_stats(self):
+    def test_get_kvm_pods_stats(self):
         pod1 = self.make_pod(
             cpu=10, mem=100, cpu_over_commit=2, mem_over_commit=3
         )
@@ -96,81 +88,35 @@ class TestMAASStats(MAASServerTestCase):
             + pod2.memory * pod2.memory_over_commit_ratio
         )
 
-        stats = get_vm_hosts_stats()
+        stats = get_kvm_pods_stats()
         compare = {
-            "vm_hosts": 2,
-            "vms": 0,
-            "available_resources": {
+            "kvm_pods": 2,
+            "kvm_machines": 0,
+            "kvm_available_resources": {
                 "cores": total_cores,
                 "memory": total_memory,
                 "over_cores": over_cores,
                 "over_memory": over_memory,
                 "storage": 0,
             },
-            "utilized_resources": {"cores": 0, "memory": 0, "storage": 0},
+            "kvm_utilized_resources": {"cores": 0, "memory": 0, "storage": 0},
         }
-        self.assertEqual(compare, stats)
+        self.assertEquals(compare, stats)
 
-    def test_get_vm_hosts_stats_filtered(self):
-        self.make_pod(cpu=10, mem=100, pod_type="lxd")
-        self.make_pod(cpu=20, mem=200, pod_type="virsh")
-
-        stats = get_vm_hosts_stats(power_type="lxd")
-        compare = {
-            "vm_hosts": 1,
-            "vms": 0,
-            "available_resources": {
-                "cores": 10,
-                "memory": 100,
-                "over_cores": 10.0,
-                "over_memory": 100.0,
-                "storage": 0,
-            },
-            "utilized_resources": {"cores": 0, "memory": 0, "storage": 0},
-        }
-        self.assertEqual(compare, stats)
-
-    def test_get_vm_hosts_stats_machine_usage(self):
-        lxd_vm_host = self.make_pod(cpu=10, mem=100, pod_type="lxd")
-        lxd_machine = factory.make_Machine(
-            bmc=lxd_vm_host, cpu_count=1, memory=10
-        )
-        factory.make_VirtualMachine(bmc=lxd_vm_host, machine=lxd_machine)
-        virsh_vm_host = self.make_pod(cpu=20, mem=200, pod_type="virsh")
-        virsh_machine = factory.make_Machine(
-            bmc=virsh_vm_host, cpu_count=2, memory=20
-        )
-        factory.make_VirtualMachine(bmc=virsh_vm_host, machine=virsh_machine)
-
-        stats = get_vm_hosts_stats(power_type="lxd")
-        compare = {
-            "vm_hosts": 1,
-            "vms": 1,
-            "available_resources": {
-                "cores": 10,
-                "memory": 100,
-                "over_cores": 10.0,
-                "over_memory": 100.0,
-                "storage": 0,
-            },
-            "utilized_resources": {"cores": 1, "memory": 10, "storage": 0},
-        }
-        self.assertEqual(compare, stats)
-
-    def test_get_vm_hosts_stats_no_pod(self):
+    def test_get_kvm_pods_stats_no_pod(self):
         self.assertEqual(
-            get_vm_hosts_stats(),
+            get_kvm_pods_stats(),
             {
-                "vm_hosts": 0,
-                "vms": 0,
-                "available_resources": {
+                "kvm_pods": 0,
+                "kvm_machines": 0,
+                "kvm_available_resources": {
                     "cores": 0,
                     "memory": 0,
                     "storage": 0,
                     "over_cores": 0,
                     "over_memory": 0,
                 },
-                "utilized_resources": {
+                "kvm_utilized_resources": {
                     "cores": 0,
                     "memory": 0,
                     "storage": 0,
@@ -191,13 +137,10 @@ class TestMAASStats(MAASServerTestCase):
         factory.make_Machine(
             cpu_count=3, memory=100, status=NODE_STATUS.FAILED_DEPLOYMENT
         )
-        factory.make_Machine(status=NODE_STATUS.DEPLOYED)
-        deployed_machine = factory.make_Machine(status=NODE_STATUS.DEPLOYED)
-        OwnerData.objects.set_owner_data(deployed_machine, {"foo": "bar"})
+        for _ in range(2):
+            factory.make_Machine(status=NODE_STATUS.DEPLOYED)
         factory.make_Device()
         factory.make_Device()
-        self.make_pod(cpu=10, mem=100, pod_type="lxd")
-        self.make_pod(cpu=20, mem=200, pod_type="virsh")
 
         subnets = Subnet.objects.all()
         v4 = [net for net in subnets if net.get_ip_version() == 4]
@@ -239,80 +182,8 @@ class TestMAASStats(MAASServerTestCase):
                 "subnets_v4": len(v4),
                 "subnets_v6": len(v6),
             },
-            "vm_hosts": {
-                "lxd": {
-                    "vm_hosts": 1,
-                    "vms": 0,
-                    "available_resources": {
-                        "cores": 10,
-                        "memory": 100,
-                        "over_cores": 10.0,
-                        "over_memory": 100.0,
-                        "storage": 0,
-                    },
-                    "utilized_resources": {
-                        "cores": 0,
-                        "memory": 0,
-                        "storage": 0,
-                    },
-                },
-                "virsh": {
-                    "vm_hosts": 1,
-                    "vms": 0,
-                    "available_resources": {
-                        "cores": 20,
-                        "memory": 200,
-                        "over_cores": 20.0,
-                        "over_memory": 200.0,
-                        "storage": 0,
-                    },
-                    "utilized_resources": {
-                        "cores": 0,
-                        "memory": 0,
-                        "storage": 0,
-                    },
-                },
-            },
-            "workload_annotations": {
-                "annotated_machines": 1,
-                "total_annotations": 1,
-                "unique_keys": 1,
-                "unique_values": 1,
-            },
         }
-        self.assertEqual(stats, expected)
-
-    def test_get_workload_annotations_stats_machines(self):
-        machine1 = factory.make_Machine(status=NODE_STATUS.DEPLOYED)
-        machine2 = factory.make_Machine(status=NODE_STATUS.DEPLOYED)
-        machine3 = factory.make_Machine(status=NODE_STATUS.DEPLOYED)
-        factory.make_Machine(status=NODE_STATUS.DEPLOYED)
-
-        OwnerData.objects.set_owner_data(
-            machine1, {"key1": "value1", "key2": "value2"}
-        )
-        OwnerData.objects.set_owner_data(machine2, {"key1": "value1"})
-        OwnerData.objects.set_owner_data(machine3, {"key2": "value2"})
-
-        workload_stats = get_workload_annotations_stats()
-        self.assertEqual(3, workload_stats["annotated_machines"])
-
-    def test_get_workload_annotations_stats_keys(self):
-        machine1 = factory.make_Machine(status=NODE_STATUS.DEPLOYED)
-        machine2 = factory.make_Machine(status=NODE_STATUS.DEPLOYED)
-        machine3 = factory.make_Machine(status=NODE_STATUS.DEPLOYED)
-        factory.make_Machine(status=NODE_STATUS.DEPLOYED)
-
-        OwnerData.objects.set_owner_data(
-            machine1, {"key1": "value1", "key2": "value2"}
-        )
-        OwnerData.objects.set_owner_data(machine2, {"key1": "value3"})
-        OwnerData.objects.set_owner_data(machine3, {"key2": "value2"})
-
-        workload_stats = get_workload_annotations_stats()
-        self.assertEqual(4, workload_stats["total_annotations"])
-        self.assertEqual(2, workload_stats["unique_keys"])
-        self.assertEqual(3, workload_stats["unique_values"])
+        self.assertEquals(json.loads(stats), expected)
 
     def test_get_maas_stats_no_machines(self):
         expected = {
@@ -338,62 +209,22 @@ class TestMAASStats(MAASServerTestCase):
             },
             "network_stats": {
                 "spaces": 0,
-                "fabrics": Fabric.objects.count(),
-                "vlans": VLAN.objects.count(),
+                "fabrics": 1,
+                "vlans": 1,
                 "subnets_v4": 0,
                 "subnets_v6": 0,
             },
-            "vm_hosts": {
-                "lxd": {
-                    "vm_hosts": 0,
-                    "vms": 0,
-                    "available_resources": {
-                        "cores": 0,
-                        "memory": 0,
-                        "over_cores": 0.0,
-                        "over_memory": 0.0,
-                        "storage": 0,
-                    },
-                    "utilized_resources": {
-                        "cores": 0,
-                        "memory": 0,
-                        "storage": 0,
-                    },
-                },
-                "virsh": {
-                    "vm_hosts": 0,
-                    "vms": 0,
-                    "available_resources": {
-                        "cores": 0,
-                        "memory": 0,
-                        "over_cores": 0.0,
-                        "over_memory": 0.0,
-                        "storage": 0,
-                    },
-                    "utilized_resources": {
-                        "cores": 0,
-                        "memory": 0,
-                        "storage": 0,
-                    },
-                },
-            },
-            "workload_annotations": {
-                "annotated_machines": 0,
-                "total_annotations": 0,
-                "unique_keys": 0,
-                "unique_values": 0,
-            },
         }
-        self.assertEqual(get_maas_stats(), expected)
+        self.assertEqual(json.loads(get_maas_stats()), expected)
 
     def test_get_request_params_returns_params(self):
         factory.make_RegionRackController()
         params = {
             "data": base64.b64encode(
-                json.dumps(json.dumps(get_maas_stats())).encode()
+                json.dumps(get_maas_stats()).encode()
             ).decode()
         }
-        self.assertEqual(params, get_request_params())
+        self.assertEquals(params, get_request_params())
 
     def test_make_user_agent_request(self):
         factory.make_RegionRackController()

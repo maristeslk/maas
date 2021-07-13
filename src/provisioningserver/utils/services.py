@@ -7,11 +7,9 @@
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
 from datetime import timedelta
-import functools
 import json
 from json.decoder import JSONDecodeError
 import os
-from pathlib import Path
 from pprint import pformat
 import re
 import socket
@@ -31,8 +29,6 @@ from zope.interface.verify import verifyObject
 
 from provisioningserver.config import is_dev_environment
 from provisioningserver.logger import get_maas_logger, LegacyLogger
-from provisioningserver.refresh import refresh
-from provisioningserver.refresh.node_info_scripts import LXD_OUTPUT_NAME
 from provisioningserver.utils.beaconing import (
     age_out_uuid_queue,
     BEACON_IPV4_MULTICAST,
@@ -48,7 +44,6 @@ from provisioningserver.utils.fs import get_maas_common_command, NamedLock
 from provisioningserver.utils.network import (
     enumerate_ipv4_addresses,
     get_all_interfaces_definition,
-    get_default_monitored_interfaces,
 )
 from provisioningserver.utils.shell import get_env_with_bytes_locale
 from provisioningserver.utils.twisted import (
@@ -335,14 +330,20 @@ def interface_info_to_beacon_remote_payload(ifname, ifdata, rx_vid=None):
     :return: A subset of the ifdata, with the addition of the 'name' key,
         which will be set to the given `ifname`.
     """
-    # copy network info, filtering out unneeded fields
-    remote = {
-        key: value
-        for key, value in ifdata.items()
-        if key not in ("enabled", "monitored", "links", "source")
-    }
+    remote = ifdata.copy()
     if ifname is not None:
         remote["name"] = ifname
+    # It will be obvious to the receiver that the source interface
+    # was enabled. ;-)
+    remote.pop("enabled", None)
+    # Remote doesn't need to know which interfaces are monitored.
+    remote.pop("monitored", None)
+    # Don't need all the links, just the one that originated this
+    # packet.
+    remote.pop("links", None)
+    # Remote doesn't need to know the source or index.
+    remote.pop("source", None)
+    remote.pop("index", None)
     # The subnet will be replaced by the value of each subnet link, but if
     # no link is configured, None is the default.
     remote["subnet"] = None
@@ -481,11 +482,11 @@ class BeaconingSocketProtocol(DatagramProtocol):
             self.transport.joinGroup(
                 BEACON_IPV4_MULTICAST, interface="127.0.0.1"
             )
-            # Loopback interface always has index 1.
+            # Loopback interface always has ifindex == 1.
             join_ipv6_beacon_group(sock, 1)
-        for ifname, ifdata in self.interfaces.items():
+        for _, ifdata in self.interfaces.items():
             # Always try to join the IPv6 group on each interface.
-            join_ipv6_beacon_group(sock, socket.if_nametoindex(ifname))
+            join_ipv6_beacon_group(sock, ifdata["index"])
             # Merely joining the group with the default parameters is not
             # enough, since we want to join the group on *all* interfaces.
             # So we need to join each group using an assigned IPv4 address
@@ -606,7 +607,6 @@ class BeaconingSocketProtocol(DatagramProtocol):
             # on the configured source subnet (if any), but the basic payload
             # is ready.
             payload = {"remote": remote}
-            if_index = socket.if_nametoindex(ifname)
             links = ifdata["links"]
             if len(links) == 0:
                 # No configured links, so try sending out a link-local IPv6
@@ -614,7 +614,7 @@ class BeaconingSocketProtocol(DatagramProtocol):
                 beacon = create_beacon_payload(beacon_type, payload)
                 if verbose:
                     log.msg("Beacon payload:\n%s" % pformat(beacon.payload))
-                self.send_multicast_beacon(if_index, beacon)
+                self.send_multicast_beacon(ifdata["index"], beacon)
                 continue
             sent_ipv6 = False
             for link in ifdata["links"]:
@@ -631,12 +631,12 @@ class BeaconingSocketProtocol(DatagramProtocol):
                 else:
                     # An IPv6 socket requires the source address to be the
                     # interface index.
-                    self.send_multicast_beacon(if_index, beacon)
+                    self.send_multicast_beacon(ifdata["index"], beacon)
                     sent_ipv6 = True
             if not sent_ipv6:
                 remote["subnet"] = None
                 beacon = create_beacon_payload(beacon_type, payload)
-                self.send_multicast_beacon(if_index, beacon)
+                self.send_multicast_beacon(ifdata["index"], beacon)
 
     def solicitationReceived(self, beacon: ReceivedBeacon):
         """Called whenever a solicitation beacon is received.
@@ -954,24 +954,20 @@ class NetworksMonitoringLock(NamedLock):
         super().__init__("networks-monitoring")
 
 
-class SingleInstanceService(MultiService, metaclass=ABCMeta):
-    """A service which can have only a single instance per machine.
+class NetworksMonitoringService(MultiService, metaclass=ABCMeta):
+    """Service to monitor network interfaces for configuration changes.
 
-    It uses a named filesystem lock to prevent more than one instance running
-    on each host machine. This service attempts to acquire this lock on each
-    loop, and then it holds the lock until the service stops.
+    Parse ``/etc/network/interfaces`` and the output from ``ip addr show`` to
+    update MAAS's records of network interfaces on this host.
 
+    :param clock: An `IReactor` instance.
     """
 
-    # The service name. Subclasses must define this.
-    SERVICE_NAME = None
-    # The lock name. Subclasses must define this.
-    LOCK_NAME = None
-    # The interval at which the service action is run. Subclasses
-    # must define it as a timedelta
-    INTERVAL = None
+    interval = timedelta(seconds=30).total_seconds()
 
-    def __init__(self, clock=None):
+    def __init__(
+        self, clock=None, enable_monitoring=True, enable_beaconing=True
+    ):
         # Order is very important here. First we set the clock to the passed-in
         # reactor, so that unit tests can fake out the clock if necessary.
         # Then we call super(). The superclass will set up the structures
@@ -981,91 +977,6 @@ class SingleInstanceService(MultiService, metaclass=ABCMeta):
         # reactor.)
         self.clock = clock
         super().__init__()
-        self._lock = NamedLock(self.LOCK_NAME)
-        self._locked = False
-        # setup the periodic service
-        self._timer_service = TimerService(
-            self.INTERVAL.total_seconds(), self._do_action
-        )
-        self._timer_service.setName(self.SERVICE_NAME)
-        self._timer_service.clock = self.clock
-        self._timer_service.setServiceParent(self)
-
-    @abstractmethod
-    def do_action(self):
-        """The action to execute each interval. Subclasses must define this."""
-
-    @property
-    def is_responsible(self):
-        """Return whether the service is responsible for running the action."""
-        return self._locked
-
-    def stopService(self):
-        """Stop the service.
-
-        Ensures that sole responsibility is released.
-        """
-        d = super().stopService()
-        d.addBoth(callOut, self._release_sole_responsibility)
-        return d
-
-    @inlineCallbacks
-    def _do_action(self):
-        if not self.running:
-            return
-
-        if self._assume_sole_responsibility():
-            yield self.do_action()
-
-    def _assume_sole_responsibility(self):
-        """Assuming sole responsibility for the service action.
-
-        It does this by attempting to acquire a lock. If this service already
-        holds the lock this is a no-op.
-
-        Return True if it has responsibility, False otherwise.
-        """
-        if self._locked:
-            return True
-
-        try:
-            self._lock.acquire()
-        except self._lock.NotAvailable:
-            return False
-        else:
-            maaslog.info(
-                f"{self.LOCK_NAME}: "
-                f"Process ID {os.getpid()} assumed responsibility."
-            )
-            self._locked = True
-            return True
-
-    def _release_sole_responsibility(self):
-        """Releases sole responsibility for performing the service action.
-
-        If this service is not currently responsible this is a no-op.
-        """
-        if not self._locked:
-            return
-
-        self._lock.release()
-        self._locked = False
-
-
-class NetworksMonitoringService(SingleInstanceService):
-    """Service to monitor network interfaces for configuration changes."""
-
-    SERVICE_NAME = "updateInterfaces"
-    LOCK_NAME = "networks-monitoring"
-    INTERVAL = timedelta(seconds=30)
-
-    def __init__(
-        self,
-        clock=None,
-        enable_monitoring=True,
-        enable_beaconing=True,
-    ):
-        super().__init__(clock=clock)
         self.enable_monitoring = enable_monitoring
         self.enable_beaconing = enable_beaconing
         # The last successfully recorded interfaces.
@@ -1074,25 +985,40 @@ class NetworksMonitoringService(SingleInstanceService):
         self._beaconing = frozenset()
         self._monitoring_state = {}
         self._monitoring_mdns = False
+        self._locked = False
+        # Use a named filesystem lock to prevent more than one monitoring
+        # service running on each host machine. This service attempts to
+        # acquire this lock on each loop, and then it holds the lock until the
+        # service stops.
+        self._lock = NetworksMonitoringLock()
+        # Set up child service to update interface.
+        self.interface_monitor = TimerService(
+            self.interval, self.updateInterfaces
+        )
+        self.interface_monitor.setName("updateInterfaces")
+        self.interface_monitor.clock = self.clock
+        self.interface_monitor.setServiceParent(self)
         self.beaconing_protocol = None
 
     @inlineCallbacks
-    def do_action(self):
+    def updateInterfaces(self):
         """Update interfaces, catching and logging errors.
 
         This can be overridden by subclasses to conditionally update based on
         some external configuration.
         """
-        interfaces = None
-        try:
-            interfaces = yield maybeDeferred(self.getInterfaces)
-            yield self._updateInterfaces(interfaces)
-        except BaseException as e:
-            msg = (
-                "Failed to update and/or record network interface "
-                "configuration: %s; interfaces: %r" % (e, interfaces)
-            )
-            log.err(None, msg)
+        responsible = self._assumeSoleResponsibility()
+        if responsible:
+            interfaces = None
+            try:
+                interfaces = yield maybeDeferred(self.getInterfaces)
+                yield self._updateInterfaces(interfaces)
+            except BaseException as e:
+                msg = (
+                    "Failed to update and/or record network interface "
+                    "configuration: %s; interfaces: %r" % (e, interfaces)
+                )
+                log.err(None, msg)
 
     def getInterfaces(self):
         """Get the current network interfaces configuration.
@@ -1109,10 +1035,8 @@ class NetworksMonitoringService(SingleInstanceService):
         """
 
     @abstractmethod
-    def getRefreshDetails(self, interfaces, hints=None):
-        """Get the details for posting commissioning script output.
-
-        Returns a 3-tuple of (maas_url, system_id, credentials).
+    def recordInterfaces(self, interfaces, hints=None):
+        """Record the interfaces information.
 
         This MUST be overridden in subclasses.
         """
@@ -1141,16 +1065,50 @@ class NetworksMonitoringService(SingleInstanceService):
 
         Ensures that sole responsibility for monitoring networks is released.
         """
-        if self.is_responsible:
+        d = super().stopService()
+        if self.beaconing_protocol is not None:
+            self.beaconing_protocol.stopProtocol()
+        d.addBoth(callOut, self._releaseSoleResponsibility)
+        return d
+
+    def _assumeSoleResponsibility(self):
+        """Assuming sole responsibility for monitoring networks.
+
+        It does this by attempting to acquire a host-wide lock. If this
+        service already holds the lock this is a no-op.
+
+        :return: True if we have responsibility, False otherwise.
+        """
+        if self._locked:
+            return True
+        else:
+            try:
+                self._lock.acquire()
+            except self._lock.NotAvailable:
+                return False
+            else:
+                maaslog.info(
+                    "Networks monitoring service: Process ID %d assumed "
+                    "responsibility." % os.getpid()
+                )
+                self._locked = True
+                return True
+
+    def _releaseSoleResponsibility(self):
+        """Releases sole responsibility for monitoring networks.
+
+        Another network monitoring service on this host may then take up
+        responsibility. If this service is not currently responsible this is a
+        no-op.
+        """
+        if self._locked:
+            self._lock.release()
+            self._locked = False
             # If we were monitoring neighbours on any interfaces, we need to
             # stop the monitoring services.
             self._configureNetworkDiscovery({})
             if self.beaconing_protocol is not None:
                 self._configureBeaconing({})
-
-        if self.beaconing_protocol is not None:
-            self.beaconing_protocol.stopProtocol()
-        return super().stopService()
 
     @inlineCallbacks
     def _updateInterfaces(self, interfaces):
@@ -1168,14 +1126,7 @@ class NetworksMonitoringService(SingleInstanceService):
                 )
                 yield pause(3.0)
                 hints = self.beaconing_protocol.getJSONTopologyHints()
-            maas_url, system_id, credentials = yield self.getRefreshDetails()
-            yield self._run_refresh(
-                maas_url,
-                system_id,
-                credentials,
-                interfaces,
-                hints,
-            )
+            yield maybeDeferred(self.recordInterfaces, interfaces, hints)
             # Note: _interfacesRecorded() will reconfigure discovery after
             # recording the interfaces, so there is no need to call
             # _configureNetworkDiscovery() here.
@@ -1191,46 +1142,6 @@ class NetworksMonitoringService(SingleInstanceService):
             # If the interfaces didn't change, we still need to poll for
             # monitoring state changes.
             yield maybeDeferred(self._configureNetworkDiscovery, interfaces)
-
-    @inlineCallbacks
-    def _run_refresh(
-        self, maas_url, system_id, credentials, interfaces, hints
-    ):
-        yield deferToThread(
-            refresh,
-            system_id,
-            credentials["consumer_key"],
-            credentials["token_key"],
-            credentials["token_secret"],
-            maas_url,
-            post_process_hook=functools.partial(
-                self._annotate_commissioning, interfaces, hints
-            ),
-        )
-
-    def _annotate_commissioning(
-        self,
-        interfaces,
-        hints,
-        script_name,
-        combined_path,
-        stdout_path,
-        stderr_path,
-    ):
-        if script_name != LXD_OUTPUT_NAME:
-            return
-        lxd_data = json.loads(Path(stdout_path).read_bytes())
-        lxd_data["network-extra"] = {
-            "interfaces": interfaces,
-            "monitored-interfaces": get_default_monitored_interfaces(
-                interfaces
-            ),
-            "hints": hints,
-        }
-        Path(stdout_path).write_text(json.dumps(lxd_data, indent=4))
-        Path(combined_path).write_text(
-            Path(stdout_path).read_text() + Path(stderr_path).read_text()
-        )
 
     def _getInterfacesForBeaconing(self, interfaces: dict):
         """Return the interfaces which will be used for beaconing.

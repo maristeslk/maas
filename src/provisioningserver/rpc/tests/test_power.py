@@ -45,7 +45,7 @@ from provisioningserver.drivers.power import DEFAULT_WAITING_POLICY
 from provisioningserver.drivers.power import PowerError
 from provisioningserver.drivers.power.registry import PowerDriverRegistry
 from provisioningserver.events import EVENT_TYPES
-from provisioningserver.rpc import clusterservice, exceptions, power, region
+from provisioningserver.rpc import exceptions, power, region
 from provisioningserver.rpc.testing import (
     MockClusterToRegionRPCFixture,
     MockLiveClusterToRegionRPCFixture,
@@ -66,9 +66,6 @@ class TestPowerHelpers(MAASTestCase):
     def setUp(self):
         super().setUp()
         self.useFixture(EventTypesAllRegistered())
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def patch_rpc_methods(self):
         fixture = self.useFixture(MockClusterToRegionRPCFixture())
@@ -163,9 +160,6 @@ class TestChangePowerState(MAASTestCase):
     def setUp(self):
         super().setUp()
         self.useFixture(EventTypesAllRegistered())
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     @inlineCallbacks
     def patch_rpc_methods(self, return_value={}, side_effect=None):
@@ -454,9 +448,6 @@ class TestMaybeChangePowerState(MAASTestCase):
         ).side_effect = lambda clock, delay, func, *args, **kwargs: maybeDeferred(
             func, *args, **kwargs
         )
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def patch_methods_using_rpc(self):
         pcs = self.patch_autospec(power, "power_change_starting")
@@ -764,9 +755,6 @@ class TestPowerQuery(MAASTestCase):
             self.patch(
                 power_driver, "detect_missing_packages"
             ).return_value = []
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def patch_rpc_methods(self, return_value={}, side_effect=None):
         fixture = self.useFixture(MockClusterToRegionRPCFixture())

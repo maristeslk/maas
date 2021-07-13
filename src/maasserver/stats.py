@@ -14,36 +14,42 @@ from collections import Counter, defaultdict
 from datetime import timedelta
 import json
 
-from django.db.models import Count
+from django.db.models import Count, Sum, Value
+from django.db.models.functions import Coalesce
 import requests
 from twisted.application.internet import TimerService
 
 from maasserver.enum import (
+    BMC_TYPE,
     IPADDRESS_TYPE,
     IPRANGE_TYPE,
     NODE_STATUS,
     NODE_TYPE,
 )
 from maasserver.models import (
+    BMC,
     Config,
     Fabric,
     Machine,
     Node,
-    OwnerData,
     Pod,
     Space,
     StaticIPAddress,
     Subnet,
     VLAN,
 )
-from maasserver.models.virtualmachine import get_vm_host_used_resources
 from maasserver.utils import get_maas_user_agent
-from maasserver.utils.orm import NotNullSum, transactional
+from maasserver.utils.orm import transactional
 from maasserver.utils.threads import deferToDatabase
 from provisioningserver.logger import LegacyLogger
 from provisioningserver.utils.network import IPRangeStatistics
 
 log = LegacyLogger()
+
+
+def NotNullSum(column):
+    """Like Sum, but returns 0 if the aggregate is None."""
+    return Coalesce(Sum(column), Value(0))
 
 
 def get_machine_stats():
@@ -56,30 +62,26 @@ def get_machine_stats():
 
 
 def get_machine_state_stats():
-    node_status = (
-        Node.objects.filter(
-            node_type=NODE_TYPE.MACHINE,
-        )
-        .values_list("status")
-        .annotate(count=Count("status"))
-    )
-    node_status = defaultdict(int, node_status)
-    statuses = (
-        "new",
-        "ready",
-        "allocated",
-        "deployed",
-        "commissioning",
-        "testing",
-        "deploying",
-        "failed_deployment",
-        "failed_commissioning",
-        "failed_testing",
-        "broken",
-    )
+    node_status = Node.objects.filter(node_type=NODE_TYPE.MACHINE)
+    node_status = Counter(node_status.values_list("status", flat=True))
+
     return {
-        status: node_status[getattr(NODE_STATUS, status.upper())]
-        for status in statuses
+        # base status
+        "new": node_status.get(NODE_STATUS.NEW, 0),
+        "ready": node_status.get(NODE_STATUS.READY, 0),
+        "allocated": node_status.get(NODE_STATUS.ALLOCATED, 0),
+        "deployed": node_status.get(NODE_STATUS.DEPLOYED, 0),
+        # in progress status
+        "commissioning": node_status.get(NODE_STATUS.COMMISSIONING, 0),
+        "testing": node_status.get(NODE_STATUS.TESTING, 0),
+        "deploying": node_status.get(NODE_STATUS.DEPLOYING, 0),
+        # failure status
+        "failed_deployment": node_status.get(NODE_STATUS.FAILED_DEPLOYMENT, 0),
+        "failed_commissioning": node_status.get(
+            NODE_STATUS.FAILED_COMMISSIONING, 0
+        ),
+        "failed_testing": node_status.get(NODE_STATUS.FAILED_TESTING, 0),
+        "broken": node_status.get(NODE_STATUS.BROKEN, 0),
     }
 
 
@@ -90,12 +92,12 @@ def get_machines_by_architecture():
     return Counter(node_arches)
 
 
-def get_vm_hosts_stats(**filter_params):
-    vm_hosts = Pod.objects.filter(**filter_params)
+def get_kvm_pods_stats():
+    pods = BMC.objects.filter(bmc_type=BMC_TYPE.POD, power_type="virsh")
     # Calculate available physical resources
     # total_mem is in MB
     # local_storage is in bytes
-    available_resources = vm_hosts.aggregate(
+    available_resources = pods.aggregate(
         cores=NotNullSum("cores"),
         memory=NotNullSum("memory"),
         storage=NotNullSum("local_storage"),
@@ -103,26 +105,26 @@ def get_vm_hosts_stats(**filter_params):
 
     # available resources with overcommit
     over_cores = over_memory = 0
-    for vm_host in vm_hosts:
-        over_cores += vm_host.cores * vm_host.cpu_over_commit_ratio
-        over_memory += vm_host.memory * vm_host.memory_over_commit_ratio
+    for pod in pods:
+        over_cores += pod.cores * pod.cpu_over_commit_ratio
+        over_memory += pod.memory * pod.memory_over_commit_ratio
     available_resources["over_cores"] = over_cores
     available_resources["over_memory"] = over_memory
 
     # Calculate utilization
-    vms = cores = memory = storage = 0
-    for vm_host in vm_hosts:
-        vms += Node.objects.filter(bmc__id=vm_host.id).count()
-        used_resources = get_vm_host_used_resources(vm_host)
-        cores += used_resources.cores
-        memory += used_resources.total_memory
-        storage += used_resources.storage
+    pod_machines = Pod.objects.all()
+    machines = cores = memory = storage = 0
+    for pod in pod_machines:
+        machines += Node.objects.filter(bmc__id=pod.id).count()
+        cores += pod.get_used_cores()
+        memory += pod.get_used_memory()
+        storage += pod.get_used_local_storage()
 
     return {
-        "vm_hosts": len(vm_hosts),
-        "vms": vms,
-        "available_resources": available_resources,
-        "utilized_resources": {
+        "kvm_pods": len(pods),
+        "kvm_machines": machines,
+        "kvm_available_resources": available_resources,
+        "kvm_utilized_resources": {
             "cores": cores,
             "memory": memory,
             "storage": storage,
@@ -197,15 +199,6 @@ def _get_subnets_ipaddress_count():
     return counts
 
 
-def get_workload_annotations_stats():
-    return OwnerData.objects.aggregate(
-        annotated_machines=Count("node", distinct=True),
-        total_annotations=Count("id"),
-        unique_keys=Count("key", distinct=True),
-        unique_values=Count("value", distinct=True),
-    )
-
-
 def get_maas_stats():
     # TODO
     # - architectures
@@ -220,32 +213,32 @@ def get_maas_stats():
     # get summary of network objects
     netstats = get_subnets_stats()
 
-    return {
-        "controllers": {
-            "regionracks": node_types.get(
-                NODE_TYPE.REGION_AND_RACK_CONTROLLER, 0
-            ),
-            "regions": node_types.get(NODE_TYPE.REGION_CONTROLLER, 0),
-            "racks": node_types.get(NODE_TYPE.RACK_CONTROLLER, 0),
-        },
-        "nodes": {
-            "machines": node_types.get(NODE_TYPE.MACHINE, 0),
-            "devices": node_types.get(NODE_TYPE.DEVICE, 0),
-        },
-        "machine_stats": stats,  # count of cpus, mem, storage
-        "machine_status": machine_status,  # machines by status
-        "network_stats": netstats,  # network status
-        "vm_hosts": {
-            "lxd": get_vm_hosts_stats(power_type="lxd"),
-            "virsh": get_vm_hosts_stats(power_type="virsh"),
-        },
-        "workload_annotations": get_workload_annotations_stats(),
-    }
+    return json.dumps(
+        {
+            "controllers": {
+                "regionracks": node_types.get(
+                    NODE_TYPE.REGION_AND_RACK_CONTROLLER, 0
+                ),
+                "regions": node_types.get(NODE_TYPE.REGION_CONTROLLER, 0),
+                "racks": node_types.get(NODE_TYPE.RACK_CONTROLLER, 0),
+            },
+            "nodes": {
+                "machines": node_types.get(NODE_TYPE.MACHINE, 0),
+                "devices": node_types.get(NODE_TYPE.DEVICE, 0),
+            },
+            "machine_stats": stats,  # count of cpus, mem, storage
+            "machine_status": machine_status,  # machines by status
+            "network_stats": netstats,  # network status
+        }
+    )
 
 
 def get_request_params():
-    data = json.dumps(json.dumps(get_maas_stats()))
-    return {"data": base64.b64encode(data.encode()).decode()}
+    return {
+        "data": base64.b64encode(
+            json.dumps(get_maas_stats()).encode()
+        ).decode()
+    }
 
 
 def make_maas_user_agent_request():
@@ -264,7 +257,7 @@ def make_maas_user_agent_request():
 STATS_SERVICE_PERIOD = timedelta(hours=24)
 
 
-class StatsService(TimerService):
+class StatsService(TimerService, object):
     """Service to periodically get stats.
 
     This will run immediately when it's started, then once again every

@@ -24,7 +24,12 @@ from testtools.matchers import (
 )
 from twisted.internet.defer import fail, inlineCallbacks, succeed
 
-from maasserver.enum import BMC_TYPE, INTERFACE_TYPE, NODE_STATUS
+from maasserver.enum import (
+    BMC_TYPE,
+    INTERFACE_TYPE,
+    NODE_CREATION_TYPE,
+    NODE_STATUS,
+)
 from maasserver.exceptions import PodProblem, StaticIPAddressUnavailable
 from maasserver.forms import pods as pods_module
 from maasserver.forms.pods import (
@@ -427,8 +432,8 @@ class TestPodForm(MAASTransactionServerTestCase):
         form = PodForm(data=pod_info, request=self.request)
         self.assertTrue(form.is_valid(), form._errors)
         pod = form.save()
-        self.assertEqual(bmc.id, pod.id)
-        self.assertEqual(BMC_TYPE.POD, reload_object(bmc).bmc_type)
+        self.assertEquals(bmc.id, pod.id)
+        self.assertEquals(BMC_TYPE.POD, reload_object(bmc).bmc_type)
         self.assertThat(mock_post_commit_do, MockCalledOnce())
 
     def test_updates_existing_pod_minimal(self):
@@ -792,7 +797,7 @@ class TestPodForm(MAASTransactionServerTestCase):
         form = PodForm(data=pod_info)
         self.assertTrue(form.is_valid(), form._errors)
         error = self.assertRaises(PodProblem, form.save)
-        self.assertEqual(
+        self.assertEquals(
             "Unable to start the pod discovery process. "
             "No rack controllers connected.",
             str(error),
@@ -811,7 +816,7 @@ class TestPodForm(MAASTransactionServerTestCase):
 
         def validate_error(failure):
             self.assertIsInstance(failure.value, PodProblem)
-            self.assertEqual(
+            self.assertEquals(
                 "Unable to start the pod discovery process. "
                 "No rack controllers connected.",
                 str(failure.value),
@@ -832,7 +837,7 @@ class TestPodForm(MAASTransactionServerTestCase):
         form = PodForm(data=pod_info)
         self.assertTrue(form.is_valid(), form._errors)
         error = self.assertRaises(PodProblem, form.save)
-        self.assertEqual(str(exc), str(error))
+        self.assertEquals(str(exc), str(error))
 
     @wait_for_reactor
     @inlineCallbacks
@@ -849,7 +854,7 @@ class TestPodForm(MAASTransactionServerTestCase):
 
         def validate_error(failure):
             self.assertIsInstance(failure.value, PodProblem)
-            self.assertEqual(str(exc), str(failure.value))
+            self.assertEquals(str(exc), str(failure.value))
 
         d = form.save()
         d.addErrback(validate_error)
@@ -871,7 +876,6 @@ class TestComposeMachineForm(MAASTransactionServerTestCase):
     def make_compose_machine_result(self, pod):
         composed_machine = DiscoveredMachine(
             hostname=factory.make_name("hostname"),
-            power_parameters={"instance_name": factory.make_name("instance")},
             architecture=pod.architectures[0],
             cores=DEFAULT_COMPOSED_CORES,
             memory=DEFAULT_COMPOSED_MEMORY,
@@ -997,7 +1001,7 @@ class TestComposeMachineForm(MAASTransactionServerTestCase):
         request = MagicMock()
         pod = make_pod_with_hints()
         form = ComposeMachineForm(data={}, request=request, pod=pod)
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         request_machine = form.get_requested_machine(
             get_known_host_interfaces(pod)
         )
@@ -1168,6 +1172,29 @@ class TestComposeMachineForm(MAASTransactionServerTestCase):
                 ),
             ),
         )
+
+    def test_get_machine_with_multiple_disks_fails_for_lxd_pods(self):
+        request = MagicMock()
+        pod_host = factory.make_Machine_with_Interface_on_Subnet()
+        pod_host.boot_interface.vlan.dhcp_on = False
+        pod_host.boot_interface.vlan.save()
+        pod = make_pod_with_hints(host=pod_host)
+        pod.power_type = "lxd"
+        disk_1 = random.randint(8, 16) * (1000 ** 3)
+        disk_2 = random.randint(8, 16) * (1000 ** 3)
+        storage = "root:%d,extra:%d" % (
+            disk_1 // (1000 ** 3),
+            disk_2 // (1000 ** 3),
+        )
+        form = ComposeMachineForm(
+            data={"storage": storage}, request=request, pod=pod
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        with ExpectedException(
+            PodProblem,
+            ".*virtual machines currently only support one block device.",
+        ):
+            form.get_requested_machine(get_known_host_interfaces(pod))
 
     def test_get_machine_with_interfaces_fails_no_dhcp_for_vlan(self):
         request = MagicMock()
@@ -1945,10 +1972,7 @@ class TestComposeMachineForm(MAASTransactionServerTestCase):
         # Mock the result of the composed machine.
         composed_machine, pod_hints = self.make_compose_machine_result(pod)
         composed_machine.interfaces = [
-            DiscoveredMachineInterface(
-                mac_address="00:01:02:03:04:05",
-                attach_type=InterfaceAttachType.NETWORK,
-            )
+            DiscoveredMachineInterface(mac_address="00:01:02:03:04:05")
         ]
         mock_compose_machine = self.patch(pods_module, "compose_machine")
         mock_compose_machine.return_value = succeed(
@@ -1991,9 +2015,7 @@ class TestComposeMachineForm(MAASTransactionServerTestCase):
         composed_machine, pod_hints = self.make_compose_machine_result(pod)
         composed_machine.interfaces = [
             DiscoveredMachineInterface(
-                mac_address="00:01:02:03:04:05",
-                boot=True,
-                attach_type=InterfaceAttachType.NETWORK,
+                mac_address="00:01:02:03:04:05", boot=True
             )
         ]
         mock_compose_machine = self.patch(pods_module, "compose_machine")
@@ -2045,7 +2067,7 @@ class TestComposeMachineForm(MAASTransactionServerTestCase):
         mock_commissioning = self.patch(Machine, "start_commissioning")
 
         form = ComposeMachineForm(data={}, request=request, pod=pod)
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         created_machine = form.compose()
         self.assertThat(
             created_machine,
@@ -2364,7 +2386,7 @@ class TestComposeMachineForm(MAASTransactionServerTestCase):
         form = ComposeMachineForm(data={}, request=request, pod=pod)
         self.assertTrue(form.is_valid())
         error = self.assertRaises(PodProblem, form.compose)
-        self.assertEqual(
+        self.assertEquals(
             "Unable to compose a machine because '%s' driver timed out "
             "after 120 seconds." % pod.power_type,
             str(error),
@@ -2518,11 +2540,11 @@ class TestComposeMachineForPodsForm(MAASServerTestCase):
             MockCallsMatch(
                 call(
                     skip_commissioning=True,
-                    dynamic=True,
+                    creation_type=NODE_CREATION_TYPE.DYNAMIC,
                 ),
                 call(
                     skip_commissioning=True,
-                    dynamic=True,
+                    creation_type=NODE_CREATION_TYPE.DYNAMIC,
                 ),
             ),
         )
@@ -2551,15 +2573,15 @@ class TestComposeMachineForPodsForm(MAASServerTestCase):
             MockCallsMatch(
                 call(
                     skip_commissioning=True,
-                    dynamic=True,
+                    creation_type=NODE_CREATION_TYPE.DYNAMIC,
                 ),
                 call(
                     skip_commissioning=True,
-                    dynamic=True,
+                    creation_type=NODE_CREATION_TYPE.DYNAMIC,
                 ),
                 call(
                     skip_commissioning=True,
-                    dynamic=True,
+                    creation_type=NODE_CREATION_TYPE.DYNAMIC,
                 ),
             ),
         )

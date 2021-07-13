@@ -178,16 +178,28 @@ STATICFILES_FINDERS = (
     # 'django.contrib.staticfiles.finders.DefaultStorageFinder',
 )
 
-# MAAS uses session storage for cookies, and no other crypto feature from
-# Django, so the key is not used. The value is just a placeholder since Django
-# doesn't allow empty values.
-SECRET_KEY = "<UNUSED>"
+# Make this unique, and don't share it with anybody.
+SECRET_KEY = "zk@qw+fdhu_b4ljx+pmb*8sju4lpx!5zkez%&4hep_(o6y1nf0"
 
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [os.path.join(os.path.dirname(__file__), "templates")],
         "APP_DIRS": True,
         "OPTIONS": {
+            "context_processors": [
+                # Insert your TEMPLATE_CONTEXT_PROCESSORS here or use this
+                # list if you haven't customized them:
+                "django.contrib.auth.context_processors.auth",
+                "django.template.context_processors.debug",
+                "django.template.context_processors.i18n",
+                "django.template.context_processors.media",
+                "django.template.context_processors.request",
+                "django.template.context_processors.static",
+                # "django.template.context_processors.tz",
+                "django.contrib.messages.context_processors.messages",
+                "maasserver.context_processors.global_options",
+            ],
             "debug": DEBUG,
         },
     }
@@ -229,6 +241,8 @@ MIDDLEWARE = (
     # Demands a user for most web pages. The equivalent for the Web API is
     # handled by Piston.
     "maasserver.middleware.AccessMiddleware",
+    # Temporary messages. FIXME: Not sure if it's used.
+    "django.contrib.messages.middleware.MessageMiddleware",
     # Sets X-Frame-Options header to SAMEORIGIN.
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     # Used to display errors about disconnected clusters. FIXME: This should
@@ -251,6 +265,7 @@ INSTALLED_APPS = (
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.sites",
+    "django.contrib.messages",
     "django.contrib.staticfiles",
     "maasserver",
     "metadataserver",

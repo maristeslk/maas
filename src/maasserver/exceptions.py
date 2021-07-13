@@ -239,9 +239,5 @@ class NoScriptsFound(MAASException):
 
 
 class StorageClearProblem(MAASAPIException):
-    """Raised when an issue occurs that prevents the clearing of a machine's
+    """Raised when an issue occur's that prevents the clearing of a machine's
     storage configuration."""
-
-
-class NetworkingResetProblem(MAASException):
-    """Raised when an issue occurs that prevents resetting networking configuration."""

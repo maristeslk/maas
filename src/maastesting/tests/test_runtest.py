@@ -1,18 +1,29 @@
 # Copyright 2015 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
-import pytest
+"""Tests for `maastesting.runtest`."""
+
+
 from testtools import TestCase
+from testtools.matchers import HasLength, Is, MatchesListwise
 
+from maastesting.matchers import DocTestMatches
 from maastesting.runtest import MAASRunTest, MAASTwistedRunTest
+from maastesting.testcase import MAASTestCase
 
 
-class TestExecutors:
-    @pytest.mark.parametrize("executor", [MAASRunTest, MAASTwistedRunTest])
-    def test_catches_generator_tests(self, executor):
+class TestExecutors(MAASTestCase):
+    """Tests for `MAASRunTest` and `MAASTwistedRunTest`."""
+
+    scenarios = (
+        ("MAASRunTest", {"executor": MAASRunTest}),
+        ("MAASTwistedRunTest", {"executor": MAASTwistedRunTest}),
+    )
+
+    def test_catches_generator_tests(self):
         class BrokenTests(TestCase):
 
-            run_tests_with = executor
+            run_tests_with = self.executor
 
             def test(self):
                 yield None
@@ -20,10 +31,19 @@ class TestExecutors:
         test = BrokenTests("test")
         result = test.run()
 
-        assert len(result.errors) == 1
-        failed_test, traceback = result.errors[0]
-        assert failed_test is test
-        assert (
-            "InvalidTest: Test returned a generator. Should it be decorated with inlineCallbacks?"
-            in str(traceback)
+        self.assertThat(result.errors, HasLength(1))
+        self.assertThat(
+            result.errors[0],
+            MatchesListwise(
+                (
+                    Is(test),
+                    DocTestMatches(
+                        """\
+                ...InvalidTest:
+                    Test returned a generator. Should it be
+                    decorated with inlineCallbacks?
+                """
+                    ),
+                )
+            ),
         )

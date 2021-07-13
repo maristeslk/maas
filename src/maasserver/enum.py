@@ -1,4 +1,4 @@
-# Copyright 2012-2020 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2019 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Enumerations meaningful to the maasserver application."""
@@ -31,7 +31,10 @@ __all__ = [
 
 from collections import OrderedDict
 
-from provisioningserver.enum import enum_choices
+# *** IMPORTANT ***
+# Note to all ye who enter here: comments beginning with #: are special
+# to Sphinx. They are extracted and form part of the documentation of
+# the field they directly precede.
 
 
 class COMPONENT:
@@ -46,57 +49,57 @@ class COMPONENT:
 class NODE_STATUS:
     """The vocabulary of a `Node`'s possible statuses."""
 
-    # A node starts out as NEW (DEFAULT is an alias for NEW).
+    #: A node starts out as NEW (DEFAULT is an alias for NEW).
     DEFAULT = 0
 
-    # The node has been created and has a system ID assigned to it.
+    #: The node has been created and has a system ID assigned to it.
     NEW = 0
-    # Testing and other commissioning steps are taking place.
+    #: Testing and other commissioning steps are taking place.
     COMMISSIONING = 1
-    # The commissioning step failed.
+    #: The commissioning step failed.
     FAILED_COMMISSIONING = 2
-    # The node can't be contacted.
+    #: The node can't be contacted.
     MISSING = 3
-    # The node is in the general pool ready to be deployed.
+    #: The node is in the general pool ready to be deployed.
     READY = 4
-    # The node is ready for named deployment.
+    #: The node is ready for named deployment.
     RESERVED = 5
-    # The node has booted into the operating system of its owner's choice
-    # and is ready for use.
+    #: The node has booted into the operating system of its owner's choice
+    #: and is ready for use.
     DEPLOYED = 6
-    # The node has been removed from service manually until an admin
-    # overrides the retirement.
+    #: The node has been removed from service manually until an admin
+    #: overrides the retirement.
     RETIRED = 7
-    # The node is broken: a step in the node lifecyle failed.
-    # More details can be found in the node's event log.
+    #: The node is broken: a step in the node lifecyle failed.
+    #: More details can be found in the node's event log.
     BROKEN = 8
-    # The node is being installed.
+    #: The node is being installed.
     DEPLOYING = 9
-    # The node has been allocated to a user and is ready for deployment.
+    #: The node has been allocated to a user and is ready for deployment.
     ALLOCATED = 10
-    # The deployment of the node failed.
+    #: The deployment of the node failed.
     FAILED_DEPLOYMENT = 11
-    # The node is powering down after a release request.
+    #: The node is powering down after a release request.
     RELEASING = 12
-    # The releasing of the node failed.
+    #: The releasing of the node failed.
     FAILED_RELEASING = 13
-    # The node is erasing its disks.
+    #: The node is erasing its disks.
     DISK_ERASING = 14
-    # The node failed to erase its disks.
+    #: The node failed to erase its disks.
     FAILED_DISK_ERASING = 15
-    # The node is in rescue mode.
+    #: The node is in rescue mode.
     RESCUE_MODE = 16
-    # The node is entering rescue mode.
+    #: The node is entering rescue mode.
     ENTERING_RESCUE_MODE = 17
-    # The node failed to enter rescue mode.
+    #: The node failed to enter rescue mode.
     FAILED_ENTERING_RESCUE_MODE = 18
-    # The node is exiting rescue mode.
+    #: The node is exiting rescue mode.
     EXITING_RESCUE_MODE = 19
-    # The node failed to exit rescue mode.
+    #: The node failed to exit rescue mode.
     FAILED_EXITING_RESCUE_MODE = 20
-    # Running tests on Node
+    #: Running tests on Node
     TESTING = 21
-    # Testing has failed
+    #: Testing has failed
     FAILED_TESTING = 22
 
 
@@ -197,6 +200,18 @@ class BMC_TYPE:
 BMC_TYPE_CHOICES = ((BMC_TYPE.BMC, "BMC"), (BMC_TYPE.POD, "POD"))
 
 
+class NODE_CREATION_TYPE:
+    """Creation types a machine can have in a node."""
+
+    #: Pre-existing, machine already exists in Pod when MAAS discovered it.
+    PRE_EXISTING = 1
+    #: Manual, machine was manually composed through MAAS.
+    MANUAL = 2
+    #: Dynamic, machine was composed during allocation and should be decomposed
+    # upon release of the machine.
+    DYNAMIC = 3
+
+
 class NODE_ACTION_TYPE:
     """Types of action a node can have done."""
 
@@ -212,13 +227,13 @@ class DEVICE_IP_ASSIGNMENT_TYPE:
     is calculated by looking at the overall model for a `Device`. This is not
     set directly on the model."""
 
-    # Device is outside of MAAS control.
+    #: Device is outside of MAAS control.
     EXTERNAL = "external"
 
-    # Device receives ip address from the appropriate dynamic range.
+    #: Device receives ip address from the appropriate dynamic range.
     DYNAMIC = "dynamic"
 
-    # Device has ip address assigned from some appropriate subnet.
+    #: Device has ip address assigned from some appropriate subnet.
     STATIC = "static"
 
 
@@ -235,11 +250,11 @@ class RDNS_MODE:
 
     # By default, we do what we've always done: assume we rule the DNS world.
     DEFAULT = 2
-    # Do not generate reverse DNS for this Subnet.
+    #: Do not generate reverse DNS for this Subnet.
     DISABLED = 0
-    # Generate reverse DNS only for the CIDR.
+    #: Generate reverse DNS only for the CIDR.
     ENABLED = 1
-    # Generate RFC2317 glue if needed (Subnet is too small for its own zone.)
+    #: Generate RFC2317 glue if needed (Subnet is too small for its own zone.)
     RFC2317 = 2
 
 
@@ -341,7 +356,12 @@ class POWER_STATE:
     ERROR = "error"
 
 
-POWER_STATE_CHOICES = enum_choices(POWER_STATE, transform=str.capitalize)
+POWER_STATE_CHOICES = (
+    (POWER_STATE.ON, "On"),
+    (POWER_STATE.OFF, "Off"),
+    (POWER_STATE.UNKNOWN, "Unknown"),
+    (POWER_STATE.ERROR, "Error"),
+)
 
 
 class BOOT_RESOURCE_TYPE:
@@ -372,51 +392,51 @@ BOOT_RESOURCE_TYPE_CHOICES_DICT = OrderedDict(BOOT_RESOURCE_TYPE_CHOICES)
 class BOOT_RESOURCE_FILE_TYPE:
     """The vocabulary of possible file types for `BootResource`."""
 
-    # Tarball of root image.
+    #: Tarball of root image.
     ROOT_TGZ = "root-tgz"
     ROOT_TBZ = "root-tbz"
     ROOT_TXZ = "root-txz"
 
-    # Tarball of dd image.
+    #: Tarball of dd image.
     ROOT_DD = "root-dd"
     ROOT_DDTAR = "root-dd.tar"
 
-    # Raw dd image
+    #: Raw dd image
     ROOT_DDRAW = "root-dd.raw"
 
-    # Compressed dd image types
+    #: Compressed dd image types
     ROOT_DDBZ2 = "root-dd.bz2"
     ROOT_DDGZ = "root-dd.gz"
     ROOT_DDXZ = "root-dd.xz"
 
-    # Compressed tarballs of dd images
+    #: Compressed tarballs of dd images
     ROOT_DDTBZ = "root-dd.tar.bz2"
     ROOT_DDTXZ = "root-dd.tar.xz"
-    # For backwards compatibility, DDTGZ files are named root-dd
+    #: For backwards compatibility, DDTGZ files are named root-dd
     ROOT_DDTGZ = "root-dd"
 
     # Following are not allowed on user upload. Only used for syncing
     # from another simplestreams source. (Most likely images.maas.io)
 
-    # Root Image (gets converted to root-image root-tgz, on the rack)
+    #: Root Image (gets converted to root-image root-tgz, on the rack)
     ROOT_IMAGE = "root-image.gz"
 
-    # Root image in SquashFS form, does not need to be converted
+    #: Root image in SquashFS form, does not need to be converted
     SQUASHFS_IMAGE = "squashfs"
 
-    # Boot Kernel
+    #: Boot Kernel
     BOOT_KERNEL = "boot-kernel"
 
-    # Boot Initrd
+    #: Boot Initrd
     BOOT_INITRD = "boot-initrd"
 
-    # Boot DTB
+    #: Boot DTB
     BOOT_DTB = "boot-dtb"
 
-    # An uncompressed bootloader (PXELinux, GRUB, etc)
+    #: An uncompressed bootloader (PXELinux, GRUB, etc)
     BOOTLOADER = "bootloader"
 
-    # tar.xz of files which need to be extracted so the files are usable
+    #: tar.xz of files which need to be extracted so the files are usable
     # by MAAS
     ARCHIVE_TAR_XZ = "archive.tar.xz"
 
@@ -461,10 +481,10 @@ BOOT_RESOURCE_FILE_TYPE_CHOICES = (
 class PARTITION_TABLE_TYPE:
     """The vocabulary of possible partition types for `PartitionTable`."""
 
-    # GUID partition table.
+    #: GUID partition table.
     GPT = "GPT"
 
-    # Master boot record..
+    #: Master boot record..
     MBR = "MBR"
 
 
@@ -479,53 +499,53 @@ PARTITION_TABLE_TYPE_CHOICES = (
 class FILESYSTEM_TYPE:
     """The vocabulary of possible partition types for `Filesystem`."""
 
-    # Second extended filesystem.
+    #: Second extended filesystem.
     EXT2 = "ext2"
 
-    # Fourth extended filesystem.
+    #: Fourth extended filesystem.
     EXT4 = "ext4"
 
-    # XFS
+    #: XFS
     XFS = "xfs"
 
-    # FAT32
+    #: FAT32
     FAT32 = "fat32"
 
-    # VFAT
+    #: VFAT
     VFAT = "vfat"
 
-    # LVM Physical Volume.
+    #: LVM Physical Volume.
     LVM_PV = "lvm-pv"
 
-    # RAID.
+    #: RAID.
     RAID = "raid"
 
-    # RAID spare.
+    #: RAID spare.
     RAID_SPARE = "raid-spare"
 
-    # Bcache cache.
+    #: Bcache cache.
     BCACHE_CACHE = "bcache-cache"
 
-    # Bcache backing.
+    #: Bcache backing.
     BCACHE_BACKING = "bcache-backing"
 
-    # Swap
+    #: Swap
     SWAP = "swap"
 
-    # RAMFS. Note that tmpfs provides a superset of ramfs's features and can
+    #: RAMFS. Note that tmpfs provides a superset of ramfs's features and can
     # be safer.
     RAMFS = "ramfs"
 
-    # TMPFS
+    #: TMPFS
     TMPFS = "tmpfs"
 
-    # BTRFS
+    #: BTRFS
     BTRFS = "btrfs"
 
-    # ZFS
+    #: ZFS
     ZFSROOT = "zfsroot"
 
-    # VMFS6
+    #: VMFS6
     VMFS6 = "vmfs6"
 
 
@@ -580,28 +600,28 @@ FILESYSTEM_FORMAT_TYPE_CHOICES_DICT = OrderedDict(
 class FILESYSTEM_GROUP_TYPE:
     """The vocabulary of possible partition types for `FilesystemGroup`."""
 
-    # LVM volume group.
+    #: LVM volume group.
     LVM_VG = "lvm-vg"
 
-    # RAID level 0
+    #: RAID level 0
     RAID_0 = "raid-0"
 
-    # RAID level 1
+    #: RAID level 1
     RAID_1 = "raid-1"
 
-    # RAID level 5
+    #: RAID level 5
     RAID_5 = "raid-5"
 
-    # RAID level 6
+    #: RAID level 6
     RAID_6 = "raid-6"
 
-    # RAID level 10
+    #: RAID level 10
     RAID_10 = "raid-10"
 
-    # Bcache
+    #: Bcache
     BCACHE = "bcache"
 
-    # VMFS6
+    #: VMFS6
     VMFS6 = "vmfs6"
 
 
@@ -642,8 +662,10 @@ class CACHE_MODE_TYPE:
 
 # Django choices for CACHE_MODE_TYPE: sequence of tuples (key, UI
 # representation).
-CACHE_MODE_TYPE_CHOICES = enum_choices(
-    CACHE_MODE_TYPE, transform=str.capitalize
+CACHE_MODE_TYPE_CHOICES = (
+    (CACHE_MODE_TYPE.WRITEBACK, "Writeback"),
+    (CACHE_MODE_TYPE.WRITETHROUGH, "Writethrough"),
+    (CACHE_MODE_TYPE.WRITEAROUND, "Writearound"),
 )
 
 
@@ -759,28 +781,36 @@ BRIDGE_TYPE_CHOICES_DICT = OrderedDict(BRIDGE_TYPE_CHOICES)
 class SERVICE_STATUS:
     """Service statuses"""
 
-    # Status of the service is not known.
+    #: Status of the service is not known.
     UNKNOWN = "unknown"
-    # Service is running and operational.
+    #: Service is running and operational.
     RUNNING = "running"
-    # Service is running but is in a degraded state.
+    #: Service is running but is in a degraded state.
     DEGRADED = "degraded"
-    # Service is dead. (Should be on but is off).
+    #: Service is dead. (Should be on but is off).
     DEAD = "dead"
-    # Service is off. (Should be off and is off).
+    #: Service is off. (Should be off and is off).
     OFF = "off"
+    #: Service is on.
+    ON = "on"
 
 
-SERVICE_STATUS_CHOICES = enum_choices(SERVICE_STATUS, transform=str.capitalize)
+SERVICE_STATUS_CHOICES = (
+    (SERVICE_STATUS.UNKNOWN, "Unknown"),
+    (SERVICE_STATUS.RUNNING, "Running"),
+    (SERVICE_STATUS.DEGRADED, "Degraded"),
+    (SERVICE_STATUS.DEAD, "Dead"),
+    (SERVICE_STATUS.OFF, "Off"),
+)
 
 
 class KEYS_PROTOCOL_TYPE:
     """The vocabulary of possible protocol types for `KeySource`."""
 
-    # Launchpad
+    #: Launchpad
     LP = "lp"
 
-    # Github
+    #: Github
     GH = "gh"
 
 
@@ -809,15 +839,3 @@ class ENDPOINT:
 
 
 ENDPOINT_CHOICES = ((ENDPOINT.API, "API"), (ENDPOINT.UI, "WebUI"))
-
-
-class NODE_DEVICE_BUS:
-
-    PCIE = 1
-    USB = 2
-
-
-NODE_DEVICE_BUS_CHOICES = (
-    (NODE_DEVICE_BUS.PCIE, "PCIE"),
-    (NODE_DEVICE_BUS.USB, "USB"),
-)

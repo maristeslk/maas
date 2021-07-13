@@ -55,9 +55,6 @@ from provisioningserver.rackdservices.service_monitor_service import (
 )
 from provisioningserver.rackdservices.tftp import TFTPBackend, TFTPService
 from provisioningserver.rackdservices.tftp_offload import TFTPOffloadService
-from provisioningserver.rackdservices.version_update_check import (
-    VersionUpdateCheckService,
-)
 from provisioningserver.rpc.clusterservice import ClusterClientCheckerService
 from provisioningserver.testing.config import ClusterConfigurationFixture
 
@@ -172,7 +169,6 @@ class TestProvisioningServiceMaker(MAASTestCase):
             "http_service",
             "tftp",
             "service_monitor",
-            "version_update_check",
         ]
         self.assertThat(service.namedServices, KeysEqual(*expected_services))
         self.assertEqual(
@@ -212,7 +208,6 @@ class TestProvisioningServiceMaker(MAASTestCase):
             "http_service",
             "tftp",
             "service_monitor",
-            "version_update_check",
         ]
         self.assertThat(service.namedServices, KeysEqual(*expected_services))
         self.assertEqual(
@@ -313,13 +308,6 @@ class TestProvisioningServiceMaker(MAASTestCase):
         service = service_maker.makeService(options, clock=None)
         external_service = service.getServiceNamed("external")
         self.assertIsInstance(external_service, RackExternalService)
-
-    def test_version_update_service(self):
-        options = Options()
-        service_maker = ProvisioningServiceMaker("Harry", "Hill")
-        service = service_maker.makeService(options, clock=None)
-        version_check_service = service.getServiceNamed("version_update_check")
-        self.assertIsInstance(version_check_service, VersionUpdateCheckService)
 
     def test_http_service(self):
         options = Options()

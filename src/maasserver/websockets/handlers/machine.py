@@ -50,19 +50,15 @@ from maasserver.forms.interface import (
     VLANInterfaceForm,
 )
 from maasserver.forms.interface_link import InterfaceLinkForm
-from maasserver.models import (
-    BlockDevice,
-    CacheSet,
-    Event,
-    Filesystem,
-    Interface,
-    Machine,
-    Node,
-    OwnerData,
-    Partition,
-    Subnet,
-    VolumeGroup,
-)
+from maasserver.models.blockdevice import BlockDevice
+from maasserver.models.cacheset import CacheSet
+from maasserver.models.event import Event
+from maasserver.models.filesystem import Filesystem
+from maasserver.models.filesystemgroup import VolumeGroup
+from maasserver.models.interface import Interface
+from maasserver.models.node import Machine, Node
+from maasserver.models.partition import Partition
+from maasserver.models.subnet import Subnet
 from maasserver.node_action import compile_node_actions
 from maasserver.permissions import NodePermission
 from maasserver.storage_layouts import (
@@ -93,6 +89,10 @@ class MachineHandler(NodeHandler):
         queryset = (
             node_prefetch(Machine.objects.all())
             .prefetch_related(
+                "blockdevice_set__iscsiblockdevice__"
+                "partitiontable_set__partitions"
+            )
+            .prefetch_related(
                 "blockdevice_set__physicalblockdevice__"
                 "partitiontable_set__partitions__filesystem_set"
             )
@@ -103,6 +103,10 @@ class MachineHandler(NodeHandler):
         )
         list_queryset = (
             Machine.objects.select_related("owner", "zone", "domain", "bmc")
+            .prefetch_related(
+                "blockdevice_set__iscsiblockdevice__"
+                "partitiontable_set__partitions"
+            )
             .prefetch_related(
                 "blockdevice_set__physicalblockdevice__"
                 "partitiontable_set__partitions"
@@ -125,7 +129,6 @@ class MachineHandler(NodeHandler):
             .prefetch_related("boot_interface__vlan__fabric")
             .prefetch_related("tags")
             .prefetch_related("pool")
-            .prefetch_related("ownerdata_set")
             .annotate(
                 status_event_type_description=Subquery(
                     Event.objects.filter(
@@ -192,12 +195,10 @@ class MachineHandler(NodeHandler):
             "set_script_result_unsuppressed",
             "get_suppressible_script_results",
             "get_latest_failed_testing_script_results",
-            "get_workload_annotations",
-            "set_workload_annotations",
         ]
         form = AdminMachineWithMACAddressesForm
         exclude = [
-            "dynamic",
+            "creation_type",
             "status_expires",
             "previous_status",
             "parent",
@@ -222,7 +223,6 @@ class MachineHandler(NodeHandler):
             "last_image_sync",
             "install_rackd",
             "install_kvm",
-            "register_vmhost",
         ]
         list_fields = [
             "id",
@@ -355,8 +355,6 @@ class MachineHandler(NodeHandler):
             node_script_results
         )
 
-        data["workload_annotations"] = OwnerData.objects.get_owner_data(obj)
-
         if not for_list:
             # Add info specific to a machine.
             data["show_os_info"] = self.dehydrate_show_os_info(obj)
@@ -450,7 +448,7 @@ class MachineHandler(NodeHandler):
             self.update_tags(node_obj, params["tags"])
         node_obj.save()
 
-        return self.full_dehydrate(self.refetch(node_obj))
+        return self.full_dehydrate(node_obj)
 
     def mount_special(self, params):
         """Mount a special-purpose filesystem, like tmpfs.
@@ -1116,25 +1114,3 @@ class MachineHandler(NodeHandler):
         if node.locked:
             raise HandlerPermissionError()
         return node
-
-    def get_workload_annotations(self, params):
-        """Get the owner data for a machine, known as workload annotations."""
-        machine = self._get_node_or_permission_error(
-            params, permission=NodePermission.edit
-        )
-        return OwnerData.objects.get_owner_data(machine)
-
-    def set_workload_annotations(self, params):
-        """Set the owner data for a machine, known as workload annotations."""
-        machine = self._get_node_or_permission_error(
-            params, permission=NodePermission.edit
-        )
-        owner_data = {
-            key: None if value == "" else value
-            for key, value in params["workload_annotations"].items()
-        }
-        try:
-            OwnerData.objects.set_owner_data(machine, owner_data)
-        except ValueError as e:
-            raise HandlerValidationError(str(e))
-        return OwnerData.objects.get_owner_data(machine)

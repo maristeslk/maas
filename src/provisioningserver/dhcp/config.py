@@ -1,4 +1,4 @@
-# Copyright 2012-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2016 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Write config output for ISC DHCPD."""
@@ -14,7 +14,7 @@ import tempita
 
 from provisioningserver.boot import BootMethodRegistry
 from provisioningserver.path import get_maas_data_path, get_path
-from provisioningserver.utils import load_template, snap, typed
+from provisioningserver.utils import load_template, snappy, typed
 import provisioningserver.utils.network as net_utils
 from provisioningserver.utils.text import (
     normalise_to_comma_list,
@@ -31,7 +31,9 @@ CONDITIONAL_BOOTLOADER = tempita.Template(
     """
 {{if ipv6}}
 {{if user_class}}
-{{behaviour}} exists dhcp6.user-class and
+{{behaviour}} exists dhcp6.client-arch-type and
+  option dhcp6.client-arch-type = {{arch_octet}} and
+  exists dhcp6.user-class and
   option dhcp6.user-class = \"{{user_class}}\" {
     # {{name}}
     option dhcp6.bootfile-url \"{{url}}\";
@@ -63,7 +65,8 @@ CONDITIONAL_BOOTLOADER = tempita.Template(
 {{endif}}
 {{else}}
 {{if user_class}}
-{{behaviour}} option user-class = \"{{user_class}}\" {
+{{behaviour}} option arch = {{arch_octet}} and
+ option user-class = \"{{user_class}}\" {
     # {{name}}
     filename \"{{bootloader}}\";
     {{if path_prefix}}
@@ -141,68 +144,58 @@ class DHCPConfigError(Exception):
     """Exception raised for errors processing the DHCP config."""
 
 
-def compose_conditional_bootloader(
-    ipv6, rack_ip=None, disabled_boot_architectures=None
-):
-    if disabled_boot_architectures is None:
-        disabled_boot_architectures = []
+def compose_conditional_bootloader(ipv6, rack_ip=None):
     output = ""
     behaviour = chain(["if"], repeat("elsif"))
     for name, method in BootMethodRegistry:
-        if method.arch_octet is None and method.user_class is None:
-            continue
-        elif name in disabled_boot_architectures:
-            continue
-
-        use_http = method.path_prefix_http or method.http_url
-        schema = "http" if use_http else "tftp"
-        port = ":5248" if use_http else ""
-        url = ("%s://[%s]%s/" if ipv6 else "%s://%s%s/") % (
-            schema,
-            rack_ip,
-            port,
-        )
-        # Set the URL to pull from '/images/' so nginx handles the request.
-        # Requests to '/' are forwarded to the rack's http service to
-        # handle which should only be done for configuration files.
-        if method.http_url:
-            url = f"{url}images/"
-        path_prefix = method.path_prefix
-        if path_prefix:
-            url += path_prefix
-        if method.path_prefix_http:
-            # Force an absolute URL as the path prefix.
-            path_prefix = url
-        url += method.bootloader_path
-        bootloader = method.bootloader_path
-        if method.absolute_url_as_filename:
-            bootloader = url
-            # path_prefix gets removed with this setting, because a
-            # absolute url is provided as the bootloader.
-            path_prefix = None
-        output += (
-            CONDITIONAL_BOOTLOADER.substitute(
-                ipv6=ipv6,
-                rack_ip=rack_ip,
-                url=url,
-                behaviour=next(behaviour),
-                arch_octet=method.arch_octet,
-                user_class=method.user_class,
-                bootloader=bootloader,
-                path_prefix=path_prefix,
-                path_prefix_force=method.path_prefix_force,
-                http_client=method.http_url,
-                name=method.name,
-            ).strip()
-            + " "
-        )
+        if method.arch_octet is not None:
+            use_http = method.path_prefix_http or method.http_url
+            schema = "http" if use_http else "tftp"
+            port = ":5248" if use_http else ""
+            url = ("%s://[%s]%s/" if ipv6 else "%s://%s%s/") % (
+                schema,
+                rack_ip,
+                port,
+            )
+            path_prefix = method.path_prefix
+            if path_prefix:
+                url += path_prefix
+            if method.path_prefix_http:
+                # Force an absolute URL as the path prefix.
+                path_prefix = url
+            url += method.bootloader_path
+            if isinstance(method.arch_octet, str):
+                method.arch_octet = [method.arch_octet]
+            bootloader = method.bootloader_path
+            if method.absolute_url_as_filename:
+                bootloader = url
+                # path_prefix gets removed with this setting, because a
+                # absolute url is provided as the bootloader.
+                path_prefix = None
+            for arch_octet in method.arch_octet:
+                output += (
+                    CONDITIONAL_BOOTLOADER.substitute(
+                        ipv6=ipv6,
+                        rack_ip=rack_ip,
+                        url=url,
+                        behaviour=next(behaviour),
+                        arch_octet=arch_octet,
+                        user_class=method.user_class,
+                        bootloader=bootloader,
+                        path_prefix=path_prefix,
+                        path_prefix_force=method.path_prefix_force,
+                        http_client=method.http_url,
+                        name=method.name,
+                    ).strip()
+                    + " "
+                )
 
     # The PXEBootMethod is used in an else statement for the generated
     # dhcpd config. This ensures that a booting node that does not
     # provide an architecture octet, or architectures that emulate
     # uefi_amd64 or pxelinux can still boot.
     method = BootMethodRegistry.get_item("uefi_amd64" if ipv6 else "pxe")
-    if method is not None and method.name not in disabled_boot_architectures:
+    if method is not None:
         use_http = method.path_prefix_http or method.http_url
         schema = "http" if use_http else "tftp"
         port = ":5248" if use_http else ""
@@ -211,8 +204,6 @@ def compose_conditional_bootloader(
             rack_ip,
             port,
         )
-        if method.http_url:
-            url = f"{url}images/"
         path_prefix = method.path_prefix
         if path_prefix:
             url += path_prefix
@@ -430,7 +421,7 @@ def get_config_v4(
         "oneline": normalise_whitespace,
         "commalist": normalise_any_iterable_to_comma_list,
         "quoted_commalist": normalise_any_iterable_to_quoted_comma_list,
-        "running_in_snap": snap.running_in_snap(),
+        "running_in_snap": snappy.running_in_snap(),
     }
 
     for shared_network in shared_networks:
@@ -442,7 +433,7 @@ def get_config_v4(
             if rack_ip is not None:
                 subnet["next_server"] = rack_ip
                 subnet["bootloader"] = compose_conditional_bootloader(
-                    False, rack_ip, subnet.get("disabled_boot_architectures")
+                    False, rack_ip
                 )
             ntp_servers = subnet["ntp_servers"]  # Is a list.
             ntp_servers_ipv4, ntp_servers_ipv6 = _get_addresses(*ntp_servers)
@@ -458,7 +449,7 @@ def get_config_v4(
             omapi_key=omapi_key,
             dhcp_helper=(get_path("/usr/sbin/maas-dhcp-helper")),
             dhcp_socket=dhcp_socket,
-            **helpers,
+            **helpers
         )
     except (KeyError, NameError) as error:
         raise DHCPConfigError(
@@ -487,7 +478,7 @@ def get_config_v6(
         "oneline": normalise_whitespace,
         "commalist": normalise_any_iterable_to_comma_list,
         "quoted_commalist": normalise_any_iterable_to_quoted_comma_list,
-        "running_in_snap": snap.running_in_snap(),
+        "running_in_snap": snappy.running_in_snap(),
     }
 
     shared_networks = _process_network_parameters_v6(
@@ -501,7 +492,7 @@ def get_config_v6(
             failover_peers=failover_peers,
             shared_networks=shared_networks,
             omapi_key=omapi_key,
-            **helpers,
+            **helpers
         )
     except (KeyError, NameError) as error:
         raise DHCPConfigError(
@@ -529,7 +520,7 @@ def _process_network_parameters_v6(failover_peers, shared_networks):
             )
             if rack_ip is not None:
                 subnet["bootloader"] = compose_conditional_bootloader(
-                    True, rack_ip, subnet.get("disabled_boot_architectures")
+                    True, rack_ip
                 )
             ntp_servers = subnet["ntp_servers"]  # Is a list.
             ntp_servers_ipv4, ntp_servers_ipv6 = _get_addresses(*ntp_servers)

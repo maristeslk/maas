@@ -1,4 +1,4 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2018 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Tests for `maasserver.websockets.handlers.subnet`"""
@@ -47,7 +47,6 @@ class TestSubnetHandler(MAASServerTestCase):
             "gateway_ip": subnet.gateway_ip,
             "active_discovery": subnet.active_discovery,
             "managed": subnet.managed,
-            "disabled_boot_architectures": subnet.disabled_boot_architectures,
         }
         full_range = subnet.get_iprange_usage()
         metadata = IPRangeStatistics(full_range)
@@ -85,7 +84,7 @@ class TestSubnetHandler(MAASServerTestCase):
         subnet = factory.make_Subnet()
         self.assertIsNone(handler.cache.get("staticroutes"))
         queries, _ = count_queries(handler.get, {"id": subnet.id})
-        self.assertEqual(5, queries)
+        self.assertEquals(5, queries)
         self.assertIsNotNone(handler.cache["staticroutes"])
 
     def test_list(self):
@@ -122,9 +121,9 @@ class TestSubnetHandler(MAASServerTestCase):
         self.assertIsNotNone(handler.cache["staticroutes"])
         del handler.cache["staticroutes"]
         queries_all, _ = count_queries(handler.list, {})
-        self.assertEqual(queries_one, queries_all)
+        self.assertEquals(queries_one, queries_all)
         self.assertIsNotNone(handler.cache["staticroutes"])
-        self.assertEqual(4, queries_one)
+        self.assertEquals(4, queries_one)
 
 
 class TestSubnetHandlerDelete(MAASServerTestCase):

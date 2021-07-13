@@ -29,9 +29,6 @@ from maasserver import (
 from maasserver.eventloop import DEFAULT_PORT, MAASServices
 from maasserver.prometheus.stats import PrometheusService
 from maasserver.regiondservices import ntp, service_monitor_service, syslog
-from maasserver.regiondservices.version_update_check import (
-    RegionVersionUpdateCheckService,
-)
 from maasserver.rpc import regionservice
 from maasserver.testing.eventloop import RegionEventLoopFixture
 from maasserver.testing.listener import FakePostgresListenerService
@@ -359,7 +356,7 @@ class TestFactories(MAASServerTestCase):
             eventloop.loop.factories["rpc"]["factory"],
         )
         self.assertFalse(eventloop.loop.factories["rpc"]["only_on_master"])
-        self.assertEqual(
+        self.assertEquals(
             ["ipc-worker"], eventloop.loop.factories["rpc"]["requires"]
         )
 
@@ -461,19 +458,11 @@ class TestFactories(MAASServerTestCase):
             eventloop.loop.factories["web"]["factory"],
         )
         # Has a dependency of postgres-listener.
-        self.assertEqual(
+        self.assertEquals(
             ["postgres-listener-worker", "status-worker"],
             eventloop.loop.factories["web"]["requires"],
         )
         self.assertFalse(eventloop.loop.factories["web"]["only_on_master"])
-
-    def test_make_VersionUpdateCheckService(self):
-        service = eventloop.make_VersionUpdateCheckService()
-        self.assertIsInstance(service, RegionVersionUpdateCheckService)
-        self.assertIs(
-            eventloop.loop.factories["version-check"]["factory"],
-            eventloop.make_VersionUpdateCheckService,
-        )
 
     def test_make_RackControllerService(self):
         service = eventloop.make_RackControllerService(
@@ -488,7 +477,7 @@ class TestFactories(MAASServerTestCase):
             eventloop.loop.factories["rack-controller"]["factory"],
         )
         # Has a dependency of ipc-worker and postgres-listener.
-        self.assertEqual(
+        self.assertEquals(
             ["ipc-worker", "postgres-listener-worker"],
             eventloop.loop.factories["rack-controller"]["requires"],
         )
@@ -506,7 +495,7 @@ class TestFactories(MAASServerTestCase):
             eventloop.make_ServiceMonitorService,
             eventloop.loop.factories["service-monitor"]["factory"],
         )
-        self.assertEqual(
+        self.assertEquals(
             [], eventloop.loop.factories["service-monitor"]["requires"]
         )
         self.assertTrue(
@@ -522,7 +511,7 @@ class TestFactories(MAASServerTestCase):
             eventloop.loop.factories["status-worker"]["factory"],
         )
         # Has a dependency of database-tasks.
-        self.assertEqual(
+        self.assertEquals(
             ["database-tasks"],
             eventloop.loop.factories["status-worker"]["requires"],
         )
@@ -541,7 +530,7 @@ class TestFactories(MAASServerTestCase):
             eventloop.loop.factories["ntp"]["factory"],
         )
         # Has a no dependencies.
-        self.assertEqual([], eventloop.loop.factories["ntp"]["requires"])
+        self.assertEquals([], eventloop.loop.factories["ntp"]["requires"])
         self.assertTrue(eventloop.loop.factories["ntp"]["only_on_master"])
 
     def test_make_SyslogService(self):
@@ -553,7 +542,7 @@ class TestFactories(MAASServerTestCase):
             eventloop.loop.factories["syslog"]["factory"],
         )
         # Has a no dependencies.
-        self.assertEqual([], eventloop.loop.factories["syslog"]["requires"])
+        self.assertEquals([], eventloop.loop.factories["syslog"]["requires"])
         self.assertTrue(eventloop.loop.factories["syslog"]["only_on_master"])
 
     def test_make_WorkersService(self):
@@ -565,7 +554,7 @@ class TestFactories(MAASServerTestCase):
             eventloop.loop.factories["workers"]["factory"],
         )
         # Has a no dependencies.
-        self.assertEqual([], eventloop.loop.factories["workers"]["requires"])
+        self.assertEquals([], eventloop.loop.factories["workers"]["requires"])
         self.assertTrue(eventloop.loop.factories["workers"]["only_on_master"])
         self.assertTrue(eventloop.loop.factories["workers"]["not_all_in_one"])
 
@@ -578,11 +567,11 @@ class TestFactories(MAASServerTestCase):
             eventloop.loop.factories["ipc-master"]["factory"],
         )
         # Has a no dependencies.
-        self.assertEqual(
+        self.assertEquals(
             [], eventloop.loop.factories["ipc-master"]["requires"]
         )
         # Has an optional dependency on workers.
-        self.assertEqual(
+        self.assertEquals(
             ["workers"], eventloop.loop.factories["ipc-master"]["optional"]
         )
         self.assertTrue(
@@ -598,7 +587,7 @@ class TestFactories(MAASServerTestCase):
             eventloop.loop.factories["ipc-worker"]["factory"],
         )
         # Has a no dependencies.
-        self.assertEqual(
+        self.assertEquals(
             [], eventloop.loop.factories["ipc-worker"]["requires"]
         )
         self.assertFalse(

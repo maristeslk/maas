@@ -14,6 +14,7 @@ import traceback
 import attr
 from crochet import TimeoutError
 from django.conf import settings
+from django.contrib import messages
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.handlers.exception import get_exception_response
 from django.http import (
@@ -24,6 +25,7 @@ from django.http import (
     HttpResponseRedirect,
 )
 from django.urls import get_resolver, get_urlconf, reverse
+from django.utils import six
 from django.utils.encoding import force_str
 from django.utils.http import urlquote_plus
 
@@ -65,8 +67,6 @@ PUBLIC_URL_PREFIXES = [
     reverse("metadata"),
     # RPC information is for use by rack controllers; no login.
     reverse("rpc-info"),
-    # Script to run commissioning scripts manually on a machine
-    reverse("maas-run-scripts"),
     # Prometheus metrics with usage stats
     reverse("metrics"),
     # API meta-information is publicly visible.
@@ -315,9 +315,16 @@ class DebuggingLoggerMiddleware:
         except Exception:
             meta = "<could not parse>"
         path = path_override if path_override is not None else request.path
-        name = request.__class__.__name__
         return force_str(
-            f"<{name}\npath:{path},\nGET:{get},\nPOST:{post},\nCOOKIES:{cookies},\nMETA:{meta}>"
+            "<%s\npath:%s,\nGET:%s,\nPOST:%s,\nCOOKIES:%s,\nMETA:%s>"
+            % (
+                request.__class__.__name__,
+                path,
+                six.text_type(get),
+                six.text_type(post),
+                six.text_type(cookies),
+                six.text_type(meta),
+            )
         )
 
     def __call__(self, request):
@@ -359,6 +366,12 @@ class RPCErrorsMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
 
+    def _handle_exception(self, request, exception):
+        logging.exception(exception)
+        messages.error(
+            request, "Error: %s" % get_error_message_for_exception(exception)
+        )
+
     def __call__(self, request):
         try:
             return self.get_response(request)
@@ -381,7 +394,7 @@ class RPCErrorsMiddleware:
             # than handled_exceptions.
             return None
 
-        logging.exception(exception)
+        self._handle_exception(request, exception)
         return HttpResponseRedirect(request.path)
 
 

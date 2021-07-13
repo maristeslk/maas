@@ -120,11 +120,7 @@ class TestFilesystem(MAASServerTestCase):
             block_device = factory.make_PhysicalBlockDevice(node=node)
             block_devices.append(block_device)
             pt = factory.make_PartitionTable(block_device=block_device)
-            partitions.append(
-                factory.make_Partition(
-                    partition_table=pt, size=pt.get_available_size()
-                )
-            )
+            partitions.append(factory.make_Partition(partition_table=pt))
         fs_group = RAID.objects.create_raid(
             level=FILESYSTEM_GROUP_TYPE.RAID_1, partitions=partitions
         )
@@ -228,7 +224,7 @@ class TestFilesystem(MAASServerTestCase):
 
     def test_cannot_create_filesystem_directly_on_boot_disk(self):
         node = factory.make_Node(with_boot_disk=False)
-        boot_disk = factory.make_PhysicalBlockDevice(node=node, bootable=True)
+        boot_disk = factory.make_PhysicalBlockDevice(node=node)
         with ExpectedException(
             ValidationError,
             re.escape(

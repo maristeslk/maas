@@ -24,6 +24,7 @@ from maasserver.forms import (
 from maasserver.forms.filesystem import MountFilesystemForm
 from maasserver.models import (
     BlockDevice,
+    ISCSIBlockDevice,
     Machine,
     PhysicalBlockDevice,
     VirtualBlockDevice,
@@ -240,13 +241,11 @@ class BlockDeviceHandler(OperationsHandler):
     @classmethod
     def storage_pool(cls, block_device):
         block_device = block_device.actual_instance
-        if not isinstance(block_device, PhysicalBlockDevice):
-            return None
-
-        vmdisk = getattr(block_device, "vmdisk", None)
-        if vmdisk and vmdisk.backing_pool:
-            return vmdisk.backing_pool.pool_id
-
+        if (
+            isinstance(block_device, PhysicalBlockDevice)
+            and block_device.storage_pool is not None
+        ):
+            return block_device.storage_pool.pool_id
         return None
 
     @classmethod
@@ -729,6 +728,21 @@ class BlockDeviceHandler(OperationsHandler):
         device.node.boot_disk = device
         device.node.save()
         return rc.ALL_OK
+
+
+class ISCSIBlockDeviceHandler(BlockDeviceHandler):
+    """
+    This handler only exists because piston requires a unique handler per
+    class type. Without this class the resource_uri will not be added to any
+    object that is of type `ISCSIBlockDevice` when it is emitted from the
+    `BlockDeviceHandler`.
+
+    Important: This should not be used in the urls_api.py. This is only here
+        to support piston.
+    """
+
+    hidden = True
+    model = ISCSIBlockDevice
 
 
 class PhysicalBlockDeviceHandler(BlockDeviceHandler):

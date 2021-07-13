@@ -4,7 +4,7 @@
       "name": "virtual",
       "definition": "",
       "comment": "",
-      "kernel_opts": "",
+      "kernel_opts": null,
       "resource_uri": "/MAAS/api/2.0/tags/virtual/"
     }
   ],
@@ -12,7 +12,7 @@
     "name": "virtual",
     "definition": "",
     "comment": "",
-    "kernel_opts": "",
+    "kernel_opts": null,
     "resource_uri": "/MAAS/api/2.0/tags/virtual/"
   },
   "get-devices-by-tag": [
@@ -566,6 +566,7 @@
           "resource_uri": "/MAAS/api/2.0/nodes/ssqcgt/interfaces/99/"
         }
       ],
+      "iscsiblockdevice_set": [],
       "node_type": 0,
       "memory_test_status_name": "Failed",
       "bcaches": [],
@@ -1587,6 +1588,7 @@
           "resource_uri": "/MAAS/api/2.0/nodes/ssqcgt/interfaces/99/"
         }
       ],
+      "iscsiblockdevice_set": [],
       "node_type": 0,
       "memory_test_status_name": "Failed",
       "bcaches": [],

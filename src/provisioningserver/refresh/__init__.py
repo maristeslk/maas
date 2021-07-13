@@ -4,16 +4,13 @@
 """Functionality to refresh rack controller hardware and networking details."""
 
 import copy
-from functools import lru_cache
 import os
 from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
 import tempfile
 
-from provisioningserver.config import is_dev_environment
 from provisioningserver.logger import get_maas_logger
 from provisioningserver.refresh.maas_api_helper import (
     capture_script_output,
-    Credentials,
     MD_VERSION,
     signal,
     SignalException,
@@ -22,34 +19,23 @@ from provisioningserver.refresh.node_info_scripts import (
     LXD_OUTPUT_NAME,
     NODE_INFO_SCRIPTS,
 )
-from provisioningserver.utils.snap import running_in_snap, SnapPaths
+from provisioningserver.utils.shell import call_and_check, ExternalProcessError
+from provisioningserver.utils.snappy import get_snap_path, running_in_snap
 from provisioningserver.utils.twisted import synchronous
 
 maaslog = get_maas_logger("refresh")
 
 
-@lru_cache(maxsize=1)
 def get_architecture():
-    """Get the Debian architecture of the running system."""
-    arch = os.getenv("SNAP_ARCH")
-    if not arch:
-        # assume it's a deb environment
-        import apt_pkg
-
-        apt_pkg.init()
-        arch = apt_pkg.get_architectures()[0]
-    return arch
-
-
-@lru_cache(maxsize=1)
-def get_resources_bin_path():
-    """Return the path of the resources binary."""
-    if is_dev_environment():
-        path = "src/machine-resources/bin"
-    else:
-        prefix = SnapPaths.from_environ().snap or ""
-        path = f"{prefix}/usr/share/maas/machine-resources"
-    return os.path.join(path, get_architecture())
+    """Get the architecture of the running system."""
+    try:
+        stdout = call_and_check("archdetect").decode("utf-8")
+    except ExternalProcessError:
+        return ""
+    arch, subarch = stdout.strip().split("/")
+    if arch in ["i386", "amd64", "arm64", "ppc64el"]:
+        subarch = "generic"
+    return "%s/%s" % (arch, subarch)
 
 
 def signal_wrapper(*args, **kwargs):
@@ -57,18 +43,11 @@ def signal_wrapper(*args, **kwargs):
     try:
         signal(*args, **kwargs)
     except SignalException as e:
-        maaslog.error("Error during controller refresh: %s" % e)
+        maaslog.error("Error during controller refresh: %s" % e.error)
 
 
 @synchronous
-def refresh(
-    system_id,
-    consumer_key,
-    token_key,
-    token_secret,
-    maas_url=None,
-    post_process_hook=None,
-):
+def refresh(system_id, consumer_key, token_key, token_secret, maas_url=None):
     """Run all builtin commissioning scripts and report results to region."""
     maaslog.info("Refreshing rack controller hardware information.")
 
@@ -76,11 +55,13 @@ def refresh(
         maas_url = "http://127.0.0.1:5240/MAAS"
     url = "%s/metadata/%s/" % (maas_url, MD_VERSION)
 
-    creds = Credentials(
-        token_key=token_key,
-        token_secret=token_secret,
-        consumer_key=consumer_key,
-    )
+    creds = {
+        "consumer_key": consumer_key,
+        "token_key": token_key,
+        "token_secret": token_secret,
+        "consumer_secret": "",
+    }
+
     scripts = {
         name: config
         for name, config in NODE_INFO_SCRIPTS.items()
@@ -88,25 +69,17 @@ def refresh(
     }
 
     with tempfile.TemporaryDirectory(prefix="maas-commission-") as tmpdir:
-        failed_scripts = runscripts(
-            scripts,
-            url,
-            creds,
-            tmpdir=tmpdir,
-            post_process_hook=post_process_hook,
+        failed_scripts = runscripts(scripts, url, creds, tmpdir=tmpdir)
+
+    if len(failed_scripts) == 0:
+        signal_wrapper(url, creds, "OK", "Finished refreshing %s" % system_id)
+    else:
+        signal_wrapper(
+            url, creds, "FAILED", "Failed refreshing %s" % system_id
         )
 
-    if failed_scripts:
-        signal_wrapper(url, creds, "FAILED", f"Failed refreshing {system_id}")
-    else:
-        signal_wrapper(url, creds, "OK", f"Finished refreshing {system_id}")
 
-
-# XXX: This method should download the scripts from the region, instead
-# of relying on the scripts being available locally.
-def runscripts(scripts, url, creds, tmpdir, post_process_hook=None):
-    in_snap = running_in_snap()
-
+def runscripts(scripts, url, creds, tmpdir):
     total_scripts = len(scripts)
     current_script = 1
     failed_scripts = []
@@ -124,7 +97,17 @@ def runscripts(scripts, url, creds, tmpdir, post_process_hook=None):
         if script_name == LXD_OUTPUT_NAME:
             # Execute the LXD binary directly as we are already on the
             # rack controller and don't need to download it.
-            script_path = get_resources_bin_path()
+            if running_in_snap():
+                script_path = os.path.join(
+                    get_snap_path(),
+                    "usr/share/maas/machine-resources",
+                    get_architecture().split("/")[0],
+                )
+            else:
+                script_path = os.path.join(
+                    "/usr/share/maas/machine-resources",
+                    get_architecture().split("/")[0],
+                )
         else:
             script_path = os.path.join(os.path.dirname(__file__), script_name)
 
@@ -144,11 +127,9 @@ def runscripts(scripts, url, creds, tmpdir, post_process_hook=None):
 
         timeout = 60
 
-        command = [script_path] if in_snap else ["sudo", "-E", script_path]
-
         try:
             proc = Popen(
-                command, stdin=DEVNULL, stdout=PIPE, stderr=PIPE, env=env
+                script_path, stdin=DEVNULL, stdout=PIPE, stderr=PIPE, env=env
             )
             capture_script_output(
                 proc, combined_path, stdout_path, stderr_path, timeout
@@ -189,10 +170,6 @@ def runscripts(scripts, url, creds, tmpdir, post_process_hook=None):
             )
             failed_scripts.append(script_name)
         else:
-            if post_process_hook is not None:
-                post_process_hook(
-                    script_name, combined_path, stdout_path, stderr_path
-                )
             files = {
                 script_name: open(combined_path, "rb").read(),
                 stdout_name: open(stdout_path, "rb").read(),

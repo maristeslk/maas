@@ -1,4 +1,4 @@
-# Copyright 2012-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 __all__ = [
@@ -8,6 +8,7 @@ __all__ = [
     "store_node_power_parameters",
 ]
 
+from base64 import b64decode
 from itertools import chain
 import json
 
@@ -52,6 +53,7 @@ from maasserver.forms.ephemeral import TestForm
 from maasserver.models import (
     Filesystem,
     Interface,
+    ISCSIBlockDevice,
     Node,
     NUMANode,
     OwnerData,
@@ -90,6 +92,23 @@ NODES_PREFETCH = [
     ),
     Prefetch(
         "blockdevice_set__partitiontable_set__partitions__filesystem_set",
+        queryset=Filesystem.objects.select_related(
+            "cache_set", "filesystem_group"
+        ),
+    ),
+    Prefetch(
+        "blockdevice_set__iscsiblockdevice",
+        queryset=ISCSIBlockDevice.objects.select_related("node"),
+    ),
+    Prefetch(
+        "blockdevice_set__iscsiblockdevice__filesystem_set",
+        queryset=Filesystem.objects.select_related(
+            "cache_set", "filesystem_group"
+        ),
+    ),
+    Prefetch(
+        "blockdevice_set__iscsiblockdevice__partitiontable_set__partitions__"
+        "filesystem_set",
         queryset=Filesystem.objects.select_related(
             "cache_set", "filesystem_group"
         ),
@@ -795,19 +814,6 @@ class NodesHandler(OperationsHandler):
         @param (string) "not_pod_type": [required=false] Only nodes that don't
         belong a pod of the specified type will be returned.
 
-        @param (string) "devices": [required=false] Only return nodes which
-        have one or more devices containing the following constraints in the
-        format key=value[,key2=value2[,...]]
-
-        Each key can be one of the following:
-
-        - ``vendor_id``: The device vendor id
-        - ``product_id``: The device product id
-        - ``vendor_name``: The device vendor name, not case sensative
-        - ``product_name``: The device product name, not case sensative
-        - ``commissioning_driver``: The device uses this driver during
-          commissioning.
-
         @success (http-status-code) "200" 200
 
         @success (json) "success_json" A JSON object containing a list of node
@@ -916,21 +922,17 @@ class NodesHandler(OperationsHandler):
         return ("nodes_handler", [])
 
 
-class WorkloadAnnotationsMixin:
-    """Mixin that adds methods for workload annotations to the handler."""
+class OwnerDataMixin:
+    """Mixin that adds the owner_data classmethod and provides set_owner_data
+    to the handler."""
 
     @classmethod
-    def workload_annotations(cls, machine):
-        """Workload annotations placed on the machine."""
-        return OwnerData.objects.get_owner_data(machine)
-
-    @classmethod
-    def owner_data(cls, machine):
-        """Deprecated, use workload_annotations instead."""
-        return cls.workload_annotations(machine)
+    def owner_data(handler, machine):
+        """Owner data placed on machine."""
+        return {data.key: data.value for data in machine.ownerdata_set.all()}
 
     @operation(idempotent=False)
-    def set_workload_annotations(self, request, system_id):
+    def set_owner_data(self, request, system_id):
         """@description-title Set key=value data
         @description Set key=value data for the current owner.
 
@@ -938,8 +940,8 @@ class WorkloadAnnotationsMixin:
         A key is removed when the value for that key is set to an empty string.
 
         This operation will not remove any previous keys unless explicitly
-        passed with an empty string. All workload annotations are removed when
-        the machine is no longer allocated to a user.
+        passed with an empty string. All owner data is removed when the machine
+        is no longer allocated to a user.
 
         @param (string) "key" [required=true] ``key`` can be any string value.
 
@@ -950,14 +952,13 @@ class WorkloadAnnotationsMixin:
 
         @error (http-status-code) "403" 403
         @error (content) "no-perms" The user does not have set the zone.
-
         """
         node = self.model.objects.get_node_or_404(
             user=request.user, system_id=system_id, perm=NodePermission.edit
         )
         if node.owner_id != request.user.id:
             raise NodeStateViolation(
-                "Cannot set workload annotation: it hasn't been acquired."
+                "Cannot set owner data: it hasn't been allocated."
             )
         owner_data = {
             key: None if value == "" else value
@@ -966,12 +967,6 @@ class WorkloadAnnotationsMixin:
         }
         OwnerData.objects.set_owner_data(node, owner_data)
         return node
-
-    @operation(idempotent=False)
-    def set_owner_data(self, request, system_id):
-        """@description-title Deprecated, use set-workload-annotations.
-        @description Deprecated, use set-workload-annotations instead."""
-        return self.set_workload_annotations(request, system_id)
 
 
 class PowerMixin:
@@ -1044,8 +1039,8 @@ class PowerMixin:
             raise NodeStateViolation(
                 "Can't start node: it hasn't been allocated."
             )
-        if isinstance(user_data, str):
-            user_data = user_data.encode()
+        if user_data is not None:
+            user_data = b64decode(user_data)
         try:
             # These parameters are passed in the request from
             # maasserver.api.machines.deploy when powering on
@@ -1053,12 +1048,6 @@ class PowerMixin:
             install_kvm = get_optional_param(
                 request.POST,
                 "install_kvm",
-                default=False,
-                validator=StringBool,
-            )
-            register_vmhost = get_optional_param(
-                request.POST,
-                "register_vmhost",
                 default=False,
                 validator=StringBool,
             )
@@ -1087,7 +1076,6 @@ class PowerMixin:
                 user_data=user_data,
                 comment=comment,
                 install_kvm=install_kvm,
-                register_vmhost=register_vmhost,
                 bridge_type=bridge_type,
                 bridge_stp=bridge_stp,
                 bridge_fd=bridge_fd,

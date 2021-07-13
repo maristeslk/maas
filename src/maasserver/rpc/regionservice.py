@@ -1,4 +1,4 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2018 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """RPC implementation for regions."""
@@ -72,7 +72,7 @@ from provisioningserver.utils.twisted import (
     deferWithTimeout,
     FOREVER,
 )
-from provisioningserver.utils.version import get_running_version
+from provisioningserver.utils.version import get_maas_version
 
 log = LegacyLogger()
 
@@ -207,6 +207,19 @@ class Region(RPCProtocol):
 
     @region.GetBootSources.responder
     def get_boot_sources(self, uuid):
+        """get_boot_sources()
+
+        Deprecated: get_boot_sources_v2() should be used instead.
+
+        Implementation of
+        :py:class:`~provisioningserver.rpc.region.GetBootSources`.
+        """
+        d = deferToDatabase(get_simplestream_endpoint)
+        d.addCallback(lambda source: {"sources": [source]})
+        return d
+
+    @region.GetBootSourcesV2.responder
+    def get_boot_sources_v2(self, uuid):
         """get_boot_sources_v2()
 
         Implementation of
@@ -406,12 +419,28 @@ class Region(RPCProtocol):
         d.addCallback(lambda args: {})
         return d
 
+    @region.UpdateInterfaces.responder
+    def update_interfaces(self, system_id, interfaces, topology_hints=None):
+        """update_interfaces()
+
+        Implementation of
+        :py:class:`~provisioningserver.rpc.region.UpdateInterfaces`.
+        """
+        d = deferToDatabase(
+            rackcontrollers.update_interfaces,
+            system_id,
+            interfaces,
+            topology_hints=topology_hints,
+        )
+        d.addCallback(lambda args: {})
+        return d
+
     @region.GetDiscoveryState.responder
     def get_discovery_state(self, system_id):
         """get_interface_monitoring_state()
 
         Implementation of
-        :py:class:`~provisioningserver.rpc.region.GetDiscoveryState`.
+        :py:class:`~provisioningserver.rpc.region.UpdateInterfaces`.
         """
         d = deferToDatabase(rackcontrollers.get_discovery_state, system_id)
         d.addCallback(lambda args: {"interfaces": args})
@@ -485,7 +514,8 @@ class Region(RPCProtocol):
         :py:class:`~provisioningserver.rpc.region.RequestRackRefresh`.
         """
         d = deferToDatabase(RackController.objects.get, system_id=system_id)
-        d.addCallback(lambda rack: rack.start_refresh())
+        d.addCallback(lambda rack: rack.refresh())
+        d.addCallback(lambda _: {})
         return d
 
     @region.GetControllerType.responder
@@ -561,17 +591,6 @@ class Region(RPCProtocol):
             return {"port": port}
 
         return deferToDatabase(get_from_db)
-
-    @region.UpdateControllerState.responder
-    def update_controller_state(self, system_id, scope, state):
-        """Update state of the controller.
-
-        The scope specificies which part of the state needs to be updated.
-        """
-        d = deferToDatabase(
-            rackcontrollers.update_state, system_id, scope, state
-        )
-        return d.addCallback(lambda _: {})
 
 
 @inlineCallbacks
@@ -677,12 +696,17 @@ class RegionServer(Region):
         beacon_support=False,
         version=None,
     ):
+        # Hold off on fabric creation if the remote controller
+        # supports beacons; it will happen later when UpdateInterfaces is
+        # called.
+        create_fabrics = False if beacon_support else True
         result = yield self._register(
             system_id,
             hostname,
             interfaces,
             url,
             nodegroup_uuid=nodegroup_uuid,
+            create_fabrics=create_fabrics,
             version=version,
         )
         if beacon_support:
@@ -690,7 +714,7 @@ class RegionServer(Region):
             result["beacon_support"] = True
         if version:
             # The remote supports version checking, so reply to that.
-            result["version"] = str(get_running_version())
+            result["version"] = get_maas_version()
         return result
 
     @inlineCallbacks
@@ -701,6 +725,7 @@ class RegionServer(Region):
         interfaces,
         url,
         nodegroup_uuid=None,
+        create_fabrics=True,
         version=None,
     ):
         try:
@@ -713,6 +738,7 @@ class RegionServer(Region):
                 interfaces=interfaces,
                 url=url,
                 is_loopback=is_loopback,
+                create_fabrics=create_fabrics,
                 version=version,
             )
 
@@ -811,7 +837,7 @@ class RackClient(common.Client):
     # Currently the only calls that can be cached are the ones that take
     # no arguments. More work needs to be done to this class to handle
     # argument matching.
-    cache_calls = [cluster.DescribePowerTypes]
+    cache_calls = [cluster.DescribePowerTypes, cluster.DescribeNOSTypes]
 
     def __init__(self, connection, cache):
         super().__init__(connection)
@@ -858,7 +884,7 @@ class RackClient(common.Client):
             return d
 
 
-class RegionService(service.Service):
+class RegionService(service.Service, object):
     """A region controller RPC service.
 
     This is a service - in the Twisted sense - that exposes the

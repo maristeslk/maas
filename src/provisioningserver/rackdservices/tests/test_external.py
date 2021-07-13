@@ -23,7 +23,7 @@ from maastesting.testcase import MAASTestCase, MAASTwistedRunTest
 from maastesting.twisted import always_succeed_with, TwistedLoggerFixture
 from provisioningserver import services
 from provisioningserver.rackdservices import external
-from provisioningserver.rpc import clusterservice, common, exceptions, region
+from provisioningserver.rpc import common, exceptions, region
 from provisioningserver.rpc.testing import MockLiveClusterToRegionRPCFixture
 from provisioningserver.service_monitor import service_monitor
 from provisioningserver.utils.service_monitor import SERVICE_STATE
@@ -120,12 +120,6 @@ class TestRackExternalService(MAASTestCase):
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5000)
 
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
-
     def test_service_uses__tryUpdate_as_periodic_function(self):
         service = external.RackExternalService(
             StubClusterClientService(), reactor
@@ -202,12 +196,6 @@ class TestRackNTP(MAASTestCase):
     """Tests for `RackNTP` in `RackExternalService`."""
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5000)
-
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def make_RackNTP_ExternalService(self, rpc_service, reactor):
         ntp = external.RackNTP()
@@ -330,7 +318,7 @@ class TestRackNTP(MAASTestCase):
 
         # Ensure that the service was set to any.
         service = service_monitor.getServiceByName("ntp_rack")
-        self.assertEqual(
+        self.assertEquals(
             (SERVICE_STATE.ANY, "managed by the region"),
             service.getExpectedState(),
         )
@@ -358,12 +346,6 @@ class TestRackNetworkTimeProtocolService_Errors(MAASTestCase):
         ("_applyConfiguration", dict(method="_applyConfiguration")),
         ("_configurationApplied", dict(method="_configurationApplied")),
     )
-
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     @inlineCallbacks
     def test_tryUpdate_logs_errors_from_broken_method(self):
@@ -408,12 +390,6 @@ class TestRackDNS(MAASTestCase):
     """Tests for `RackDNS` for `RackExternalService`."""
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5000)
-
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def make_trusted_networks(self):
         return frozenset(
@@ -576,7 +552,7 @@ class TestRackDNS(MAASTestCase):
 
         # Ensure that the service was set to any.
         service = service_monitor.getServiceByName("dns_rack")
-        self.assertEqual(
+        self.assertEquals(
             (SERVICE_STATE.ANY, "managed by the region"),
             service.getExpectedState(),
         )
@@ -607,7 +583,7 @@ class TestRackDNS(MAASTestCase):
 
         dns = external.RackDNS()
         region_ips = list(dns._genRegionIps(mock_rpc.connections))
-        self.assertEqual(3, len(region_ips))
+        self.assertEquals(3, len(region_ips))
 
     def test_genRegionIps_always_returns_same_result(self):
         mock_rpc = Mock()
@@ -625,7 +601,7 @@ class TestRackDNS(MAASTestCase):
         dns = external.RackDNS()
         region_ips = frozenset(dns._genRegionIps(mock_rpc.connections))
         for _ in range(3):
-            self.assertEqual(
+            self.assertEquals(
                 region_ips, frozenset(dns._genRegionIps(mock_rpc.connections))
             )
 
@@ -634,12 +610,6 @@ class TestRackProxy(MAASTestCase):
     """Tests for `RackProxy` for `RackExternalService`."""
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5000)
-
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def make_cidrs(self):
         return frozenset(
@@ -786,7 +756,7 @@ class TestRackProxy(MAASTestCase):
 
         # Ensure that the service was set to any.
         service = service_monitor.getServiceByName("proxy_rack")
-        self.assertEqual(
+        self.assertEquals(
             (SERVICE_STATE.ANY, "managed by the region"),
             service.getExpectedState(),
         )
@@ -807,12 +777,6 @@ class TestRackSyslog(MAASTestCase):
     """Tests for `RackSyslog` for `RackExternalService`."""
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5000)
-
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def extract_regions(self, rpc_service):
         return frozenset(
@@ -922,7 +886,7 @@ class TestRackSyslog(MAASTestCase):
 
         # Ensure that the service was set to any.
         service = service_monitor.getServiceByName("syslog_rack")
-        self.assertEqual(
+        self.assertEquals(
             (SERVICE_STATE.ANY, "managed by the region"),
             service.getExpectedState(),
         )

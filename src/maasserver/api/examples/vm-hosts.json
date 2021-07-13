@@ -1,5 +1,5 @@
 {
-    "read-vmhosts":[
+    "read-pods":[
         {
             "id": 3,
             "architectures": [],
@@ -76,7 +76,7 @@
                 }
             ],
             "type": "virsh",
-            "resource_uri": "/MAAS/api/2.0/vm-hosts/3/"
+            "resource_uri": "/MAAS/api/2.0/pods/3/"
         }
     ],
     "add-tag": {
@@ -157,7 +157,7 @@
 			}
 		],
 		"type": "virsh",
-		"resource_uri": "/MAAS/api/2.0/vm-hosts/3/"
+		"resource_uri": "/MAAS/api/2.0/pods/3/"
 	 },
     "remove-tag": {
 		"id": 3,
@@ -308,7 +308,7 @@
 		"system_id": "wdpx3n",
 		"resource_uri": "/MAAS/api/2.0/machines/wdpx3n/"
 	},
-    "refresh-vmhost": {
+    "refresh-pod": {
 		"type": "virsh",
 		"name": "mypod",
 		"tags": [
@@ -372,7 +372,7 @@
 		},
 		"resource_uri": "/MAAS/api/2.0/pods/1/"
 	},
-    "update-vmhost": {
+    "update-pod": {
 		"cpu_over_commit_ratio": 1.0,
 		"zone": {
 			"name": "default",
@@ -434,6 +434,6 @@
 			"memory": 15916,
 			"local_storage": 47751942144
 		},
-		"resource_uri": "/MAAS/api/2.0/vm-hosts/1/"
+		"resource_uri": "/MAAS/api/2.0/pods/1/"
 	}
 }

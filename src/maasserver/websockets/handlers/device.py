@@ -75,7 +75,7 @@ class DeviceHandler(NodeHandler):
         ]
         exclude = [
             "bmc",
-            "dynamic",
+            "creation_type",
             "type",
             "boot_interface",
             "boot_cluster_ip",
@@ -120,7 +120,6 @@ class DeviceHandler(NodeHandler):
             "default_user",
             "install_rackd",
             "install_kvm",
-            "register_vmhost",
             "hardware_uuid",
         ]
         list_fields = [

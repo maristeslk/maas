@@ -1,14 +1,17 @@
-# Copyright 2016-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2016-2019 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Tests for `metadataserver.vendor_data`."""
+
+
 import random
-from textwrap import dedent
 
 from netaddr import IPAddress
 from testtools.matchers import (
     Contains,
     ContainsDict,
     Equals,
+    HasLength,
     Is,
     IsInstance,
     KeysEqual,
@@ -18,24 +21,21 @@ from testtools.matchers import (
 import yaml
 
 from maasserver.enum import NODE_STATUS
-from maasserver.models import Config, ControllerInfo, NodeMetadata
+from maasserver.models import Config, NodeMetadata
 from maasserver.node_status import COMMISSIONING_LIKE_STATUSES
 from maasserver.server_address import get_maas_facing_server_host
 from maasserver.testing.factory import factory
 from maasserver.testing.fixtures import RBACEnabled
 from maasserver.testing.testcase import MAASServerTestCase
 from maastesting.matchers import MockNotCalled
-from metadataserver import vendor_data
 from metadataserver.vendor_data import (
     generate_ephemeral_deployment_network_configuration,
-    generate_ephemeral_netplan_lock_removal,
-    generate_kvm_pod_configuration,
     generate_ntp_configuration,
     generate_rack_controller_configuration,
-    generate_snap_configuration,
     generate_system_info,
     get_vendor_data,
 )
+from provisioningserver.utils import version
 
 
 class TestGetVendorData(MAASServerTestCase):
@@ -44,24 +44,6 @@ class TestGetVendorData(MAASServerTestCase):
     def test_returns_dict(self):
         node = factory.make_Node()
         self.assertThat(get_vendor_data(node, None), IsInstance(dict))
-
-    def test_combines_key_values(self):
-        controller = factory.make_RackController()
-        ControllerInfo.objects.set_version(controller, "3.0.0-123-g.abc")
-        secret = factory.make_string()
-        Config.objects.set_config("rpc_shared_secret", secret)
-        node = factory.make_Node(
-            netboot=False, install_rackd=True, osystem="ubuntu"
-        )
-        config = get_vendor_data(node, None)
-        self.assertEqual(
-            config["runcmd"],
-            [
-                "snap install maas --channel=3.0/stable",
-                f"/snap/bin/maas init rack --maas-url http://localhost:5240/MAAS --secret {secret}",
-                "rm -rf /run/netplan",
-            ],
-        )
 
     def test_includes_no_system_information_if_no_default_user(self):
         node = factory.make_Node(owner=factory.make_User())
@@ -131,30 +113,6 @@ class TestGenerateSystemInfo(MAASServerTestCase):
                     }
                 }
             ),
-        )
-
-
-class TestGenerateSnapConfiguration(MAASServerTestCase):
-    def test_no_proxy(self):
-        node = factory.make_Node()
-        config = generate_snap_configuration(node, None)
-        self.assertEqual(list(config), [])
-
-    def test_proxy(self):
-        node = factory.make_Node()
-        config = generate_snap_configuration(node, "http://proxy.example.com/")
-        self.assertEqual(
-            list(config),
-            [
-                (
-                    "snap",
-                    {
-                        "commands": [
-                            'snap set system proxy.http="http://proxy.example.com/" proxy.https="http://proxy.example.com/"'
-                        ],
-                    },
-                ),
-            ],
         )
 
 
@@ -241,271 +199,169 @@ class TestGenerateNTPConfiguration(MAASServerTestCase):
 
 
 class TestGenerateRackControllerConfiguration(MAASServerTestCase):
+    """Tests for `generate_ntp_rack_controller_configuration`."""
+
     def test_yields_nothing_when_node_is_not_netboot_disabled(self):
-        node = factory.make_Node(osystem="ubuntu", install_rackd=True)
         configuration = generate_rack_controller_configuration(
-            node=node,
+            node=factory.make_Node(osystem="ubuntu"),
+            proxy="http://proxy.example.com/",
         )
-        self.assertEqual(list(configuration), [])
+        self.assertThat(dict(configuration), Equals({}))
 
     def test_yields_nothing_when_node_is_not_ubuntu(self):
-        node = factory.make_Node(
-            osystem="centos", netboot=False, install_rackd=True
+        tag = factory.make_Tag(name="switch")
+        node = factory.make_Node(osystem="centos", netboot=False)
+        node.tags.add(tag)
+        configuration = generate_rack_controller_configuration(
+            node, proxy="http://proxy.example.com/"
         )
-        configuration = generate_rack_controller_configuration(node)
-        self.assertEqual(list(configuration), [])
+        self.assertThat(dict(configuration), Equals({}))
 
     def test_yields_configuration_with_ubuntu(self):
-        controller = factory.make_RackController()
-        ControllerInfo.objects.set_version(controller, "3.0.0-123-g.abc")
-        node = factory.make_Node(
-            osystem="ubuntu", netboot=False, install_rackd=True
+        tag = factory.make_Tag(name="wedge100")
+        node = factory.make_Node(osystem="ubuntu", netboot=False)
+        node.tags.add(tag)
+        configuration = generate_rack_controller_configuration(
+            node, proxy="http://proxy.example.com/"
         )
-        configuration = generate_rack_controller_configuration(node)
         secret = "1234"
         Config.objects.set_config("rpc_shared_secret", secret)
+        channel = version.get_maas_version_track_channel()
         maas_url = "http://%s:5240/MAAS" % get_maas_facing_server_host(
             node.get_boot_rack_controller()
         )
-        self.assertEqual(
-            list(configuration),
-            [
-                (
-                    "runcmd",
-                    [
-                        "snap install maas --channel=3.0/stable",
-                        f"/snap/bin/maas init rack --maas-url {maas_url} --secret {secret}",
-                    ],
-                ),
-            ],
+        cmd = "/bin/snap/maas init --mode rack"
+
+        self.assertThat(
+            dict(configuration),
+            KeysEqual(
+                {
+                    "runcmd": [
+                        f"snap install maas --channel={channel}",
+                        "%s --maas-url %s --secret %s"
+                        % (cmd, maas_url, secret),
+                    ]
+                }
+            ),
         )
 
     def test_yields_nothing_when_machine_install_rackd_false(self):
-        node = factory.make_Node(
-            osystem="ubuntu", netboot=False, install_rackd=False
+        node = factory.make_Node(osystem="ubuntu", netboot=False)
+        node.install_rackd = False
+        configuration = generate_rack_controller_configuration(
+            node, proxy="http://proxy.example.com/"
         )
-        configuration = generate_rack_controller_configuration(node)
-        self.assertEqual(list(configuration), [])
+        self.assertThat(dict(configuration), Equals({}))
 
     def test_yields_configuration_when_machine_install_rackd_true(self):
-        controller = factory.make_RackController()
-        ControllerInfo.objects.set_version(controller, "3.0.0-123-g.abc")
-        node = factory.make_Node(
-            osystem="ubuntu", netboot=False, install_rackd=True
+        node = factory.make_Node(osystem="ubuntu", netboot=False)
+        node.install_rackd = True
+        proxy = "http://proxy.example.com/"
+        configuration = generate_rack_controller_configuration(
+            node, proxy=proxy
         )
-        configuration = generate_rack_controller_configuration(node)
         secret = "1234"
         Config.objects.set_config("rpc_shared_secret", secret)
+        channel = version.get_maas_version_track_channel()
         maas_url = "http://%s:5240/MAAS" % get_maas_facing_server_host(
             node.get_boot_rack_controller()
         )
-        self.assertEqual(
-            list(configuration),
-            [
-                (
-                    "runcmd",
-                    [
-                        "snap install maas --channel=3.0/stable",
-                        f"/snap/bin/maas init rack --maas-url {maas_url} --secret {secret}",
-                    ],
-                ),
-            ],
+        cmd = "/bin/snap/maas init --mode rack"
+
+        self.assertThat(
+            dict(configuration),
+            KeysEqual(
+                {
+                    "runcmd": [
+                        "snap set system proxy.http=%s proxy.https=%s"
+                        % (proxy, proxy),
+                        f"snap install maas --channel={channel}",
+                        "%s --maas-url %s --secret %s"
+                        % (cmd, maas_url, secret),
+                    ]
+                }
+            ),
         )
 
-
-class TestGenerateKVMPodConfiguration(MAASServerTestCase):
     def test_yields_configuration_when_machine_install_kvm_true(self):
-        password = "123secure"
-        self.patch(vendor_data, "_generate_password").return_value = password
-        self.patch(vendor_data, "crypt").return_value = "123crypted"
         node = factory.make_Node(
-            status=NODE_STATUS.DEPLOYING,
-            osystem="ubuntu",
-            netboot=False,
-            install_kvm=True,
+            status=NODE_STATUS.DEPLOYING, osystem="ubuntu", netboot=False
         )
-        config = list(generate_kvm_pod_configuration(node))
-        self.assertEqual(
-            config,
-            [
-                ("ssh_pwauth", True),
-                (
-                    "users",
-                    [
-                        "default",
-                        {
-                            "name": "virsh",
-                            "lock_passwd": False,
-                            "passwd": "123crypted",
-                            "shell": "/bin/rbash",
-                        },
-                    ],
-                ),
-                ("packages", ["libvirt-daemon-system", "libvirt-clients"]),
-                (
-                    "runcmd",
-                    [
-                        "mkdir -p /home/virsh/bin",
-                        "ln -s /usr/bin/virsh /home/virsh/bin/virsh",
-                        "/usr/sbin/usermod --append --groups libvirt,libvirt-qemu virsh",
-                        "systemctl restart sshd",
-                    ],
-                ),
-                (
-                    "write_files",
-                    [
-                        {
-                            "content": "PATH=/home/virsh/bin",
-                            "path": "/home/virsh/.bash_profile",
-                        },
-                        {
-                            "content": dedent(
-                                """\
-                                Match user virsh
-                                  X11Forwarding no
-                                  AllowTcpForwarding no
-                                  PermitTTY no
-                                  ForceCommand nc -q 0 -U /var/run/libvirt/libvirt-sock
-                                """
-                            ),
-                            "path": "/etc/ssh/sshd_config",
-                            "append": True,
-                        },
-                    ],
-                ),
-            ],
-        )
-        password_meta = NodeMetadata.objects.first()
-        self.assertEqual(password_meta.key, "virsh_password")
-        self.assertEqual(password_meta.value, password)
-
-    def test_yields_configuration_when_machine_register_vmhost_true(self):
-        password = "123secure"
-        self.patch(vendor_data, "_generate_password").return_value = password
-        node = factory.make_Node(
-            status=NODE_STATUS.DEPLOYING,
-            osystem="ubuntu",
-            netboot=False,
-            register_vmhost=True,
-        )
-        config = list(generate_kvm_pod_configuration(node))
-        self.assertEqual(
-            config,
-            [
-                (
-                    "runcmd",
-                    [
-                        "apt autoremove --purge --yes lxd lxd-client lxcfs",
-                        "snap install lxd --channel=4.0",
-                        f'lxd init --auto --network-address=[::] --trust-password="{password}"',
-                    ],
-                ),
-            ],
-        )
-        password_meta = NodeMetadata.objects.first()
-        self.assertEqual(password_meta.key, "lxd_password")
-        self.assertEqual(password_meta.value, password)
+        node.install_kvm = True
+        configuration = get_vendor_data(node, None)
+        config = str(dict(configuration))
+        self.assertThat(config, Contains("virsh"))
+        self.assertThat(config, Contains("ssh_pwauth"))
+        self.assertThat(config, Contains("rbash"))
+        self.assertThat(config, Contains("libvirt-daemon-system"))
+        self.assertThat(config, Contains("ForceCommand"))
+        self.assertThat(config, Contains("libvirt-clients"))
+        # Check that a password was saved for the pod-to-be.
+        virsh_password_meta = NodeMetadata.objects.filter(
+            node=node, key="virsh_password"
+        ).first()
+        self.assertThat(virsh_password_meta.value, HasLength(32))
 
     def test_includes_smt_off_for_install_kvm_on_ppc64(self):
-        password = "123secure"
-        self.patch(vendor_data, "_generate_password").return_value = password
         node = factory.make_Node(
             status=NODE_STATUS.DEPLOYING,
             osystem="ubuntu",
             netboot=False,
             architecture="ppc64el/generic",
-            register_vmhost=True,
         )
-        config = list(generate_kvm_pod_configuration(node))
-        self.assertIn(
-            (
-                "write_files",
+        node.install_kvm = True
+        configuration = get_vendor_data(node, None)
+        config = dict(configuration)
+        self.assertThat(
+            config["runcmd"],
+            Contains(
                 [
-                    {
-                        "path": "/etc/rc.local",
-                        "content": (
-                            "#!/bin/sh\n"
-                            "# This file was generated by MAAS to disable SMT "
-                            "on PPC64EL since\n"
-                            "# VMs are not supported otherwise.\n"
-                            "ppc64_cpu --smt=off\n"
-                            "exit 0\n"
-                        ),
-                        "permissions": "0755",
-                    },
-                ],
+                    "sh",
+                    "-c",
+                    'printf "'
+                    "#!/bin/sh\\n"
+                    "ppc64_cpu --smt=off\\n"
+                    "exit 0\\n"
+                    '"  >> /etc/rc.local',
+                ]
             ),
-            config,
         )
-        self.assertIn(("runcmd", ["/etc/rc.local"]), config)
-
-    def test_enables_vnic_characteristics_on_s390x(self):
-        password = "123secure"
-        self.patch(vendor_data, "_generate_password").return_value = password
-        node = factory.make_Node(
-            status=NODE_STATUS.DEPLOYING,
-            osystem="ubuntu",
-            netboot=False,
-            architecture="s390x/generic",
-            register_vmhost=True,
+        self.assertThat(
+            config["runcmd"], Contains(["chmod", "+x", "/etc/rc.local"])
         )
-        config = list(generate_kvm_pod_configuration(node))
-        self.assertIn(
-            (
-                "write_files",
-                [
-                    {
-                        "path": "/etc/rc.local",
-                        "content": (
-                            "#!/bin/bash\n"
-                            "# This file was generated by MAAS to enable VNIC "
-                            "characteristics to allow\n"
-                            "# packets to be forwarded over a bridge.\n"
-                            'for bridge in $(bridge link show | awk -F"[ :]" '
-                            "'{ print $3 }'); do\n"
-                            "    # Isolated networks are not associated with "
-                            "a qeth and do not need\n"
-                            "    # anything enabled. Ignore them.\n"
-                            "    phy_addr=$(lsqeth $bridge 2>/dev/null | "
-                            "awk -F ': ' '/cdev0/ {print $2}')\n"
-                            '    if [ -n "$phy_addr" ]; then\n'
-                            "        chzdev $phy_addr vnicc/learning=1\n"
-                            "    fi\n"
-                            "done\n"
-                        ),
-                        "permissions": "0755",
-                    },
-                ],
-            ),
-            config,
-        )
-        self.assertIn(("runcmd", ["/etc/rc.local"]), config)
+        self.assertThat(config["runcmd"], Contains(["/etc/rc.local"]))
 
 
 class TestGenerateEphemeralNetplanLockRemoval(MAASServerTestCase):
+    """Tests for `generate_ephemeral_netplan_lock_removal`."""
+
     def test_does_nothing_if_deploying(self):
         # MAAS transitions a machine from DEPLOYING to DEPLOYED after
         # user_data has been requested. Make sure deploying nodes don't
         # get this config.
         node = factory.make_Node(status=NODE_STATUS.DEPLOYING)
-        config = list(generate_ephemeral_netplan_lock_removal(node))
-        self.assertEqual(config, [])
+        configuration = get_vendor_data(node, None)
+        config = dict(configuration)
+        self.assertNotIn("runcmd", config)
 
     def test_removes_lock_when_ephemeral(self):
         node = factory.make_Node(
             status=random.choice(COMMISSIONING_LIKE_STATUSES)
         )
-        config = list(generate_ephemeral_netplan_lock_removal(node))
-        self.assertEqual(config, [("runcmd", ["rm -rf /run/netplan"])])
+        configuration = get_vendor_data(node, None)
+        config = dict(configuration)
+        self.assertThat(config["runcmd"], Contains("rm -rf /run/netplan"))
 
 
 class TestGenerateEphemeralDeploymentNetworkConfiguration(MAASServerTestCase):
+    """Tests for `generate_ephemeral_deployment_network_configuration`."""
+
     def test_yields_nothing_when_node_is_not_ephemeral_deployment(self):
         node = factory.make_Node()
-        config = list(
-            generate_ephemeral_deployment_network_configuration(node)
+        configuration = generate_ephemeral_deployment_network_configuration(
+            node
         )
-        self.assertEqual(config, [])
+        self.assertThat(dict(configuration), Equals({}))
 
     def test_yields_configuration_when_node_is_ephemeral_deployment(self):
         node = factory.make_Node(
@@ -513,29 +369,20 @@ class TestGenerateEphemeralDeploymentNetworkConfiguration(MAASServerTestCase):
             ephemeral_deploy=True,
             status=NODE_STATUS.DEPLOYING,
         )
-        config = list(
-            generate_ephemeral_deployment_network_configuration(node)
+        configuration = get_vendor_data(node, None)
+        config = dict(configuration)
+        self.assertThat(
+            config["write_files"][0]["path"],
+            Contains("/etc/netplan/50-maas.yaml"),
         )
-        self.assertEqual(
-            config,
-            [
-                (
-                    "write_files",
-                    [
-                        {
-                            "path": "/etc/netplan/50-maas.yaml",
-                            "content": yaml.safe_dump(
-                                {"network": {"version": 2}}
-                            ),
-                        },
-                    ],
-                ),
-                ("runcmd", ["rm -rf /run/netplan", "netplan apply --debug"]),
-            ],
-        )
+        # Make sure netplan's lock is removed before applying the config
+        self.assertEquals(config["runcmd"][0], "rm -rf /run/netplan")
+        self.assertEquals(config["runcmd"][1], "netplan apply --debug")
 
 
 class TestGenerateVcenterConfiguration(MAASServerTestCase):
+    """Tests for `generate_vcenter_configuration`."""
+
     def test_does_nothing_if_not_vmware(self):
         mock_get_configs = self.patch(Config.objects, "get_configs")
         node = factory.make_Node(
@@ -543,7 +390,7 @@ class TestGenerateVcenterConfiguration(MAASServerTestCase):
         )
         config = get_vendor_data(node, None)
         self.assertThat(mock_get_configs, MockNotCalled())
-        self.assertNotIn(config, "write_files")
+        self.assertDictEqual({}, config)
 
     def test_returns_nothing_if_no_values_set(self):
         node = factory.make_Node(
@@ -553,7 +400,7 @@ class TestGenerateVcenterConfiguration(MAASServerTestCase):
         )
         node.nodemetadata_set.create(key="vcenter_registration", value="True")
         config = get_vendor_data(node, None)
-        self.assertNotIn(config, "write_files")
+        self.assertDictEqual({}, config)
 
     def test_returns_vcenter_yaml(self):
         node = factory.make_Node(
@@ -563,22 +410,24 @@ class TestGenerateVcenterConfiguration(MAASServerTestCase):
         )
         node.nodemetadata_set.create(key="vcenter_registration", value="True")
         vcenter = {
-            "vcenter_datacenter": factory.make_name("vcenter_datacenter"),
             "vcenter_server": factory.make_name("vcenter_server"),
-            "vcenter_password": factory.make_name("vcenter_password"),
             "vcenter_username": factory.make_name("vcenter_username"),
+            "vcenter_password": factory.make_name("vcenter_password"),
+            "vcenter_datacenter": factory.make_name("vcenter_datacenter"),
         }
         for key, value in vcenter.items():
             Config.objects.set_config(key, value)
         config = get_vendor_data(node, None)
-        self.assertEqual(
-            config["write_files"],
-            [
-                {
-                    "content": yaml.safe_dump(vcenter),
-                    "path": "/altbootbank/maas/vcenter.yaml",
-                },
-            ],
+        self.assertDictEqual(
+            {
+                "write_files": [
+                    {
+                        "content": yaml.safe_dump(vcenter),
+                        "path": "/altbootbank/maas/vcenter.yaml",
+                    }
+                ]
+            },
+            config,
         )
 
     def test_returns_vcenter_yaml_if_rbac_admin(self):
@@ -592,22 +441,24 @@ class TestGenerateVcenterConfiguration(MAASServerTestCase):
         rbac.store.add_pool(node.pool)
         rbac.store.allow(node.owner.username, node.pool, "admin-machines")
         vcenter = {
-            "vcenter_datacenter": factory.make_name("vcenter_datacenter"),
             "vcenter_server": factory.make_name("vcenter_server"),
-            "vcenter_password": factory.make_name("vcenter_password"),
             "vcenter_username": factory.make_name("vcenter_username"),
+            "vcenter_password": factory.make_name("vcenter_password"),
+            "vcenter_datacenter": factory.make_name("vcenter_datacenter"),
         }
         for key, value in vcenter.items():
             Config.objects.set_config(key, value)
         config = get_vendor_data(node, None)
-        self.assertEqual(
-            config["write_files"],
-            [
-                {
-                    "content": yaml.safe_dump(vcenter),
-                    "path": "/altbootbank/maas/vcenter.yaml",
-                },
-            ],
+        self.assertDictEqual(
+            {
+                "write_files": [
+                    {
+                        "content": yaml.safe_dump(vcenter),
+                        "path": "/altbootbank/maas/vcenter.yaml",
+                    }
+                ]
+            },
+            config,
         )
 
     def test_returns_nothing_if_rbac_user(self):
@@ -621,23 +472,23 @@ class TestGenerateVcenterConfiguration(MAASServerTestCase):
         rbac.store.add_pool(node.pool)
         rbac.store.allow(node.owner.username, node.pool, "deploy-machines")
         vcenter = {
-            "vcenter_datacenter": factory.make_name("vcenter_datacenter"),
-            "vcenter_password": factory.make_name("vcenter_password"),
             "vcenter_server": factory.make_name("vcenter_server"),
             "vcenter_username": factory.make_name("vcenter_username"),
+            "vcenter_password": factory.make_name("vcenter_password"),
+            "vcenter_datacenter": factory.make_name("vcenter_datacenter"),
         }
         for key, value in vcenter.items():
             Config.objects.set_config(key, value)
         config = get_vendor_data(node, None)
-        self.assertNotIn(config, "write_files")
+        self.assertDictEqual({}, config)
 
     def test_returns_nothing_if_no_user(self):
         node = factory.make_Node(status=NODE_STATUS.DEPLOYING, osystem="esxi")
-        for i in ["datacenter", "password", "server", "username"]:
+        for i in ["server", "username", "password", "datacenter"]:
             key = "vcenter_%s" % i
             Config.objects.set_config(key, factory.make_name(key))
         config = get_vendor_data(node, None)
-        self.assertNotIn(config, "write_files")
+        self.assertDictEqual({}, config)
 
     def test_returns_nothing_if_user(self):
         node = factory.make_Node(
@@ -649,7 +500,7 @@ class TestGenerateVcenterConfiguration(MAASServerTestCase):
             key = "vcenter_%s" % i
             Config.objects.set_config(key, factory.make_name(key))
         config = get_vendor_data(node, None)
-        self.assertNotIn(config, "write_files")
+        self.assertDictEqual({}, config)
 
     def test_returns_nothing_if_vcenter_registration_not_set(self):
         node = factory.make_Node(
@@ -661,4 +512,4 @@ class TestGenerateVcenterConfiguration(MAASServerTestCase):
             key = "vcenter_%s" % i
             Config.objects.set_config(key, factory.make_name(key))
         config = get_vendor_data(node, None)
-        self.assertNotIn(config, "write_files")
+        self.assertDictEqual({}, config)

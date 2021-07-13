@@ -21,7 +21,7 @@ from maastesting.matchers import (
 from maastesting.testcase import MAASTestCase, MAASTwistedRunTest
 from provisioningserver.drivers.power import PowerActionError
 import provisioningserver.drivers.power.webhook as webhook_module
-from provisioningserver.utils.version import get_running_version
+from provisioningserver.utils.version import get_maas_version
 
 
 class TestWebhookPowerDriver(MAASTestCase):
@@ -37,7 +37,7 @@ class TestWebhookPowerDriver(MAASTestCase):
         self.assertEqual(
             Headers(
                 {
-                    b"User-Agent": [f"MAAS {get_running_version()}".encode()],
+                    b"User-Agent": [f"MAAS {get_maas_version()}".encode()],
                     b"Accept": [b"application/json"],
                     b"System_Id": [system_id.encode()],
                 }
@@ -53,7 +53,7 @@ class TestWebhookPowerDriver(MAASTestCase):
         self.assertEqual(
             Headers(
                 {
-                    b"User-Agent": [f"MAAS {get_running_version()}".encode()],
+                    b"User-Agent": [f"MAAS {get_maas_version()}".encode()],
                     b"Accept": [b"application/json"],
                     b"System_Id": [system_id.encode()],
                     b"Authorization": [
@@ -80,7 +80,7 @@ class TestWebhookPowerDriver(MAASTestCase):
         self.assertEqual(
             Headers(
                 {
-                    b"User-Agent": [f"MAAS {get_running_version()}".encode()],
+                    b"User-Agent": [f"MAAS {get_maas_version()}".encode()],
                     b"Accept": [b"application/json"],
                     b"System_Id": [system_id.encode()],
                     b"Authorization": [f"Bearer {power_token}".encode()],
@@ -103,7 +103,7 @@ class TestWebhookPowerDriver(MAASTestCase):
         self.assertEqual(
             Headers(
                 {
-                    b"User-Agent": [f"MAAS {get_running_version()}".encode()],
+                    b"User-Agent": [f"MAAS {get_maas_version()}".encode()],
                     b"Accept": [b"application/json"],
                     b"System_Id": [system_id.encode()],
                     key: [value],

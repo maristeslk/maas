@@ -17,7 +17,7 @@ class TestCloneForm(MAASServerTestCase):
         user = factory.make_admin()
         form = CloneForm(user, data={})
         self.assertFalse(form.is_valid())
-        self.assertEqual(
+        self.assertEquals(
             {
                 "source": ["This field is required."],
                 "destinations": ["This field is required."],
@@ -42,7 +42,7 @@ class TestCloneForm(MAASServerTestCase):
             },
         )
         self.assertFalse(form.is_valid())
-        self.assertEqual(
+        self.assertEquals(
             {
                 "destinations": [
                     "Machine 1 in the array did not validate: "
@@ -76,7 +76,7 @@ class TestCloneForm(MAASServerTestCase):
             },
         )
         self.assertFalse(form.is_valid())
-        self.assertEqual(
+        self.assertEquals(
             {
                 "destinations": [
                     "Machine 1 in the array did not validate: "
@@ -107,7 +107,7 @@ class TestCloneForm(MAASServerTestCase):
             },
         )
         self.assertFalse(form.is_valid())
-        self.assertEqual(
+        self.assertEquals(
             {
                 "destinations": [
                     "Machine 1 in the array did not validate: "
@@ -145,7 +145,7 @@ class TestCloneForm(MAASServerTestCase):
             },
         )
         self.assertFalse(form.is_valid())
-        self.assertEqual(
+        self.assertEquals(
             {
                 "destinations": [
                     "Machine 1 in the array did not validate: "
@@ -195,6 +195,6 @@ class TestCloneForm(MAASServerTestCase):
                 "interfaces": True,
             },
         )
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         # An exception here will cause the test to fail.
         form.save()

@@ -1,4 +1,4 @@
-# Copyright 2017-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2017-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Tests for Parameters form."""
@@ -237,7 +237,7 @@ class TestParametersForm(MAASServerTestCase):
                 "runtime": {"type": "runtime"},
             }
         )
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
 
     def test_validates_against_unsupported_parameter_types(self):
         unsupported_type = factory.make_name("unsupported")
@@ -258,7 +258,7 @@ class TestParametersForm(MAASServerTestCase):
         form = ParametersForm(
             data={"storage": {"type": unsupported_type, "required": False}}
         )
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
 
     def test_validates_storage_interface_type_has_no_min_or_max(self):
         ptype = random.choice(["storage", "interface"])
@@ -324,7 +324,7 @@ class TestParametersForm(MAASServerTestCase):
             data={"runtime": value}, script=script, node=factory.make_Node()
         )
         self.assertTrue(form.is_valid(), form.errors)
-        self.assertEqual(1, len(form.cleaned_data["input"]))
+        self.assertEquals(1, len(form.cleaned_data["input"]))
         self.assertDictEqual(
             {"runtime": {"type": "runtime", "value": value}},
             form.cleaned_data["input"][0],
@@ -336,7 +336,7 @@ class TestParametersForm(MAASServerTestCase):
         )
         form = ParametersForm(data={}, script=script, node=factory.make_Node())
         self.assertTrue(form.is_valid(), form.errors)
-        self.assertEqual(1, len(form.cleaned_data["input"]))
+        self.assertEquals(1, len(form.cleaned_data["input"]))
         self.assertDictEqual(
             {"runtime": {"type": "runtime", "value": script.timeout.seconds}},
             form.cleaned_data["input"][0],
@@ -423,7 +423,7 @@ class TestParametersForm(MAASServerTestCase):
             node=factory.make_Node(with_boot_disk=False),
         )
         self.assertTrue(form.is_valid(), form.errors)
-        self.assertEqual(1, len(form.cleaned_data["input"]))
+        self.assertEquals(1, len(form.cleaned_data["input"]))
         self.assertDictEqual(
             {
                 "runtime": {
@@ -450,15 +450,14 @@ class TestParametersForm(MAASServerTestCase):
         )
         self.assertTrue(form.is_valid(), form.errors)
         input = form.cleaned_data["input"]
-        self.assertEqual(node.physicalblockdevice_set.count(), len(input))
+        self.assertEquals(node.physicalblockdevice_set.count(), len(input))
         for bd in node.physicalblockdevice_set:
             for i in input:
                 if bd.name == i["storage"]["value"]["name"]:
                     break
-            self.assertEqual(script.timeout.seconds, i["runtime"]["value"])
+            self.assertEquals(script.timeout.seconds, i["runtime"]["value"])
             self.assertDictEqual(
                 {
-                    "id": bd.id,
                     "name": bd.name,
                     "id_path": bd.id_path,
                     "model": bd.model,
@@ -486,11 +485,10 @@ class TestParametersForm(MAASServerTestCase):
         )
         self.assertTrue(form.is_valid(), form.errors)
         input = form.cleaned_data["input"]
-        self.assertEqual(1, len(input))
-        self.assertEqual(script.timeout.seconds, input[0]["runtime"]["value"])
+        self.assertEquals(1, len(input))
+        self.assertEquals(script.timeout.seconds, input[0]["runtime"]["value"])
         self.assertDictEqual(
             {
-                "id": bd.id,
                 "name": bd.name,
                 "id_path": bd.id_path,
                 "model": bd.model,
@@ -546,15 +544,14 @@ class TestParametersForm(MAASServerTestCase):
         )
         self.assertTrue(form.is_valid(), form.errors)
         input = form.cleaned_data["input"]
-        self.assertEqual(len(selected_scripts), len(input))
+        self.assertEquals(len(selected_scripts), len(input))
         for bd in selected_scripts.keys():
             for i in input:
                 if bd.name == i["storage"]["value"]["name"]:
                     break
-            self.assertEqual(script.timeout.seconds, i["runtime"]["value"])
+            self.assertEquals(script.timeout.seconds, i["runtime"]["value"])
             self.assertDictEqual(
                 {
-                    "id": bd.id,
                     "name": bd.name,
                     "id_path": bd.id_path,
                     "model": bd.model,
@@ -612,7 +609,7 @@ class TestParametersForm(MAASServerTestCase):
             data={}, script=script, node=factory.make_Node(interface=False)
         )
         self.assertTrue(form.is_valid(), form.errors)
-        self.assertEqual(1, len(form.cleaned_data["input"]))
+        self.assertEquals(1, len(form.cleaned_data["input"]))
         self.assertDictEqual(
             {"interface": {"type": "interface", "value": "all"}},
             form.cleaned_data["input"][0],
@@ -627,10 +624,9 @@ class TestParametersForm(MAASServerTestCase):
         )
         form = ParametersForm(data={}, script=script, node=node)
         self.assertTrue(form.is_valid(), form.errors)
-        self.assertEqual(1, len(form.cleaned_data["input"]))
+        self.assertEquals(1, len(form.cleaned_data["input"]))
         self.assertDictEqual(
             {
-                "id": node.boot_interface.id,
                 "name": node.boot_interface.name,
                 "mac_address": str(node.boot_interface.mac_address),
                 "vendor": node.boot_interface.vendor,
@@ -661,14 +657,13 @@ class TestParametersForm(MAASServerTestCase):
         )
         self.assertTrue(form.is_valid(), form.errors)
         input = form.cleaned_data["input"]
-        self.assertEqual(len(usable_interfaces), len(input))
+        self.assertEquals(len(usable_interfaces), len(input))
         for interface in usable_interfaces:
             for i in input:
                 if i["interface"]["value"]["interface"] == interface:
                     break
             self.assertDictEqual(
                 {
-                    "id": interface.id,
                     "name": interface.name,
                     "mac_address": str(interface.mac_address),
                     "vendor": interface.vendor,
@@ -695,10 +690,9 @@ class TestParametersForm(MAASServerTestCase):
         )
         self.assertTrue(form.is_valid(), form.errors)
         input = form.cleaned_data["input"]
-        self.assertEqual(1, len(input))
+        self.assertEquals(1, len(input))
         self.assertDictEqual(
             {
-                "id": bond.id,
                 "name": bond.name,
                 "mac_address": str(bond.mac_address),
                 "vendor": bond.vendor,
@@ -726,10 +720,9 @@ class TestParametersForm(MAASServerTestCase):
         )
         self.assertTrue(form.is_valid(), form.errors)
         input = form.cleaned_data["input"]
-        self.assertEqual(1, len(input))
+        self.assertEquals(1, len(input))
         self.assertDictEqual(
             {
-                "id": interface.id,
                 "name": interface.name,
                 "mac_address": str(interface.mac_address),
                 "vendor": interface.vendor,
@@ -815,7 +808,7 @@ class TestParametersForm(MAASServerTestCase):
         )
         self.assertTrue(form.is_valid(), form.errors)
         input = form.cleaned_data["input"]
-        self.assertEqual(len(selected_scripts), len(input))
+        self.assertEquals(len(selected_scripts), len(input))
         for nic in selected_scripts.keys():
             for i in input:
                 if (
@@ -825,7 +818,6 @@ class TestParametersForm(MAASServerTestCase):
                     break
             self.assertDictEqual(
                 {
-                    "id": nic.id,
                     "name": nic.name,
                     "mac_address": str(nic.mac_address),
                     "vendor": nic.vendor,
@@ -910,7 +902,7 @@ class TestParametersForm(MAASServerTestCase):
     def test_input_url_defaults_empty_with_no_input(self):
         script = factory.make_Script(parameters={"url": {"type": "url"}})
         form = ParametersForm(data={}, script=script, node=factory.make_Node())
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         self.assertDictEqual({}, form.cleaned_data["input"][0])
 
     def test_input_url_allows_ipv4(self):
@@ -1082,7 +1074,7 @@ class TestParametersForm(MAASServerTestCase):
             data={param_type: input}, script=script, node=factory.make_Node()
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         self.assertEqual(
             input, form.cleaned_data["input"][0][param_type]["value"]
         )
@@ -1099,7 +1091,7 @@ class TestParametersForm(MAASServerTestCase):
             data={param_type: input}, script=script, node=factory.make_Node()
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         self.assertEqual(
             input, form.cleaned_data["input"][0][param_type]["value"]
         )
@@ -1114,7 +1106,7 @@ class TestParametersForm(MAASServerTestCase):
 
         form = ParametersForm(data={}, script=script, node=factory.make_Node())
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         self.assertEqual(
             default, form.cleaned_data["input"][0][param_type]["value"]
         )
@@ -1128,7 +1120,7 @@ class TestParametersForm(MAASServerTestCase):
 
         form = ParametersForm(data={}, script=script, node=factory.make_Node())
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         self.assertEqual(
             maas_auto_ipmi_user,
             form.cleaned_data["input"][0]["maas_auto_ipmi_user"]["value"],
@@ -1147,7 +1139,7 @@ class TestParametersForm(MAASServerTestCase):
 
         form = ParametersForm(data={}, script=script, node=factory.make_Node())
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         self.assertEqual(
             maas_auto_ipmi_k_g_bmc_key,
             form.cleaned_data["input"][0]["maas_auto_ipmi_k_g_bmc_key"][
@@ -1211,7 +1203,7 @@ class TestParametersForm(MAASServerTestCase):
             data={"choice": choice}, script=script, node=factory.make_Node()
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         self.assertEqual(
             choice, form.cleaned_data["input"][0]["choice"]["value"]
         )
@@ -1231,7 +1223,7 @@ class TestParametersForm(MAASServerTestCase):
             data={"choice": choice}, script=script, node=factory.make_Node()
         )
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         self.assertEqual(
             choice, form.cleaned_data["input"][0]["choice"]["value"]
         )
@@ -1255,7 +1247,7 @@ class TestParametersForm(MAASServerTestCase):
 
         form = ParametersForm(data={}, script=script, node=factory.make_Node())
 
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         self.assertEqual(
             default, form.cleaned_data["input"][0]["choice"]["value"]
         )

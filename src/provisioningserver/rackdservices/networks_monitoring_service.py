@@ -4,7 +4,7 @@
 """Networks monitoring service for rack controllers."""
 
 
-from twisted.internet.defer import inlineCallbacks, returnValue
+from twisted.internet.defer import inlineCallbacks
 
 from provisioningserver.logger import get_maas_logger
 from provisioningserver.rpc.exceptions import NoConnectionsAvailable
@@ -13,6 +13,7 @@ from provisioningserver.rpc.region import (
     ReportMDNSEntries,
     ReportNeighbours,
     RequestRackRefresh,
+    UpdateInterfaces,
 )
 from provisioningserver.utils.services import NetworksMonitoringService
 from provisioningserver.utils.twisted import pause
@@ -44,18 +45,23 @@ class RackNetworksMonitoringService(NetworksMonitoringService):
             return d
 
     @inlineCallbacks
-    def getRefreshDetails(self):
-        client = yield self._getRPCClient()
-        if client is None:
-            returnValue((None, None, None))
-            return
-        credentials = yield client(
-            RequestRackRefresh,
-            system_id=client.localIdent,
-        )
-        returnValue(
-            (self.clientService.maas_url, client.localIdent, credentials)
-        )
+    def recordInterfaces(self, interfaces, hints=None):
+        """Record the interfaces information to the region."""
+        while self.running:
+            try:
+                client = yield self.clientService.getClientNow()
+            except NoConnectionsAvailable:
+                yield pause(1.0)
+                continue
+            if self._recorded is None:
+                yield client(RequestRackRefresh, system_id=client.localIdent)
+            yield client(
+                UpdateInterfaces,
+                system_id=client.localIdent,
+                interfaces=interfaces,
+                topology_hints=hints,
+            )
+            break
 
     def reportNeighbours(self, neighbours):
         """Report neighbour information to the region."""
@@ -78,14 +84,3 @@ class RackNetworksMonitoringService(NetworksMonitoringService):
             )
         )
         return d
-
-    @inlineCallbacks
-    def _getRPCClient(self):
-        while self.running:
-            try:
-                client = yield self.clientService.getClientNow()
-            except NoConnectionsAvailable:
-                yield pause(1.0)
-                continue
-            else:
-                returnValue(client)

@@ -80,7 +80,7 @@ from provisioningserver.rpc.region import RegisterRackController
 from provisioningserver.rpc.testing import call_responder
 from provisioningserver.rpc.testing.doubles import DummyConnection
 from provisioningserver.utils import events
-from provisioningserver.utils.version import get_running_version
+from provisioningserver.utils.version import get_maas_version
 
 wait_for_reactor = wait_for(30)  # 30 seconds.
 
@@ -350,10 +350,45 @@ class TestRegionServer(MAASTransactionServerTestCase):
                 "system_id": rack_controller.system_id,
                 "hostname": rack_controller.hostname,
                 "interfaces": {},
-                "version": "2.3.0",
+                "version": "2.3",
             },
         )
-        self.assertEqual(response["version"], str(get_running_version()))
+        self.assertThat(response["version"], Equals(get_maas_version()))
+
+    @wait_for_reactor
+    @inlineCallbacks
+    def test_register_updates_interfaces(self):
+        yield self.installFakeRegion()
+        rack_controller = yield deferToDatabase(factory.make_RackController)
+        protocol = self.make_Region()
+        protocol.transport = MagicMock()
+        nic_name = factory.make_name("eth0")
+        interfaces = {
+            nic_name: {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            }
+        }
+        response = yield call_responder(
+            protocol,
+            RegisterRackController,
+            {
+                "system_id": rack_controller.system_id,
+                "hostname": rack_controller.hostname,
+                "interfaces": interfaces,
+            },
+        )
+
+        @transactional
+        def has_interface(system_id, nic_name):
+            rack_controller = RackController.objects.get(system_id=system_id)
+            interfaces = rack_controller.interface_set.filter(name=nic_name)
+            self.assertThat(interfaces, HasLength(1))
+
+        yield deferToDatabase(has_interface, response["system_id"], nic_name)
 
     @wait_for_reactor
     @inlineCallbacks
@@ -396,7 +431,7 @@ class TestRegionServer(MAASTransactionServerTestCase):
                 "interfaces": {},
             },
         )
-        self.assertEqual(rack_controller.system_id, protocol.ident)
+        self.assertEquals(rack_controller.system_id, protocol.ident)
 
     @wait_for_reactor
     @inlineCallbacks
@@ -439,7 +474,7 @@ class TestRegionServer(MAASTransactionServerTestCase):
                 "interfaces": {},
             },
         )
-        self.assertEqual(sentinel.host, protocol.host)
+        self.assertEquals(sentinel.host, protocol.host)
 
     @wait_for_reactor
     @inlineCallbacks
@@ -503,7 +538,7 @@ class TestRegionServer(MAASTransactionServerTestCase):
             ),
             CannotRegisterRackController,
         )
-        self.assertEqual(
+        self.assertEquals(
             (
                 "Failed to register rack controller 'None' with the master. "
                 "Connection will be dropped.",
@@ -514,8 +549,8 @@ class TestRegionServer(MAASTransactionServerTestCase):
 
 class TestRackClient(MAASTestCase):
     def test_defined_cache_calls(self):
-        self.assertEqual(
-            [cluster.DescribePowerTypes],
+        self.assertEquals(
+            [cluster.DescribePowerTypes, cluster.DescribeNOSTypes],
             RackClient.cache_calls,
         )
 
@@ -548,7 +583,7 @@ class TestRackClient(MAASTestCase):
         result = yield client(cluster.DescribePowerTypes)
         # The result is a copy. It should equal the result but not be
         # the same object.
-        self.assertEqual(power_types, result)
+        self.assertEquals(power_types, result)
         self.assertIsNot(power_types, result)
 
     @wait_for_reactor
@@ -1058,7 +1093,7 @@ class TestRegionService(MAASTestCase):
         self.assertEqual({uuid: set()}, service.waiters)
 
         def check(conn_returned):
-            self.assertEqual(conn, conn_returned)
+            self.assertEquals(conn, conn_returned)
 
         return d.addCallback(check)
 

@@ -3,181 +3,248 @@
 
 """Version utilities."""
 
-import dataclasses
-from functools import lru_cache, total_ordering
+from collections import namedtuple
+from contextlib import suppress
+from functools import lru_cache
 import re
-from typing import Optional
 
 import pkg_resources
 
-from provisioningserver.utils import deb, shell, snap
+from provisioningserver.logger import get_maas_logger
+from provisioningserver.utils import shell, snappy
+
+maaslog = get_maas_logger("version")
 
 # the first requirement is always the required package itself
-DISTRIBUTION = pkg_resources.require("maas")[0]
+DEFAULT_PARSED_VERSION = pkg_resources.require("maas")[0].parsed_version
+
+DEFAULT_VERSION = str(DEFAULT_PARSED_VERSION)
 
 
-@total_ordering
-@dataclasses.dataclass(frozen=True)
-class MAASVersion:
-    """Details about MAAS version."""
+# Only import apt_pkg and initialize when not running in a snap.
+if not snappy.running_in_snap():
+    import apt_pkg
 
-    major: int
-    minor: int
-    point: int
-    qualifier_type: Optional[str] = None
-    qualifier_version: int = 0
-    revno: int = 0
-    git_rev: str = ""
+    apt_pkg.init()
 
-    def __str__(self):
-        version = self.short_version
-        if self.extended_info:
-            version += f"-{self.extended_info}"
-        return version
+# Name of maas package to get version from.
+REGION_PACKAGE_NAME = "maas-region-api"
+RACK_PACKAGE_NAME = "maas-rack-controller"
 
-    def __lt__(self, other):
-        # only take into account numeric fields for comparison
-        return (
-            self.major,
-            self.minor,
-            self.point,
-            self._qualifier_type_order,
-            self.qualifier_version,
-            self.revno,
-        ) < (
-            other.major,
-            other.minor,
-            other.point,
-            other._qualifier_type_order,
-            other.qualifier_version,
-            other.revno,
+
+def get_version_from_apt(*packages):
+    """Return the version output from `apt_pkg.Cache` for the given package(s),
+    or log an error message if the package data is not valid."""
+    try:
+        cache = apt_pkg.Cache(None)
+    except SystemError:
+        maaslog.error(
+            "Installed version could not be determined. Ensure "
+            "/var/lib/dpkg/status is valid."
         )
+        return ""
 
-    @property
-    def main_version(self) -> "MAASVersion":
-        """Return a MAASVersion up to the qualifier."""
-        return MAASVersion(
-            self.major,
-            self.minor,
-            self.point,
-            self.qualifier_type,
-            self.qualifier_version,
-        )
+    version = None
+    for package in packages:
+        try:
+            apt_package = cache[package]
+        except KeyError:
+            continue
+        version = apt_package.current_ver
+        # If the version is None or an empty string, try the next package.
+        if not version:
+            continue
+        break
 
-    @property
-    def short_version(self) -> str:
-        """Version string which includes up to the qualifier."""
-        version = f"{self.major}.{self.minor}.{self.point}"
-        if self.qualifier_type:
-            version += f"~{self.qualifier_type}{self.qualifier_version or ''}"
-        return version
+    if not version:
+        return ""
 
-    @property
-    def extended_info(self) -> str:
-        """Additional version string. Contains git commit details."""
-        info = ""
-        if self.revno:
-            info += str(self.revno)
-        if self.git_rev:
-            info += f"-g.{self.git_rev}"
-        return info
+    ver_str = version.ver_str
+    with suppress(ValueError):
+        # if the deb version has an epoch, strip it
+        ver_str = ver_str[ver_str.index(":") + 1 :]
 
-    @classmethod
-    def from_string(cls, version: str):
-        r = re.compile(
-            r"((?P<epoch>\d+):)?"  # deb package epoch
-            r"(?P<major>\d+)\.(?P<minor>\d+)\.(?P<point>\d+)"
-            r"(~?(?P<qualifier_type>[a-z]+)(?P<qualifier_version>\d+))?"
-            r"(-(?P<revno>\d+))?"  # number of commits in tree
-            r"(-g\.?(?P<git_rev>\w+))?"  # git short hash
-        )
-        groups = r.match(version).groupdict()
-
-        def to_int(field_name):
-            return int(groups.get(field_name) or 0)
-
-        def to_str(field_name):
-            return groups.get(field_name) or ""
-
-        return cls(
-            int(groups["major"]),
-            int(groups["minor"]),
-            int(groups["point"]),
-            groups["qualifier_type"],
-            to_int("qualifier_version"),
-            to_int("revno"),
-            to_str("git_rev"),
-        )
-
-    @property
-    def _qualifier_type_order(self) -> int:
-        """Return an integer for qualifier type ordering."""
-        qualifier_types = {"rc": -1, "beta": -2, "alpha": -3}
-        return qualifier_types.get(self.qualifier_type, 0)
+    return ver_str
 
 
-@lru_cache(maxsize=1)
-def get_running_version() -> MAASVersion:
-    """Return the version for the running MAAS."""
-    git_rev = None
-    revno = 0
-
-    version_str = ""
-    if snap.running_in_snap():
-        version_str = snap.get_snap_version().version
-    else:
-        deb_versions = deb.get_deb_versions_info()
-        if deb_versions:
-            version_str = deb_versions.current.version
-    if not version_str:
-        version_str = _get_version_from_python_package()
-        git_rev = _get_maas_repo_hash()
-        revno = _get_maas_repo_commit_count()
-
-    maas_version = MAASVersion.from_string(version_str)
-    if (not maas_version.git_rev) and git_rev:
-        maas_version = dataclasses.replace(maas_version, git_rev=git_rev)
-    if (not maas_version.revno) and revno:
-        maas_version = dataclasses.replace(maas_version, revno=revno)
-
-    return maas_version
+def extract_version_subversion(version):
+    """Return a tuple (version, subversion) from the given apt version."""
+    main_version, subversion = re.split("[+|-]", version, 1)
+    return main_version, subversion
 
 
-def _get_version_from_python_package():
-    """Return a string with the version from the python package."""
-    parsed_version = DISTRIBUTION.parsed_version
-    str_version = parsed_version.base_version
-    # pre is a tuple with qualifier and version, or None
-    pre = parsed_version._version.pre
-    if pre:
-        qualifier, qual_version = pre
-        qualifiers = {"a": "alpha", "b": "beta"}
-        if qualifier in qualifiers:
-            qualifier = qualifiers[qualifier]
-        str_version += f"~{qualifier}{qual_version}"
-    return str_version
-
-
-def _get_maas_repo_hash():
+def get_maas_repo_hash():
     """Return the Git hash for this running MAAS.
 
     :return: A string if MAAS is running from a git working tree, else `None`.
     """
-    return _git_cmd("rev-parse", "--short", "HEAD")
-
-
-def _get_maas_repo_commit_count():
-    """Return the number of commit counts in the git tree, or 0 when not in a tree."""
-    return _git_cmd("rev-list", "--count") or 0
-
-
-def _git_cmd(*cmd):
-    """Run a git command and return output, or None in case of error."""
     try:
         return (
-            shell.call_and_check(["git"] + list(cmd)).decode("ascii").strip()
+            shell.call_and_check(["git", "rev-parse", "HEAD"])
+            .decode("ascii")
+            .strip()
         )
-    except (shell.ExternalProcessError, FileNotFoundError):
-        # We may not be in a git repository, or any manner of other errors, or
-        # git is not installed.
+    except shell.ExternalProcessError:
+        # We may not be in a git repository, or any manner of other errors. For
+        # the purposes of this function we don't care; simply say we don't
+        # know.
         return None
+    except FileNotFoundError:
+        # Git is not installed. We don't care and simply say we don't know.
+        return None
+
+
+def get_maas_version_track_channel():
+    """Returns the track/channel where a snap of this version can be found."""
+    # if running from source, default to current version
+    maas_version = get_maas_version() or DEFAULT_VERSION
+    version = get_version_tuple(maas_version)
+    risk_map = {"alpha": "edge", "beta": "beta", "rc": "candidate"}
+    risk = risk_map.get(version.qualifier_type, "stable")
+    return f"{version.major}.{version.minor}/{risk}"
+
+
+MAASVersion = namedtuple(
+    "MAASVersion",
+    (
+        "major",
+        "minor",
+        "point",
+        "qualifier_type_version",
+        "qualifier_version",
+        "revno",
+        "git_rev",
+        "short_version",
+        "extended_info",
+        "qualifier_type",
+        "is_snap",
+    ),
+)
+
+
+def _coerce_to_int(string: str) -> int:
+    """Strips all non-numeric characters out of the string and returns an int.
+
+    Returns 0 for an empty string.
+    """
+    numbers = re.sub(r"[^\d]+", "", string)
+    if len(numbers) > 0:
+        return int(numbers)
+    else:
+        return 0
+
+
+def get_version_tuple(maas_version: str) -> MAASVersion:
+    without_epoch = maas_version.split(":", 1)[-1]
+    version_parts = re.split(r"[-|+]", without_epoch, 1)
+    short_version = version_parts[0]
+    major_minor_point = re.sub(r"~.*", "", short_version).split(".", 2)
+    for i in range(3):
+        try:
+            major_minor_point[i] = _coerce_to_int(major_minor_point[i])
+        except ValueError:
+            major_minor_point[i] = 0
+        except IndexError:
+            major_minor_point.append(0)
+    major, minor, point = major_minor_point
+    extended_info = ""
+    if len(version_parts) > 1:
+        extended_info = version_parts[1]
+    qualifier_type = None
+    qualifier_type_version = 0
+    qualifier_version = 0
+    if "~" in short_version:
+        # Parse the alpha/beta/rc version.
+        base_version, qualifier = short_version.split("~", 2)
+        qualifier_types = {"rc": -1, "beta": -2, "alpha": -3}
+        # A release build won't have a qualifier, so its version should be
+        # greater than releases qualified with alpha/beta/rc revisions.
+        qualifier_type = re.sub(r"[\d]+", "", qualifier)
+        qualifier_version = _coerce_to_int(qualifier)
+        qualifier_type_version = qualifier_types.get(qualifier_type, 0)
+    revno = 0
+    git_rev = ""
+    # If we find a '-g' or '.g', that means the extended info indicates a
+    # git revision.
+    if "-g" in extended_info or ".g" in extended_info:
+        # unify separators
+        revisions = extended_info.replace("-g.", "-g")
+        revno, git_rev = re.split(r"[-|.|+]", revisions)[0:2]
+        # Strip any non-numeric characters from the revno, just in case.
+        revno = _coerce_to_int(revno)
+        # Remove anything that doesn't look like a hexadecimal character.
+        git_rev = re.sub(r"[^0-9a-f]+", "", git_rev)
+    extended_info = re.sub(r"-*snap$", "", extended_info)
+    # Remove unnecessary garbage from the extended info string.
+    if "-" in extended_info:
+        extended_info = "-".join(extended_info.split("-")[0:2])
+    return MAASVersion(
+        major,
+        minor,
+        point,
+        qualifier_type_version,
+        qualifier_version,
+        revno,
+        git_rev,
+        short_version,
+        extended_info,
+        qualifier_type,
+        snappy.running_in_snap(),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_maas_version():
+    """Return the apt or snap version for the main MAAS package."""
+    if snappy.running_in_snap():
+        return snappy.get_snap_version()
+    else:
+        return get_version_from_apt(RACK_PACKAGE_NAME, REGION_PACKAGE_NAME)
+
+
+@lru_cache(maxsize=1)
+def get_maas_version_subversion():
+    """Return a tuple with the MAAS version and the MAAS subversion."""
+    version = get_maas_version()
+    if version:
+        return extract_version_subversion(version)
+    else:
+        # Get the branch information
+        commit_hash = get_maas_repo_hash()
+        if commit_hash is None:
+            # Not installed or not in repo, then no way to identify. This
+            # should not happen, but just in case.
+            return DEFAULT_VERSION, "unknown"
+        else:
+            return "%s from source" % DEFAULT_VERSION, "git+%s" % commit_hash
+
+
+@lru_cache(maxsize=1)
+def get_maas_version_ui():
+    """Return the version string for the running MAAS region.
+
+    The returned string is suitable to display in the UI.
+    """
+    version, subversion = get_maas_version_subversion()
+    return "%s (%s)" % (version, subversion) if subversion else version
+
+
+@lru_cache(maxsize=1)
+def get_maas_version_user_agent():
+    """Return the version string for the running MAAS region.
+
+    The returned string is suitable to set the user agent.
+    """
+    version, subversion = get_maas_version_subversion()
+    return "maas/%s/%s" % (version, subversion)
+
+
+@lru_cache(maxsize=1)
+def get_maas_doc_version():
+    """Return the doc version for the running MAAS region."""
+    apt_version = get_maas_version()
+    if apt_version:
+        version, _ = extract_version_subversion(apt_version)
+        return ".".join(version.split("~")[0].split(".")[:2])
+    else:
+        return ""

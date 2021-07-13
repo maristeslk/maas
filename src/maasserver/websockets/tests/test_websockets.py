@@ -351,7 +351,11 @@ class SavingEchoReceiver:
             self.transport.sendFrame(opcode, data, fin)
 
 
-class TestWebSocketsProtocol(MAASTestCase):
+class WebSocketsProtocolTest(MAASTestCase):
+    """
+    Tests for L{WebSocketsProtocol}.
+    """
+
     def setUp(self):
         super().setUp()
         self.receiver = SavingEchoReceiver()
@@ -410,7 +414,11 @@ class TestWebSocketsProtocol(MAASTestCase):
         self.assertFalse(self.transport.connected)
 
 
-class TestWebSocketsTransport(MAASTestCase):
+class WebSocketsTransportTest(MAASTestCase):
+    """
+    Tests for L{WebSocketsTransport}.
+    """
+
     def test_loseConnection(self):
         """
         L{WebSocketsTransport.loseConnection} sends a close frame and closes
@@ -437,7 +445,11 @@ class TestWebSocketsTransport(MAASTestCase):
         self.assertEqual(b"\x88\x0c\x03\xe9Going away", transport.value())
 
 
-class TestWebSocketsProtocolWrapper(MAASTestCase):
+class WebSocketsProtocolWrapperTest(MAASTestCase):
+    """
+    Tests for L{WebSocketsProtocolWrapper}.
+    """
+
     def setUp(self):
         super().setUp()
         self.accumulatingProtocol = AccumulatingProtocol()
@@ -524,7 +536,11 @@ class TestWebSocketsProtocolWrapper(MAASTestCase):
         self.assertTrue(self.accumulatingProtocol.closed)
 
 
-class TestWebSocketsResource(MAASTestCase):
+class WebSocketsResourceTest(MAASTestCase):
+    """
+    Tests for L{WebSocketsResource}.
+    """
+
     def setUp(self):
         super().setUp()
 

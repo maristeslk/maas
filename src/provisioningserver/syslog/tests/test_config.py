@@ -14,7 +14,7 @@ from testtools.matchers import Contains, FileContains, MatchesAll, Not
 from maastesting.factory import factory
 from maastesting.testcase import MAASTestCase
 from provisioningserver.syslog import config
-from provisioningserver.utils import snap
+from provisioningserver.utils import snappy
 
 wait_for_reactor = wait_for(30)  # 30 seconds.
 
@@ -23,13 +23,13 @@ class TestGetConfigDir(MAASTestCase):
     """Tests for `get_syslog_config_path`."""
 
     def test_returns_default(self):
-        self.assertEqual(
+        self.assertEquals(
             "/var/lib/maas/rsyslog.conf", config.get_syslog_config_path()
         )
 
     def test_env_overrides_default(self):
         os.environ["MAAS_SYSLOG_CONFIG_DIR"] = factory.make_name("env")
-        self.assertEqual(
+        self.assertEquals(
             os.sep.join(
                 [
                     os.environ["MAAS_SYSLOG_CONFIG_DIR"],
@@ -71,8 +71,8 @@ class TestWriteConfig(MAASTestCase):
             FileContains(matcher=MatchesAll(*matchers)),
         )
 
-    def test_snap_root_user_group_no_drop(self):
-        self.patch(snap, "running_in_snap").return_value = True
+    def test_snappy_root_user_group_no_drop(self):
+        self.patch(snappy, "running_in_snap").return_value = True
         config.write_config(False)
         matchers = [Contains("$FileOwner root"), Contains("$FileGroup root")]
         self.assertThat(

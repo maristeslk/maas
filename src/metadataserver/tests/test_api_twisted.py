@@ -1,6 +1,8 @@
 # Copyright 2017-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Tests for the twisted metadata API."""
+
 
 import base64
 import bz2
@@ -12,9 +14,8 @@ from unittest.mock import call, Mock, sentinel
 
 from crochet import wait_for
 from django.db.utils import DatabaseError
-from netaddr import IPAddress
 from testtools import ExpectedException
-from testtools.matchers import Equals, MatchesListwise, MatchesSetwise
+from testtools.matchers import Equals, Is, MatchesListwise, MatchesSetwise
 from twisted.internet.defer import inlineCallbacks, succeed
 from twisted.web.server import NOT_DONE_YET
 from twisted.web.test.requesthelper import DummyRequest
@@ -46,7 +47,7 @@ from maastesting.testcase import MAASTestCase
 from metadataserver import api
 from metadataserver import api_twisted as api_twisted_module
 from metadataserver.api_twisted import (
-    _create_vmhost_for_deployment,
+    _create_pod_for_deployment,
     POD_CREATION_ERROR,
     StatusHandlerResource,
     StatusWorkerService,
@@ -74,8 +75,8 @@ class TestStatusHandlerResource(MAASTestCase):
         resource = StatusHandlerResource(sentinel.status_worker)
         self.assertIs(sentinel.status_worker, resource.worker)
         self.assertTrue(resource.isLeaf)
-        self.assertEqual([b"POST"], resource.allowedMethods)
-        self.assertEqual(
+        self.assertEquals([b"POST"], resource.allowedMethods)
+        self.assertEquals(
             ["event_type", "origin", "name", "description"],
             resource.requiredMessageKeys,
         )
@@ -84,16 +85,16 @@ class TestStatusHandlerResource(MAASTestCase):
         resource = StatusHandlerResource(sentinel.status_worker)
         request = DummyRequest([])
         output = resource.render_POST(request)
-        self.assertEqual(b"", output)
-        self.assertEqual(401, request.responseCode)
+        self.assertEquals(b"", output)
+        self.assertEquals(401, request.responseCode)
 
     def test_render_POST_empty_authorization(self):
         resource = StatusHandlerResource(sentinel.status_worker)
         request = DummyRequest([])
         request.requestHeaders.addRawHeader(b"authorization", "")
         output = resource.render_POST(request)
-        self.assertEqual(b"", output)
-        self.assertEqual(401, request.responseCode)
+        self.assertEquals(b"", output)
+        self.assertEquals(401, request.responseCode)
 
     def test_render_POST_bad_authorization(self):
         resource = StatusHandlerResource(sentinel.status_worker)
@@ -102,39 +103,39 @@ class TestStatusHandlerResource(MAASTestCase):
             b"authorization", factory.make_name("auth")
         )
         output = resource.render_POST(request)
-        self.assertEqual(b"", output)
-        self.assertEqual(401, request.responseCode)
+        self.assertEquals(b"", output)
+        self.assertEquals(401, request.responseCode)
 
     def test_render_POST_body_must_be_ascii(self):
         resource = StatusHandlerResource(sentinel.status_worker)
         request = self.make_request(content=b"\xe9")
         output = resource.render_POST(request)
-        self.assertEqual(
+        self.assertEquals(
             b"Status payload must be ASCII-only: 'ascii' codec can't "
             b"decode byte 0xe9 in position 0: ordinal not in range(128)",
             output,
         )
-        self.assertEqual(400, request.responseCode)
+        self.assertEquals(400, request.responseCode)
 
     def test_render_POST_body_must_be_valid_json(self):
         resource = StatusHandlerResource(sentinel.status_worker)
         request = self.make_request(content=b"testing not json")
         output = resource.render_POST(request)
-        self.assertEqual(
+        self.assertEquals(
             b"Status payload is not valid JSON:\ntesting not json\n\n", output
         )
-        self.assertEqual(400, request.responseCode)
+        self.assertEquals(400, request.responseCode)
 
     def test_render_POST_validates_required_keys(self):
         resource = StatusHandlerResource(sentinel.status_worker)
         request = self.make_request(content=json.dumps({}).encode("ascii"))
         output = resource.render_POST(request)
-        self.assertEqual(
+        self.assertEquals(
             b"Missing parameter(s) event_type, origin, name, description "
             b"in status message.",
             output,
         )
-        self.assertEqual(400, request.responseCode)
+        self.assertEquals(400, request.responseCode)
 
     def test_render_POST_queue_messages(self):
         status_worker = Mock()
@@ -154,8 +155,8 @@ class TestStatusHandlerResource(MAASTestCase):
             content=json.dumps(message).encode("ascii"), token=token
         )
         output = resource.render_POST(request)
-        self.assertEqual(NOT_DONE_YET, output)
-        self.assertEqual(204, request.responseCode)
+        self.assertEquals(NOT_DONE_YET, output)
+        self.assertEquals(204, request.responseCode)
         self.assertThat(
             status_worker.queueMessage, MockCalledOnceWith(token, message)
         )
@@ -585,32 +586,11 @@ class TestStatusWorkerService(MAASServerTestCase):
             "description": "America for Make Benefit Glorious Nation",
             "timestamp": datetime.utcnow(),
         }
-        mock_create_vmhost = self.patch(
-            api_twisted_module, "_create_vmhost_for_deployment"
+        mock_create_pod = self.patch(
+            api_twisted_module, "_create_pod_for_deployment"
         )
         self.processMessage(node, payload)
-        self.assertThat(mock_create_vmhost, MockCalledOnceWith(node))
-
-    def test_status_ok_for_modules_final_triggers_register_vmhost(self):
-        node = factory.make_Node(
-            interface=True,
-            status=NODE_STATUS.DEPLOYING,
-            agent_name="maas-kvm-pod",
-            register_vmhost=True,
-        )
-        payload = {
-            "event_type": "finish",
-            "result": "OK",
-            "origin": "cloud-init",
-            "name": "modules-final",
-            "description": "America for Make Benefit Glorious Nation",
-            "timestamp": datetime.utcnow(),
-        }
-        mock_create_vmhost = self.patch(
-            api_twisted_module, "_create_vmhost_for_deployment"
-        )
-        self.processMessage(node, payload)
-        self.assertThat(mock_create_vmhost, MockCalledOnceWith(node))
+        self.assertThat(mock_create_pod, MockCalledOnceWith(node))
 
     def test_status_installation_fail_leaves_node_failed(self):
         node = factory.make_Node(interface=True, status=NODE_STATUS.DEPLOYING)
@@ -1082,145 +1062,38 @@ class TestStatusWorkerService(MAASServerTestCase):
         )
 
 
-class TestCreateVMHostForDeployment(MAASServerTestCase):
+class TestCreatePodForDeployment(MAASServerTestCase):
     def setUp(self):
         super().setUp()
         self.mock_PodForm = self.patch(api_twisted_module, "PodForm")
 
-    def test_marks_failed_if_no_password_install_kvm(self):
+    def test_marks_failed_if_no_virsh_password(self):
         node = factory.make_Node(
             interface=True,
             status=NODE_STATUS.DEPLOYING,
             agent_name="maas-kvm-pod",
             install_kvm=True,
         )
-        _create_vmhost_for_deployment(node)
-        self.assertEqual(node.status, NODE_STATUS.FAILED_DEPLOYMENT)
-        self.assertEqual(
-            node.error_description,
-            "Failed to deploy VM host: Password not found.",
+        _create_pod_for_deployment(node)
+        self.assertThat(node.status, Equals(NODE_STATUS.FAILED_DEPLOYMENT))
+        self.assertThat(
+            node.error_description, DocTestMatches("...Password not found...")
         )
 
-    def test_marks_failed_if_no_password_register_vmhost(self):
-        node = factory.make_Node(
-            interface=True,
-            status=NODE_STATUS.DEPLOYING,
-            agent_name="maas-kvm-pod",
-            register_vmhost=True,
-        )
-        _create_vmhost_for_deployment(node)
-        self.assertEqual(node.status, NODE_STATUS.FAILED_DEPLOYMENT)
-        self.assertEqual(
-            node.error_description,
-            "Failed to deploy VM host: Password not found.",
-        )
-
-    def test_creates_vmhost_register_vmhost(self):
-        node = factory.make_Node_with_Interface_on_Subnet(
-            status=NODE_STATUS.DEPLOYING,
-            agent_name="maas-kvm-pod",
-            register_vmhost=True,
-        )
-        ip = factory.make_StaticIPAddress(interface=node.boot_interface)
-        password_meta = NodeMetadata.objects.create(
-            node=node, key="lxd_password", value="xyz123"
-        )
-        addr = ip.ip
-        if IPAddress(addr).version == 6:
-            addr = f"[{addr}]"
-        _create_vmhost_for_deployment(node)
-        self.assertThat(node.status, Equals(NODE_STATUS.DEPLOYED))
-        self.mock_PodForm.assert_called_with(
-            data={
-                "type": "lxd",
-                "name": node.hostname,
-                "password": password_meta.value,
-                "power_address": addr,
-                "project": "maas",
-                "zone": node.zone.name,
-                "pool": node.pool.name,
-            },
-            user=None,
-        )
-        self.assertIsNone(reload_object(password_meta))
-
-    def test_creates_vmhost_install_kvm(self):
+    def test_deletes_virsh_password_metadata_and_sets_deployed(self):
         node = factory.make_Node_with_Interface_on_Subnet(
             status=NODE_STATUS.DEPLOYING,
             agent_name="maas-kvm-pod",
             install_kvm=True,
         )
-        ip = factory.make_StaticIPAddress(interface=node.boot_interface)
-        password_meta = NodeMetadata.objects.create(
+        factory.make_StaticIPAddress(interface=node.boot_interface)
+        meta = NodeMetadata.objects.create(
             node=node, key="virsh_password", value="xyz123"
         )
-        addr = ip.ip
-        if IPAddress(addr).version == 6:
-            addr = f"[{addr}]"
-        _create_vmhost_for_deployment(node)
+        _create_pod_for_deployment(node)
+        meta = reload_object(meta)
+        self.assertThat(meta, Is(None))
         self.assertThat(node.status, Equals(NODE_STATUS.DEPLOYED))
-        self.mock_PodForm.assert_called_with(
-            data={
-                "type": "virsh",
-                "name": node.hostname,
-                "power_pass": password_meta.value,
-                "power_address": f"qemu+ssh://virsh@{addr}/system",
-                "zone": node.zone.name,
-                "pool": node.pool.name,
-            },
-            user=None,
-        )
-        self.assertIsNone(reload_object(password_meta))
-
-    def test_creates_vmhost_both(self):
-        node = factory.make_Node_with_Interface_on_Subnet(
-            status=NODE_STATUS.DEPLOYING,
-            agent_name="maas-kvm-pod",
-            install_kvm=True,
-            register_vmhost=True,
-        )
-        ip = factory.make_StaticIPAddress(interface=node.boot_interface)
-        virsh_password_meta = NodeMetadata.objects.create(
-            node=node, key="virsh_password", value="xyz123"
-        )
-        lxd_password_meta = NodeMetadata.objects.create(
-            node=node, key="lxd_password", value="abc789"
-        )
-        addr = ip.ip
-        if IPAddress(addr).version == 6:
-            addr = f"[{addr}]"
-        _create_vmhost_for_deployment(node)
-        self.assertEqual(node.status, NODE_STATUS.DEPLOYED)
-        self.mock_PodForm.assert_has_calls(
-            [
-                call(
-                    data={
-                        "type": "virsh",
-                        "name": f"{node.hostname}-virsh",
-                        "power_pass": virsh_password_meta.value,
-                        "power_address": f"qemu+ssh://virsh@{addr}/system",
-                        "zone": node.zone.name,
-                        "pool": node.pool.name,
-                    },
-                    user=None,
-                ),
-                call(
-                    data={
-                        "type": "lxd",
-                        "name": f"{node.hostname}-lxd",
-                        "password": lxd_password_meta.value,
-                        "power_address": addr,
-                        "project": "maas",
-                        "zone": node.zone.name,
-                        "pool": node.pool.name,
-                    },
-                    user=None,
-                ),
-            ],
-            any_order=True,
-        )
-        self.assertIsNone(reload_object(virsh_password_meta))
-        self.assertIsNone(reload_object(lxd_password_meta))
 
     def test_marks_failed_if_is_valid_returns_false(self):
         mock_pod_form = Mock()
@@ -1234,10 +1107,12 @@ class TestCreateVMHostForDeployment(MAASServerTestCase):
             install_kvm=True,
         )
         factory.make_StaticIPAddress(interface=node.boot_interface)
-        NodeMetadata.objects.create(
-            node=node, key="lxd_password", value="xyz123"
+        meta = NodeMetadata.objects.create(
+            node=node, key="virsh_password", value="xyz123"
         )
-        _create_vmhost_for_deployment(node)
+        _create_pod_for_deployment(node)
+        meta = reload_object(meta)
+        self.assertThat(meta, Is(None))
         self.assertThat(node.status, Equals(NODE_STATUS.FAILED_DEPLOYMENT))
         self.assertThat(
             node.error_description, DocTestMatches(POD_CREATION_ERROR)
@@ -1257,10 +1132,12 @@ class TestCreateVMHostForDeployment(MAASServerTestCase):
             install_kvm=True,
         )
         factory.make_StaticIPAddress(interface=node.boot_interface)
-        NodeMetadata.objects.create(
-            node=node, key="lxd_password", value="xyz123"
+        meta = NodeMetadata.objects.create(
+            node=node, key="virsh_password", value="xyz123"
         )
-        _create_vmhost_for_deployment(node)
+        _create_pod_for_deployment(node)
+        meta = reload_object(meta)
+        self.assertThat(meta, Is(None))
         self.assertThat(node.status, Equals(NODE_STATUS.FAILED_DEPLOYMENT))
         self.assertThat(
             node.error_description, DocTestMatches(POD_CREATION_ERROR)
@@ -1281,6 +1158,6 @@ class TestCreateVMHostForDeployment(MAASServerTestCase):
         )
         factory.make_StaticIPAddress(interface=node.boot_interface)
         NodeMetadata.objects.create(
-            node=node, key="lxd_password", value="xyz123"
+            node=node, key="virsh_password", value="xyz123"
         )
-        self.assertRaises(DatabaseError, _create_vmhost_for_deployment, node)
+        self.assertRaises(DatabaseError, _create_pod_for_deployment, node)

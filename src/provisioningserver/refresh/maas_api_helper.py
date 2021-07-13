@@ -9,9 +9,7 @@ from email.utils import parsedate
 import json
 import mimetypes
 import os
-from pathlib import Path
 import random
-import re
 import selectors
 import socket
 import string
@@ -31,144 +29,55 @@ MD_VERSION = "2012-03-01"
 
 # See fcntl(2), re. F_SETPIPE_SZ. By requesting this many bytes from a pipe on
 # each read we can be sure that we are always draining its buffer completely.
-PIPE_MAX_SIZE = int(Path("/proc/sys/fs/pipe-max-size").read_text())
+with open("/proc/sys/fs/pipe-max-size") as _pms:
+    PIPE_MAX_SIZE = int(_pms.read())
 
 
-class InvalidCredentialsFormat(Exception):
-    """Raised when OAuth credentials string is in wrong format."""
-
-
-# This would be a dataclass, but needs to support python3.6
-class Credentials:
-
-    KEYS = frozenset(
-        ("token_key", "token_secret", "consumer_key", "consumer_secret")
+def oauth_headers(
+    url, consumer_key, token_key, token_secret, consumer_secret, clockskew=0
+):
+    """Build OAuth headers using given credentials."""
+    timestamp = int(time.time()) + clockskew
+    client = oauth.Client(
+        consumer_key,
+        client_secret=consumer_secret,
+        resource_owner_key=token_key,
+        resource_owner_secret=token_secret,
+        signature_method=oauth.SIGNATURE_PLAINTEXT,
+        timestamp=str(timestamp),
     )
+    uri, signed_headers, body = client.sign(url)
+    return signed_headers
 
-    _STRING_RE = re.compile(
-        r"(?P<consumer_key>[^:]+)"
-        r":(?P<token_key>[^:]+)"
-        r":(?P<token_secret>[^:]+)"
-        r"(:(?P<consumer_secret>[^:]+))?"
-        r"$",
-    )
 
-    def __init__(self, **kwargs):
-        for key in self.KEYS:
-            setattr(self, key, kwargs.get(key) or "")
-
-    def __eq__(self, other):
-        return all(
-            getattr(self, key) == getattr(other, key) for key in self.KEYS
+def authenticate_headers(url, headers, creds, clockskew=0):
+    """Update and sign a dict of request headers."""
+    if creds.get("consumer_key", None) is not None:
+        headers.update(
+            oauth_headers(
+                url,
+                consumer_key=creds["consumer_key"],
+                token_key=creds["token_key"],
+                token_secret=creds["token_secret"],
+                consumer_secret=creds["consumer_secret"],
+                clockskew=clockskew,
+            )
         )
-
-    def __bool__(self):
-        return any(getattr(self, key) for key in self.KEYS)
-
-    def __repr__(self):
-        return "{name}({keys})".format(
-            name=self.__class__.__name__,
-            keys=", ".join(
-                "{key}={value}".format(key=key, value=getattr(self, key))
-                for key in self.KEYS
-            ),
-        )
-
-    @classmethod
-    def from_string(cls, string):
-        if not string:
-            return cls()
-        match = cls._STRING_RE.match(string)
-        if not match:
-            raise InvalidCredentialsFormat("Invalid OAuth credentials format")
-        return cls(**match.groupdict())
-
-    def update(self, config):
-        """Update credentials from a config dict.
-
-        Only empty keys are updated.
-        """
-        for key in self.KEYS:
-            if key in config and not getattr(self, key, None):
-                setattr(self, key, config[key])
-
-    def oauth_headers(self, url, clockskew=0):
-        """Return OAuth headers for credentials."""
-        if not self.consumer_key:
-            return {}
-
-        timestamp = int(time.time()) + clockskew
-        client = oauth.Client(
-            self.consumer_key,
-            client_secret=self.consumer_secret,
-            resource_owner_key=self.token_key,
-            resource_owner_secret=self.token_secret,
-            signature_method=oauth.SIGNATURE_PLAINTEXT,
-            timestamp=str(timestamp),
-        )
-        uri, signed_headers, body = client.sign(url)
-        return signed_headers
-
-
-class Config:
-    def __init__(self, config=None, credentials=None):
-        self.credentials = credentials or Credentials()
-        self.metadata_url = None
-        self.config_path = None
-        if config:
-            self.update(config)
-
-    def update(self, config):
-        """Update values from a config dict.
-
-        Updates only values that are None with their corresponding values in
-        the config.
-        """
-        # Support reading cloud-init config for MAAS datasource.
-        if "datasource" in config:
-            config = config["datasource"]["MAAS"]
-
-        for key in ("metadata_url", "config_path"):
-            if key in config and getattr(self, key, None) is None:
-                setattr(self, key, config[key])
-
-        if self.config_path is not None:
-            self.config_path = Path(self.config_path)
-
-        self.credentials.update(config)
-
-    def update_from_url(self, url):
-        """Read cloud-init config from given `url`.
-
-        Updates only values that are None with their corresponding values in
-        the config.
-        """
-        if url.startswith("http://") or url.startswith("https://"):
-            data = urllib.request.urlopen(urllib.request.Request(url=url))
-        else:
-            if url.startswith("file://"):
-                url = url[7:]
-            data = Path(url).read_text()
-
-        self.update(yaml.safe_load(data))
 
 
 def warn(msg):
     sys.stderr.write(msg + "\n")
 
 
-def get_base_url(url):
-    """Return the base URL (no path) for the specified URL."""
-    parsed = urllib.parse.urlparse(url)
-    return urllib.parse.urlunparse(
-        (parsed.scheme, parsed.netloc, "", "", "", "")
-    )
-
-
-def geturl(url, credentials=None, headers=None, data=None, post_data=None):
-    headers = dict(headers) if headers else {}
-    if credentials is None:
-        credentials = Credentials()
+def geturl(url, creds=None, headers=None, data=None, post_data=None):
+    # Takes a dict of creds to be passed through to oauth_headers,
+    #   so it should have consumer_key, token_key, ...
+    if headers is None:
+        headers = {}
+    else:
+        headers = dict(headers)
+    if creds is None:
+        creds = {}
     if post_data:
         post_data = urllib.parse.urlencode(post_data)
         post_data = post_data.encode("ascii")
@@ -177,7 +86,7 @@ def geturl(url, credentials=None, headers=None, data=None, post_data=None):
 
     error = Exception("Unexpected Error")
     for naptime in (1, 1, 2, 4, 8, 16, 32):
-        headers.update(credentials.oauth_headers(url, clockskew))
+        authenticate_headers(url, headers, creds, clockskew)
         try:
             req = urllib.request.Request(url=url, data=data, headers=headers)
             if post_data:
@@ -279,13 +188,44 @@ def encode_multipart_data(data, files):
     return body, headers
 
 
+def read_config(url, creds):
+    """Read cloud-init config from given `url` into `creds` dict.
+
+    Updates any keys in `creds` that are None with their corresponding
+    values in the config.
+
+    Important keys include `metadata_url`, and the actual OAuth
+    credentials.
+    """
+    if url.startswith("http://") or url.startswith("https://"):
+        cfg_str = urllib.request.urlopen(urllib.request.Request(url=url))
+    else:
+        if url.startswith("file://"):
+            url = url[7:]
+        cfg_str = open(url, "r").read()
+
+    cfg = yaml.safe_load(cfg_str)
+
+    # Support reading cloud-init config for MAAS datasource.
+    if "datasource" in cfg:
+        cfg = cfg["datasource"]["MAAS"]
+
+    for key in creds.keys():
+        if key in cfg and creds[key] is None:
+            creds[key] = cfg[key]
+
+
 class SignalException(Exception):
-    pass
+    def __init__(self, error):
+        self.error = error
+
+    def __str__(self):
+        return self.error
 
 
 def signal(
     url,
-    credentials,
+    creds,
     status,
     error=None,
     script_name=None,
@@ -355,7 +295,7 @@ def signal(
     )
 
     try:
-        ret = geturl(url, credentials=credentials, headers=headers, data=data)
+        ret = geturl(url, creds=creds, headers=headers, data=data)
         if ret.status != 200:
             raise SignalException(
                 "Unexpected status(%d) sending region commissioning data: %s"
@@ -374,12 +314,7 @@ def signal(
 
 
 def capture_script_output(
-    proc,
-    combined_path,
-    stdout_path,
-    stderr_path,
-    timeout_seconds=None,
-    console_output=None,
+    proc, combined_path, stdout_path, stderr_path, timeout_seconds=None
 ):
     """Capture stdout and stderr from `proc`.
 
@@ -396,11 +331,7 @@ def capture_script_output(
     the process is killed and an exception is raised. Forked processes are not
     subject to the timeout.
 
-    If console_output is set to True or False, script output/error will be
-    printed or not accordingly. By default, it's printed output is a tty.
-
     :return: The exit code of `proc`.
-
     """
     if timeout_seconds in (None, 0):
         timeout = None
@@ -411,7 +342,7 @@ def capture_script_output(
     # Create the file and then open it in read write mode for terminal
     # emulation.
     for path in (stdout_path, stderr_path, combined_path):
-        Path(path).touch()
+        open(path, "w").close()
     with open(stdout_path, "r+b") as out, open(stderr_path, "r+b") as err:
         with open(combined_path, "r+b") as combined:
             with selectors.DefaultSelector() as selector:
@@ -419,16 +350,12 @@ def capture_script_output(
                 selector.register(proc.stderr, selectors.EVENT_READ, err)
                 while selector.get_map() and proc.poll() is None:
                     # Select with a short timeout so that we don't tight loop.
-                    _select_script_output(
-                        selector, combined, 0.1, proc, console_output
-                    )
+                    _select_script_output(selector, combined, 0.1, proc)
                     if timeout is not None and time.monotonic() > timeout:
                         break
                 # Process has finished or has closed stdout and stderr.
                 # Process anything still sitting in the latter's buffers.
-                _select_script_output(
-                    selector, combined, 0.0, proc, console_output
-                )
+                _select_script_output(selector, combined, 0.0, proc)
 
     now = time.monotonic()
     # Wait for the process to finish.
@@ -450,22 +377,19 @@ def capture_script_output(
             raise
 
 
-def _select_script_output(selector, combined, timeout, proc, console_output):
+def _select_script_output(selector, combined, timeout, proc):
     """Helper for `capture_script_output`."""
-    if console_output is None:
-        console_output = sys.stdout.isatty()
-
     for key, event in selector.select(timeout):
         if event & selectors.EVENT_READ:
             # Read from the _raw_ file. Ordinarily Python blocks until a
             # read(n) returns n bytes or the stream reaches end-of-file,
             # but here we only want to get what's there without blocking.
             chunk = key.fileobj.raw.read(PIPE_MAX_SIZE)
-            if not chunk:  # EOF
+            if len(chunk) == 0:  # EOF
                 selector.unregister(key.fileobj)
             else:
-                # Output to console if specified
-                if chunk != b"" and console_output:
+                # Output to console if running in a shell.
+                if chunk != b"" and sys.stdout.isatty():
                     fd = (
                         sys.stdout
                         if key.fileobj == proc.stdout

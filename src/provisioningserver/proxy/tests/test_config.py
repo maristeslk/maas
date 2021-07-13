@@ -15,7 +15,7 @@ from testtools.matchers import Contains, FileContains
 from maastesting.factory import factory
 from maastesting.testcase import MAASTestCase
 from provisioningserver.proxy import config
-from provisioningserver.utils import snap
+from provisioningserver.utils import snappy
 
 wait_for_reactor = wait_for(30)  # 30 seconds.
 
@@ -24,13 +24,13 @@ class TestGetConfigDir(MAASTestCase):
     """Tests for `get_proxy_config_path`."""
 
     def test_returns_default(self):
-        self.assertEqual(
+        self.assertEquals(
             "/var/lib/maas/maas-proxy.conf", config.get_proxy_config_path()
         )
 
     def test_env_overrides_default(self):
         os.environ["MAAS_PROXY_CONFIG_DIR"] = factory.make_name("env")
-        self.assertEqual(
+        self.assertEquals(
             os.sep.join(
                 [
                     os.environ["MAAS_PROXY_CONFIG_DIR"],
@@ -109,7 +109,7 @@ class TestWriteConfig(MAASTestCase):
             self.assertIn("http_port %s" % port, lines)
 
     def test_user_in_snap(self):
-        self.patch(snap, "running_in_snap").return_value = True
+        self.patch(snappy, "running_in_snap").return_value = True
         config.write_config(allowed_cidrs=[])
         with self.proxy_path.open() as proxy_file:
             lines = [line.strip() for line in proxy_file.readlines()]
@@ -117,7 +117,7 @@ class TestWriteConfig(MAASTestCase):
             self.assertIn("cache_effective_group snap_daemon", lines)
 
     def test_user_not_in_snap(self):
-        self.patch(snap, "running_in_snap").return_value = False
+        self.patch(snappy, "running_in_snap").return_value = False
         config.write_config(allowed_cidrs=[])
         with self.proxy_path.open() as proxy_file:
             lines = [line.strip() for line in proxy_file.readlines()]

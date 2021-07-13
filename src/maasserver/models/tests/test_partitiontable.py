@@ -163,7 +163,7 @@ class TestPartitionTable(MAASServerTestCase):
         partition_table = factory.make_PartitionTable(
             block_device=block_device
         )
-        self.assertEqual(
+        self.assertEquals(
             PARTITION_TABLE_EXTRA_SPACE, partition_table.get_overhead_size()
         )
 
@@ -173,7 +173,7 @@ class TestPartitionTable(MAASServerTestCase):
         partition_table = factory.make_PartitionTable(
             block_device=block_device
         )
-        self.assertEqual(
+        self.assertEquals(
             PARTITION_TABLE_EXTRA_SPACE + PREP_PARTITION_SIZE,
             partition_table.get_overhead_size(),
         )
@@ -186,7 +186,7 @@ class TestPartitionTable(MAASServerTestCase):
         partition_table = factory.make_PartitionTable(
             block_device=block_device
         )
-        self.assertEqual(
+        self.assertEquals(
             PARTITION_TABLE_EXTRA_SPACE + BIOS_GRUB_PARTITION_SIZE,
             partition_table.get_overhead_size(),
         )

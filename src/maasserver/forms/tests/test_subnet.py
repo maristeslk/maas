@@ -1,4 +1,4 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2016 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Tests for Subnet forms."""
@@ -13,7 +13,6 @@ from maasserver.models.fabric import Fabric
 from maasserver.testing.factory import factory
 from maasserver.testing.testcase import MAASServerTestCase
 from maasserver.utils.orm import reload_object
-from provisioningserver.boot import BootMethodRegistry
 
 
 class TestSubnetForm(MAASServerTestCase):
@@ -312,7 +311,7 @@ class TestSubnetForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), dict(form.errors))
         form.save()
         subnet = reload_object(subnet)
-        self.assertEqual(dns_servers, subnet.dns_servers)
+        self.assertEquals(dns_servers, subnet.dns_servers)
 
     def test_doesnt_overwrite_other_fields(self):
         new_name = factory.make_name("subnet")
@@ -356,7 +355,7 @@ class TestSubnetForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), dict(form.errors))
         form.save()
         subnet = reload_object(subnet)
-        self.assertEqual(dns_servers, subnet.dns_servers)
+        self.assertEquals(dns_servers, subnet.dns_servers)
 
     def test_clean_dns_servers_accepts_space_separated_list(self):
         subnet = factory.make_Subnet()
@@ -369,134 +368,4 @@ class TestSubnetForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), dict(form.errors))
         form.save()
         subnet = reload_object(subnet)
-        self.assertEqual(dns_servers, subnet.dns_servers)
-
-    def test_clean_disabled_boot_arches_name_comma_seperated_list(self):
-        subnet = factory.make_Subnet()
-        disabled_arches = random.sample(
-            [
-                boot_method.name
-                for _, boot_method in BootMethodRegistry
-                if boot_method.arch_octet or boot_method.user_class
-            ],
-            3,
-        )
-
-        form = SubnetForm(
-            instance=subnet,
-            data={"disabled_boot_architectures": ",".join(disabled_arches)},
-        )
-        self.assertTrue(form.is_valid(), dict(form.errors))
-        form.save()
-        subnet = reload_object(subnet)
-        self.assertEqual(
-            sorted(disabled_arches), sorted(subnet.disabled_boot_architectures)
-        )
-
-    def test_clean_disabled_boot_arches_name_space_seperated_list(self):
-        subnet = factory.make_Subnet()
-        disabled_arches = random.sample(
-            [
-                boot_method.name
-                for _, boot_method in BootMethodRegistry
-                if boot_method.arch_octet or boot_method.user_class
-            ],
-            3,
-        )
-
-        form = SubnetForm(
-            instance=subnet,
-            data={"disabled_boot_architectures": " ".join(disabled_arches)},
-        )
-        self.assertTrue(form.is_valid(), dict(form.errors))
-        form.save()
-        subnet = reload_object(subnet)
-        self.assertEqual(
-            sorted(disabled_arches), sorted(subnet.disabled_boot_architectures)
-        )
-
-    def test_clean_disabled_boot_arches_octet(self):
-        subnet = factory.make_Subnet()
-        disabled_arches = random.sample(
-            [
-                boot_method
-                for _, boot_method in BootMethodRegistry
-                if boot_method.arch_octet
-            ],
-            3,
-        )
-        form = SubnetForm(
-            instance=subnet,
-            data={
-                "disabled_boot_architectures": ",".join(
-                    [bm.arch_octet for bm in disabled_arches]
-                )
-            },
-        )
-        self.assertTrue(form.is_valid(), dict(form.errors))
-        form.save()
-        subnet = reload_object(subnet)
-        self.assertEqual(
-            sorted([bm.name for bm in disabled_arches]),
-            sorted(subnet.disabled_boot_architectures),
-        )
-
-    def test_clean_disabled_boot_arches_hex(self):
-        subnet = factory.make_Subnet()
-        disabled_arches = random.sample(
-            [
-                boot_method
-                for _, boot_method in BootMethodRegistry
-                if boot_method.arch_octet
-            ],
-            3,
-        )
-        form = SubnetForm(
-            instance=subnet,
-            data={
-                "disabled_boot_architectures": ",".join(
-                    [
-                        bm.arch_octet.replace("00:", "0x")
-                        for bm in disabled_arches
-                    ]
-                )
-            },
-        )
-        self.assertTrue(form.is_valid(), dict(form.errors))
-        form.save()
-        subnet = reload_object(subnet)
-        self.assertEqual(
-            sorted([bm.name for bm in disabled_arches]),
-            sorted(subnet.disabled_boot_architectures),
-        )
-
-    def test_clean_disabled_boot_arches_cannot_disable_fake_boot_arch(self):
-        # The Windows boot loader responds to bootloader configuration requests
-        # but isc-dhcpd is not configured to respond to a boot octet nor a
-        # user-class. Thus it is unable to be disabled.
-        subnet = factory.make_Subnet(disabled_boot_architectures=[])
-        choices = [
-            boot_method.name
-            for _, boot_method in BootMethodRegistry
-            if not boot_method.arch_octet and not boot_method.user_class
-        ]
-
-        form = SubnetForm(
-            instance=subnet,
-            data={"disabled_boot_architectures": random.choice(choices)},
-        )
-        self.assertFalse(form.is_valid())
-        subnet = reload_object(subnet)
-        self.assertEqual([], subnet.disabled_boot_architectures)
-
-    def test_clean_disabled_detects_invalid_arch(self):
-        subnet = factory.make_Subnet(disabled_boot_architectures=[])
-        form = SubnetForm(
-            instance=subnet,
-            data={
-                "disabled_boot_architectures": factory.make_name("boot_arch")
-            },
-        )
-        self.assertFalse(form.is_valid())
-        subnet = reload_object(subnet)
-        self.assertEqual([], subnet.disabled_boot_architectures)
+        self.assertEquals(dns_servers, subnet.dns_servers)

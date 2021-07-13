@@ -98,7 +98,11 @@ def reset_request(request):
 
     Use this after a transaction failure, before retrying.
 
-    This is needed so that we don't carry over cookies, for example.
+    This is needed so that we don't carry over messages, for example.
+    TODO: this assumes we're using the cookies as a container for
+    messages; we need to clear the session as well.
+
+    This also resets the input stream.
     """
     wsgi_input = request.environ.get("wsgi.input")
     if isinstance(wsgi_input, wsgi._InputStream):

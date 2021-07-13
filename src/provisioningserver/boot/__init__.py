@@ -1,4 +1,4 @@
-# Copyright 2012-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2018 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Boot Methods."""
@@ -17,7 +17,6 @@ from twisted.internet.defer import inlineCallbacks, returnValue
 from zope.interface import implementer
 
 from provisioningserver.boot.tftppath import compose_image_path
-from provisioningserver.config import debug_enabled
 from provisioningserver.events import EVENT_TYPES, try_send_rack_event
 from provisioningserver.kernel_opts import compose_kernel_command_line
 from provisioningserver.logger import get_maas_logger
@@ -144,6 +143,9 @@ class BootMethod(metaclass=ABCMeta):
     # Includes "HTTPClient" as the vendor-class-identifier.
     http_url = False
 
+    # Arches for which this boot method needs to install boot loaders.
+    bootloader_arches = []
+
     # Bootloader files to symlink into the root tftp directory.
     bootloader_files = []
 
@@ -158,10 +160,6 @@ class BootMethod(metaclass=ABCMeta):
     @abstractproperty
     def template_subdir(self):
         """Name of template sub-directory."""
-
-    @abstractproperty
-    def bootloader_arches(self):
-        """Arches for which this boot method is for."""
 
     @abstractproperty
     def bootloader_path(self):
@@ -358,6 +356,11 @@ class BootMethod(metaclass=ABCMeta):
                 convert_host_to_uri_str(params.fs_host)
             )
 
+        def fs_efihost(params):
+            return "(http,%s:5248)/images/" % (
+                convert_host_to_uri_str(params.fs_host)
+            )
+
         def image_dir(params):
             return compose_image_path(
                 params.osystem,
@@ -408,13 +411,13 @@ class BootMethod(metaclass=ABCMeta):
 
         namespace = {
             "fs_host": fs_host,
+            "fs_efihost": fs_efihost,
             "initrd_path": initrd_path,
             "kernel_command": kernel_command,
             "kernel_params": kernel_params,
             "kernel_path": kernel_path,
             "kernel_name": kernel_name,
             "dtb_path": dtb_path,
-            "debug": debug_enabled(),
         }
 
         return namespace
@@ -426,12 +429,7 @@ class BootMethodRegistry(Registry):
 
 # Import the supported boot methods after defining BootMethod.
 from provisioningserver.boot.ipxe import IPXEBootMethod  # noqa:E402 isort:skip
-from provisioningserver.boot.grub import (  # noqa:E402 isort:skip
-    UEFIAMD64BootMethod,
-    UEFIAMD64HTTPBootMethod,
-    UEFIEBCBootMethod,
-    UEFIARM64BootMethod,
-    UEFIARM64HTTPBootMethod,
+from provisioningserver.boot.open_firmware_ppc64el import (  # noqa:E402 isort:skip
     OpenFirmwarePPC64ELBootMethod,
 )
 from provisioningserver.boot.powernv import (  # noqa:E402 isort:skip
@@ -441,8 +439,11 @@ from provisioningserver.boot.pxe import PXEBootMethod  # noqa:E402 isort:skip
 from provisioningserver.boot.s390x import (  # noqa:E402 isort:skip
     S390XBootMethod,
 )
-from provisioningserver.boot.s390x_partition import (  # noqa:E402 isort:skip
-    S390XPartitionBootMethod,
+from provisioningserver.boot.uefi_amd64 import (  # noqa:E402 isort:skip
+    UEFIAMD64BootMethod,
+)
+from provisioningserver.boot.uefi_arm64 import (  # noqa:E402 isort:skip
+    UEFIARM64BootMethod,
 )
 from provisioningserver.boot.windows import (  # noqa:E402 isort:skip
     WindowsPXEBootMethod,
@@ -452,15 +453,13 @@ builtin_boot_methods = [
     IPXEBootMethod(),
     PXEBootMethod(),
     UEFIAMD64BootMethod(),
-    UEFIAMD64HTTPBootMethod(),
-    UEFIEBCBootMethod(),
+    # XXX LP:#1899581 - HTTP boot (UEFIAMD64HTTPBootMethod) is disabled for now
+    # since it needs fixing
     UEFIARM64BootMethod(),
-    UEFIARM64HTTPBootMethod(),
     OpenFirmwarePPC64ELBootMethod(),
     PowerNVBootMethod(),
     WindowsPXEBootMethod(),
     S390XBootMethod(),
-    S390XPartitionBootMethod(),
 ]
 for method in builtin_boot_methods:
     BootMethodRegistry.register_item(method.name, method)

@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 from django.urls import reverse
 from twisted.internet.defer import succeed
 
+from maasserver.enum import NODE_CREATION_TYPE
 from maasserver.forms import pods
 from maasserver.models.bmc import Pod
 from maasserver.models.node import Machine
@@ -115,7 +116,12 @@ class TestPodsAPIUser(PodAPITestForUser, PodMixin):
         )
 
     def test_read_returns_limited_fields(self):
-        pod = factory.make_Pod(capabilities=[])
+        pod = factory.make_Pod(
+            capabilities=[
+                Capabilities.FIXED_LOCAL_STORAGE,
+                Capabilities.ISCSI_STORAGE,
+            ]
+        )
         for _ in range(3):
             factory.make_PodStoragePool(pod=pod)
         response = self.client.get(reverse("pods_handler"))
@@ -139,7 +145,6 @@ class TestPodsAPIUser(PodAPITestForUser, PodMixin):
                 "pool",
                 "host",
                 "default_macvlan_mode",
-                "version",
             ],
             list(parsed_result[0]),
         )
@@ -148,6 +153,8 @@ class TestPodsAPIUser(PodAPITestForUser, PodMixin):
                 "cores",
                 "memory",
                 "local_storage",
+                "local_disks",
+                "iscsi_storage",
             ],
             list(parsed_result[0]["total"]),
         )
@@ -156,6 +163,8 @@ class TestPodsAPIUser(PodAPITestForUser, PodMixin):
                 "cores",
                 "memory",
                 "local_storage",
+                "local_disks",
+                "iscsi_storage",
             ],
             list(parsed_result[0]["used"]),
         )
@@ -164,6 +173,8 @@ class TestPodsAPIUser(PodAPITestForUser, PodMixin):
                 "cores",
                 "memory",
                 "local_storage",
+                "local_disks",
+                "iscsi_storage",
             ],
             list(parsed_result[0]["available"]),
         )
@@ -197,22 +208,6 @@ class TestPodsAPIAdmin(PodAPITestForAdmin, PodMixin):
         self.assertEqual(http.client.OK, response.status_code)
         parsed_result = json_load_bytes(response.content)
         self.assertEqual(parsed_result["type"], pod_info["type"])
-
-    def test_create_lxd_default_project(self):
-        self.patch(pods, "post_commit_do")
-        discovered_pod, _, _ = self.fake_pod_discovery()
-        ip = factory.make_ipv4_address()
-        info = {
-            "type": "lxd",
-            "power_address": ip,
-            "power_pass": "sekret",
-            "ip_address": ip,
-        }
-        response = self.client.post(reverse("pods_handler"), info)
-        self.assertEqual(http.client.OK, response.status_code)
-        parsed_result = json_load_bytes(response.content)
-        pod = Pod.objects.get(id=parsed_result["id"])
-        self.assertEqual(pod.power_parameters["project"], "default")
 
     def test_create_creates_pod_with_default_resource_pool(self):
         self.patch(pods, "post_commit_do")
@@ -281,7 +276,6 @@ def make_compose_machine_result(pod):
         cores=1,
         memory=1024,
         cpu_speed=300,
-        power_parameters={"instance_name": factory.make_name("instance")},
         block_devices=[],
         interfaces=[],
     )
@@ -497,8 +491,8 @@ class TestPodAPIAdmin(PodAPITestForAdmin, PodMixin):
         self.assertEqual(
             http.client.BAD_REQUEST, response.status_code, response.content
         )
-        self.assertEqual(
-            b"VM host does not support composability.", response.content
+        self.assertEquals(
+            b"Pod does not support composability.", response.content
         )
 
     def test_compose_composes_with_defaults(self):
@@ -579,7 +573,17 @@ class TestPodAPIAdmin(PodAPITestForAdmin, PodMixin):
     def test_DELETE_calls_async_delete(self):
         pod = factory.make_Pod()
         for _ in range(3):
-            factory.make_Machine(bmc=pod)
+            factory.make_Machine(
+                bmc=pod, creation_type=NODE_CREATION_TYPE.PRE_EXISTING
+            )
+        for _ in range(3):
+            factory.make_Machine(
+                bmc=pod, creation_type=NODE_CREATION_TYPE.MANUAL
+            )
+        for _ in range(3):
+            factory.make_Machine(
+                bmc=pod, creation_type=NODE_CREATION_TYPE.DYNAMIC
+            )
         mock_eventual = MagicMock()
         mock_async_delete = self.patch(Pod, "async_delete")
         mock_async_delete.return_value = mock_eventual
@@ -587,22 +591,7 @@ class TestPodAPIAdmin(PodAPITestForAdmin, PodMixin):
         self.assertEqual(
             http.client.NO_CONTENT, response.status_code, response.content
         )
-        self.assertThat(mock_eventual.wait, MockCalledOnceWith(60))
-
-    def test_DELETE_calls_async_delete_decompose(self):
-        pod = factory.make_Pod()
-        for _ in range(3):
-            factory.make_Machine(bmc=pod)
-        mock_eventual = MagicMock()
-        mock_async_delete = self.patch(Pod, "async_delete")
-        mock_async_delete.return_value = mock_eventual
-        response = self.client.delete(
-            get_pod_uri(pod), query={"decompose": True}
-        )
-        self.assertEqual(
-            http.client.NO_CONTENT, response.status_code, response.content
-        )
-        self.assertThat(mock_eventual.wait, MockCalledOnceWith(60 * 4))
+        self.assertThat(mock_eventual.wait, MockCalledOnceWith(60 * 7))
 
     def test_add_tag_to_pod(self):
         pod = factory.make_Pod()

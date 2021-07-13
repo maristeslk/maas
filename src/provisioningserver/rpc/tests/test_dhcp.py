@@ -122,102 +122,6 @@ class TestDHCPState(MAASTestCase):
         )
         self.assertTrue(new_state.requires_restart(state))
 
-    def test_requires_restart_returns_False_when_hosts_are_ipv4_and_server_is_ipv4(
-        self,
-    ):
-        (
-            omapi_key,
-            failover_peers,
-            shared_networks,
-            _,
-            interfaces,
-            global_dhcp_snippets,
-        ) = self.make_args()
-        state = dhcp.DHCPState(
-            omapi_key,
-            failover_peers,
-            shared_networks,
-            [],
-            interfaces,
-            global_dhcp_snippets,
-        )
-        new_hosts = [make_host(dhcp_snippets=[]) for _ in range(3)]
-        new_state = dhcp.DHCPState(
-            omapi_key,
-            copy.deepcopy(failover_peers),
-            copy.deepcopy(shared_networks),
-            new_hosts,
-            copy.deepcopy(interfaces),
-            copy.deepcopy(global_dhcp_snippets),
-        )
-        self.assertFalse(
-            new_state.requires_restart(state, is_dhcpv6_server=False)
-        )
-
-    def test_requires_restart_returns_True_when_hosts_are_ipv6_and_server_is_ipv4(
-        self,
-    ):
-        (
-            omapi_key,
-            failover_peers,
-            shared_networks,
-            _,
-            interfaces,
-            global_dhcp_snippets,
-        ) = self.make_args()
-        state = dhcp.DHCPState(
-            omapi_key,
-            failover_peers,
-            shared_networks,
-            [],
-            interfaces,
-            global_dhcp_snippets,
-        )
-        new_hosts = [make_host(dhcp_snippets=[], ipv6=True) for _ in range(3)]
-        new_state = dhcp.DHCPState(
-            omapi_key,
-            copy.deepcopy(failover_peers),
-            copy.deepcopy(shared_networks),
-            new_hosts,
-            copy.deepcopy(interfaces),
-            copy.deepcopy(global_dhcp_snippets),
-        )
-        self.assertTrue(
-            new_state.requires_restart(state, is_dhcpv6_server=False)
-        )
-
-    def test_requires_restart_returns_False_when_hosts_are_ipv6_and_server_is_ipv6(
-        self,
-    ):
-        (
-            omapi_key,
-            failover_peers,
-            shared_networks,
-            _,
-            interfaces,
-            global_dhcp_snippets,
-        ) = self.make_args()
-        state = dhcp.DHCPState(
-            omapi_key,
-            failover_peers,
-            shared_networks,
-            [],
-            interfaces,
-            global_dhcp_snippets,
-        )
-        new_hosts = [make_host(dhcp_snippets=[], ipv6=True) for _ in range(3)]
-        new_state = dhcp.DHCPState(
-            omapi_key,
-            copy.deepcopy(failover_peers),
-            copy.deepcopy(shared_networks),
-            new_hosts,
-            copy.deepcopy(interfaces),
-            copy.deepcopy(global_dhcp_snippets),
-        )
-        self.assertFalse(
-            new_state.requires_restart(state, is_dhcpv6_server=True)
-        )
-
     def test_requires_restart_returns_True_when_failover_different(self):
         (
             omapi_key,
@@ -761,7 +665,7 @@ class TestConfigureDHCP(MAASTestCase):
         self.assertThat(
             restart_service, MockCalledOnceWith(self.server.dhcp_service)
         )
-        self.assertEqual(
+        self.assertEquals(
             dhcp._current_server_state[self.server.dhcp_service],
             dhcp.DHCPState(
                 omapi_key,
@@ -833,7 +737,7 @@ class TestConfigureDHCP(MAASTestCase):
         self.assertThat(
             restart_service, MockCalledOnceWith(self.server.dhcp_service)
         )
-        self.assertEqual(
+        self.assertEquals(
             dhcp._current_server_state[self.server.dhcp_service],
             dhcp.DHCPState(
                 omapi_key,
@@ -907,7 +811,7 @@ class TestConfigureDHCP(MAASTestCase):
         self.assertThat(
             ensure_service, MockCalledOnceWith(self.server.dhcp_service)
         )
-        self.assertEqual(
+        self.assertEquals(
             dhcp._current_server_state[self.server.dhcp_service],
             dhcp.DHCPState(
                 omapi_key,
@@ -992,7 +896,7 @@ class TestConfigureDHCP(MAASTestCase):
             ensure_service, MockCalledOnceWith(self.server.dhcp_service)
         )
         self.assertThat(update_hosts, MockNotCalled())
-        self.assertEqual(
+        self.assertEquals(
             dhcp._current_server_state[self.server.dhcp_service],
             dhcp.DHCPState(
                 omapi_key,
@@ -1045,9 +949,7 @@ class TestConfigureDHCP(MAASTestCase):
         new_hosts = copy.deepcopy(old_hosts)
         removed_host = new_hosts.pop()
         modified_host = new_hosts[0]
-        modified_host["ip"] = factory.make_ip_address(
-            ipv6=self.server.dhcp_service == "DHCPv6"
-        )
+        modified_host["ip"] = factory.make_ip_address()
         added_host = make_host(dhcp_snippets=[])
         new_hosts.append(added_host)
 
@@ -1090,7 +992,7 @@ class TestConfigureDHCP(MAASTestCase):
                 ANY, [removed_host], [added_host], [modified_host]
             ),
         )
-        self.assertEqual(
+        self.assertEquals(
             dhcp._current_server_state[self.server.dhcp_service],
             dhcp.DHCPState(
                 omapi_key,
@@ -1144,9 +1046,7 @@ class TestConfigureDHCP(MAASTestCase):
         new_hosts = copy.deepcopy(old_hosts)
         removed_host = new_hosts.pop()
         modified_host = new_hosts[0]
-        modified_host["ip"] = factory.make_ip_address(
-            ipv6=self.server.dhcp_service == "DHCPv6"
-        )
+        modified_host["ip"] = factory.make_ip_address()
         added_host = make_host(dhcp_snippets=[])
         new_hosts.append(added_host)
 
@@ -1192,7 +1092,7 @@ class TestConfigureDHCP(MAASTestCase):
                 ANY, [removed_host], [added_host], [modified_host]
             ),
         )
-        self.assertEqual(
+        self.assertEquals(
             dhcp._current_server_state[self.server.dhcp_service],
             dhcp.DHCPState(
                 omapi_key,

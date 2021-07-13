@@ -1,5 +1,7 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
+
+"""Tests for the machines API."""
 
 
 import http.client
@@ -91,8 +93,8 @@ class MachineHostnameTest(APITestCase.ForUserAndAdmin):
         )
 
 
-class TestMachineWorkloadAnnotations(APITestCase.ForUser):
-    def test_GET_returns_workload_annotations(self):
+class MachineOwnerDataTest(APITestCase.ForUser):
+    def test_GET_returns_owner_data(self):
         owner_data = {factory.make_name("key"): factory.make_name("value")}
         factory.make_Node(owner_data=owner_data)
         response = self.client.get(reverse("machines_handler"))
@@ -102,13 +104,9 @@ class TestMachineWorkloadAnnotations(APITestCase.ForUser):
         parsed_result = json.loads(
             response.content.decode(settings.DEFAULT_CHARSET)
         )
-        self.assertEqual(
+        self.assertItemsEqual(
+            [owner_data],
             [machine.get("owner_data") for machine in parsed_result],
-            [owner_data],
-        )
-        self.assertEqual(
-            [machine.get("workload_annotations") for machine in parsed_result],
-            [owner_data],
         )
 
 
@@ -249,7 +247,7 @@ class TestMachinesAPI(APITestCase.ForUser):
         validation_errors = json.loads(
             response.content.decode(settings.DEFAULT_CHARSET)
         )["power_type"]
-        self.assertEqual(
+        self.assertEquals(
             "Select a valid choice. %s is not one of the "
             "available choices." % power_type,
             validation_errors[0],
@@ -271,7 +269,7 @@ class TestMachinesAPI(APITestCase.ForUser):
             response.content.decode(settings.DEFAULT_CHARSET)
         )["system_id"]
         machine = Machine.objects.get(system_id=system_id)
-        self.assertEqual("", machine.power_type)
+        self.assertEquals("", machine.power_type)
         self.assertEqual({}, machine.power_parameters)
 
     def test_POST_handles_error_when_unable_to_access_bmc(self):
@@ -321,8 +319,8 @@ class TestMachinesAPI(APITestCase.ForUser):
             },
         )
         parsed_result = json.loads(response.content.decode())
-        self.assertEqual(NODE_STATUS.COMMISSIONING, parsed_result["status"])
-        self.assertEqual(description, parsed_result["description"])
+        self.assertEquals(NODE_STATUS.COMMISSIONING, parsed_result["status"])
+        self.assertEquals(description, parsed_result["description"])
 
     def test_POST_starts_commissioning_with_selected_test_scripts(self):
         # Regression test for LP1707562
@@ -344,7 +342,7 @@ class TestMachinesAPI(APITestCase.ForUser):
             },
         )
         parsed_result = json.loads(response.content.decode())
-        self.assertEqual(NODE_STATUS.COMMISSIONING, parsed_result["status"])
+        self.assertEquals(NODE_STATUS.COMMISSIONING, parsed_result["status"])
         script_set = ScriptSet.objects.get(
             id=parsed_result["current_testing_result_id"]
         )
@@ -368,7 +366,7 @@ class TestMachinesAPI(APITestCase.ForUser):
             },
         )
         parsed_result = json.loads(response.content.decode())
-        self.assertEqual(NODE_STATUS.COMMISSIONING, parsed_result["status"])
+        self.assertEquals(NODE_STATUS.COMMISSIONING, parsed_result["status"])
 
     def test_POST_commission_false(self):
         # Regression test for LP:1904398
@@ -384,7 +382,7 @@ class TestMachinesAPI(APITestCase.ForUser):
             },
         )
         parsed_result = json.loads(response.content.decode())
-        self.assertEqual(NODE_STATUS.NEW, parsed_result["status"])
+        self.assertEquals(NODE_STATUS.NEW, parsed_result["status"])
 
     def test_GET_lists_machines(self):
         # The api allows for fetching the list of Machines.
@@ -459,7 +457,7 @@ class TestMachinesAPI(APITestCase.ForUser):
         parsed_result = json.loads(
             response.content.decode(settings.DEFAULT_CHARSET)
         )
-        self.assertEqual(
+        self.assertEquals(
             {
                 "id": pod.id,
                 "name": pod.name,
@@ -1256,7 +1254,7 @@ class TestMachinesAPI(APITestCase.ForUser):
                 "cpu_count": pod.hints.cores,
                 "mem": pod.hints.memory,
                 "arch": pod.architectures[0],
-                "not_pod_type": "lxd",
+                "not_pod_type": "rsd",
             },
         )
         self.assertEqual(http.client.OK, response.status_code)
@@ -1330,12 +1328,12 @@ class TestMachinesAPI(APITestCase.ForUser):
             tags=["local"],
             formatted_root=True,
         )
-        disk_2 = factory.make_PhysicalBlockDevice(
+        disk_2 = factory.make_ISCSIBlockDevice(
             node=machine,
             size=(random.randint(8, 16) * (1000 ** 3)),
-            tags=["other"],
+            tags=["iscsi"],
         )
-        storage = "root:%d(local),remote:%d(other)" % (
+        storage = "root:%d(local),remote:%d(iscsi)" % (
             disk_1.size // (1000 ** 3),
             disk_2.size // (1000 ** 3),
         )
@@ -1490,7 +1488,7 @@ class TestMachinesAPI(APITestCase.ForUser):
         pod.hints.cores = random.randint(8, 16)
         pod.hints.memory = random.randint(4096, 8192)
         pod.hints.save()
-        storage = "root:%d(local),remote:%d(other)" % (
+        storage = "root:%d(local),remote:%d(iscsi)" % (
             random.randint(8, 16),
             random.randint(8, 16),
         )
@@ -2795,7 +2793,6 @@ class TestMachinesAPI(APITestCase.ForUser):
         accessible_by_url.return_value = rack
         self.patch(rack, "add_chassis")
         for chassis_type in (
-            "hmcz",
             "mscm",
             "msftocs",
             "recs_box",
@@ -2825,7 +2822,6 @@ class TestMachinesAPI(APITestCase.ForUser):
         accessible_by_url.return_value = rack
         self.patch(rack, "add_chassis")
         for chassis_type in (
-            "hmcz",
             "mscm",
             "msftocs",
             "recs_box",
@@ -2846,85 +2842,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                 http.client.BAD_REQUEST, response.status_code, response.content
             )
             self.assertEqual(b"No provided password!", response.content)
-
-    def test_POST_add_chassis_proxmox_requires_password_or_token(self):
-        self.become_admin()
-        rack = factory.make_RackController()
-        chassis_mock = self.patch(rack, "add_chassis")
-        response = self.client.post(
-            reverse("machines_handler"),
-            {
-                "op": "add_chassis",
-                "rack_controller": rack.system_id,
-                "chassis_type": "proxmox",
-                "hostname": factory.make_url(),
-                "username": factory.make_name("username"),
-            },
-        )
-        self.assertEqual(
-            http.client.BAD_REQUEST, response.status_code, response.content
-        )
-        self.assertEqual(
-            ("You must use a password or token with Proxmox.").encode("utf-8"),
-            response.content,
-        )
-        self.assertEqual(chassis_mock.call_count, 0)
-
-    def test_POST_add_chassis_proxmox_requires_password_xor_token(self):
-        self.become_admin()
-        rack = factory.make_RackController()
-        chassis_mock = self.patch(rack, "add_chassis")
-        response = self.client.post(
-            reverse("machines_handler"),
-            {
-                "op": "add_chassis",
-                "rack_controller": rack.system_id,
-                "chassis_type": "proxmox",
-                "hostname": factory.make_url(),
-                "username": factory.make_name("username"),
-                "password": factory.make_name("password"),
-                "token_name": factory.make_name("token_name"),
-                "token_secret": factory.make_name("token_secret"),
-            },
-        )
-        self.assertEqual(
-            http.client.BAD_REQUEST, response.status_code, response.content
-        )
-        self.assertEqual(
-            (
-                "You may only use a password or token with Proxmox, not both."
-            ).encode("utf-8"),
-            response.content,
-        )
-        self.assertEqual(chassis_mock.call_count, 0)
-
-    def test_POST_add_chassis_proxmox_requires_token_name_and_secret(self):
-        self.become_admin()
-        rack = factory.make_RackController()
-        chassis_mock = self.patch(rack, "add_chassis")
-        response = self.client.post(
-            reverse("machines_handler"),
-            {
-                "op": "add_chassis",
-                "rack_controller": rack.system_id,
-                "chassis_type": "proxmox",
-                "hostname": factory.make_url(),
-                "username": factory.make_name("username"),
-                random.choice(
-                    ["token_name", "token_secret"]
-                ): factory.make_name("token"),
-            },
-        )
-        self.assertEqual(
-            http.client.BAD_REQUEST, response.status_code, response.content
-        )
-        self.assertEqual(
-            ("Proxmox requires both a token_name and token_secret.").encode(
-                "utf-8"
-            ),
-            response.content,
-        )
-        self.assertEqual(chassis_mock.call_count, 0)
 
     def test_POST_add_chassis_username_disallowed_on_virsh_and_powerkvm(self):
         self.become_admin()
@@ -2990,9 +2907,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                 None,
                 None,
                 None,
-                None,
-                None,
-                False,
             ),
         )
 
@@ -3031,9 +2945,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                 None,
                 None,
                 None,
-                None,
-                None,
-                False,
             ),
         )
 
@@ -3046,7 +2957,7 @@ class TestMachinesAPI(APITestCase.ForUser):
         accessible_by_url.return_value = rack
         add_chassis = self.patch(rack, "add_chassis")
         hostname = factory.make_url()
-        for chassis_type in ("powerkvm", "virsh", "vmware", "proxmox", "hmcz"):
+        for chassis_type in ("powerkvm", "virsh", "vmware"):
             prefix_filter = factory.make_name("prefix_filter")
             password = factory.make_name("password")
             params = {
@@ -3056,7 +2967,7 @@ class TestMachinesAPI(APITestCase.ForUser):
                 "password": password,
                 "prefix_filter": prefix_filter,
             }
-            if chassis_type in {"vmware", "proxmox", "hmcz"}:
+            if chassis_type == "vmware":
                 username = factory.make_name("username")
                 params["username"] = username
             else:
@@ -3079,9 +2990,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                     None,
                     None,
                     None,
-                    None,
-                    None,
-                    False,
                 ),
             )
 
@@ -3178,7 +3086,6 @@ class TestMachinesAPI(APITestCase.ForUser):
             "virsh",
             "vmware",
             "powerkvm",
-            "proxmox",
         ):
             params = {
                 "op": "add_chassis",
@@ -3212,7 +3119,7 @@ class TestMachinesAPI(APITestCase.ForUser):
         hostname = factory.make_url()
         username = factory.make_name("username")
         password = factory.make_name("password")
-        port = random.randint(1, 65535)
+        port = random.randint(0, 65535)
         for chassis_type in ("msftocs", "recs_box", "vmware"):
             response = self.client.post(
                 reverse("machines_handler"),
@@ -3222,7 +3129,7 @@ class TestMachinesAPI(APITestCase.ForUser):
                     "hostname": hostname,
                     "username": username,
                     "password": password,
-                    "port": port,
+                    "port": "%s" % port,
                 },
             )
             self.assertEqual(
@@ -3242,9 +3149,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                     None,
                     port,
                     None,
-                    None,
-                    None,
-                    False,
                 ),
             )
 
@@ -3262,7 +3166,7 @@ class TestMachinesAPI(APITestCase.ForUser):
                 "chassis_type": chassis_type,
                 "hostname": factory.make_url(),
                 "password": factory.make_name("password"),
-                "port": random.randint(1, 65535),
+                "port": random.randint(0, 65535),
             }
             if chassis_type not in ("virsh", "powerkvm"):
                 params["username"] = factory.make_name("username")
@@ -3362,9 +3266,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                 None,
                 None,
                 protocol,
-                None,
-                None,
-                False,
             ),
         )
 
@@ -3435,9 +3336,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                 None,
                 None,
                 None,
-                None,
-                None,
-                False,
             ),
         )
 
@@ -3477,9 +3375,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                 None,
                 None,
                 None,
-                None,
-                None,
-                False,
             ),
         )
 
@@ -3540,9 +3435,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                 None,
                 None,
                 None,
-                None,
-                None,
-                False,
             ),
         )
 
@@ -3583,9 +3475,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                 None,
                 None,
                 None,
-                None,
-                None,
-                False,
             ),
         )
 
@@ -3655,9 +3544,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                 None,
                 None,
                 None,
-                None,
-                None,
-                False,
             ),
         )
         self.assertThat(
@@ -3674,9 +3560,6 @@ class TestMachinesAPI(APITestCase.ForUser):
                 None,
                 None,
                 None,
-                None,
-                None,
-                False,
             ),
         )
 
@@ -3784,7 +3667,6 @@ class TestGetAllocationOptions(MAASTestCase):
             comment=None,
             install_rackd=False,
             install_kvm=False,
-            register_vmhost=False,
             ephemeral_deploy=False,
         )
         self.assertThat(options, Equals(expected_options))
@@ -3803,32 +3685,9 @@ class TestGetAllocationOptions(MAASTestCase):
             comment=None,
             install_rackd=False,
             install_kvm=True,
-            register_vmhost=False,
             ephemeral_deploy=False,
         )
         self.assertThat(options, Equals(expected_options))
-
-    def test_sets_bridge_all_if_register_vmhost(self):
-        request = factory.make_fake_request(
-            method="POST",
-            data={"register_vmhost": True},
-        )
-        options = get_allocation_options(request)
-        self.assertEqual(
-            options,
-            AllocationOptions(
-                agent_name="",
-                bridge_all=True,
-                bridge_type=BRIDGE_TYPE.STANDARD,
-                bridge_fd=0,
-                bridge_stp=False,
-                comment=None,
-                install_rackd=False,
-                install_kvm=False,
-                register_vmhost=True,
-                ephemeral_deploy=False,
-            ),
-        )
 
     def test_non_defaults(self):
         request = factory.make_fake_request(
@@ -3836,7 +3695,6 @@ class TestGetAllocationOptions(MAASTestCase):
             data=dict(
                 install_rackd="true",
                 install_kvm="true",
-                register_vmhost="true",
                 bridge_all="true",
                 bridge_type=BRIDGE_TYPE.OVS,
                 bridge_stp="true",
@@ -3856,7 +3714,6 @@ class TestGetAllocationOptions(MAASTestCase):
             comment="don't panic",
             install_rackd=True,
             install_kvm=True,
-            register_vmhost=True,
             ephemeral_deploy=True,
         )
         self.assertThat(options, Equals(expected_options))

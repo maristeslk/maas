@@ -51,19 +51,19 @@ class TestScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form.errors)
         script = form.save()
 
-        self.assertEqual(name, script.name)
-        self.assertEqual("", script.title)
-        self.assertEqual("", script.description)
-        self.assertEqual(1, len(script.tags))
-        self.assertEqual(SCRIPT_TYPE.TESTING, script.script_type)
-        self.assertEqual(HARDWARE_TYPE.NODE, script.hardware_type)
-        self.assertEqual(SCRIPT_PARALLEL.DISABLED, script.parallel)
+        self.assertEquals(name, script.name)
+        self.assertEquals("", script.title)
+        self.assertEquals("", script.description)
+        self.assertEquals(1, len(script.tags))
+        self.assertEquals(SCRIPT_TYPE.TESTING, script.script_type)
+        self.assertEquals(HARDWARE_TYPE.NODE, script.hardware_type)
+        self.assertEquals(SCRIPT_PARALLEL.DISABLED, script.parallel)
         self.assertDictEqual({}, script.packages)
         self.assertDictEqual({}, script.results)
         self.assertDictEqual({}, script.parameters)
-        self.assertEqual(timedelta(0), script.timeout)
+        self.assertEquals(timedelta(0), script.timeout)
         self.assertFalse(script.destructive)
-        self.assertEqual(script_content, script.script.data)
+        self.assertEquals(script_content, script.script.data)
         self.assertFalse(script.default)
         self.assertItemsEqual([], script.for_hardware)
         self.assertFalse(script.may_reboot)
@@ -123,24 +123,24 @@ class TestScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form.errors)
         script = form.save()
 
-        self.assertEqual(name, script.name)
-        self.assertEqual(title, script.title)
-        self.assertEqual(description, script.description)
+        self.assertEquals(name, script.name)
+        self.assertEquals(title, script.title)
+        self.assertEquals(description, script.description)
         self.assertThat(script.tags, ContainsAll(tags))
-        self.assertEqual(script_type, script.script_type)
-        self.assertEqual(hardware_type, script.hardware_type)
-        self.assertEqual(parallel, script.parallel)
+        self.assertEquals(script_type, script.script_type)
+        self.assertEquals(hardware_type, script.hardware_type)
+        self.assertEquals(parallel, script.parallel)
         self.assertDictEqual(packages, script.packages)
         self.assertDictEqual({}, script.results)
         self.assertDictEqual({}, script.parameters)
         self.assertDictEqual(packages, script.packages)
-        self.assertEqual(timedelta(0, timeout), script.timeout)
-        self.assertEqual(destructive, script.destructive)
-        self.assertEqual(script_content, script.script.data)
-        self.assertEqual(comment, script.script.comment)
-        self.assertEqual(may_reboot, script.may_reboot)
+        self.assertEquals(timedelta(0, timeout), script.timeout)
+        self.assertEquals(destructive, script.destructive)
+        self.assertEquals(script_content, script.script.data)
+        self.assertEquals(comment, script.script.comment)
+        self.assertEquals(may_reboot, script.may_reboot)
         self.assertItemsEqual(for_hardware, script.for_hardware)
-        self.assertEqual(recommission, script.recommission)
+        self.assertEquals(recommission, script.recommission)
         self.assertFalse(script.default)
 
     def test_create_setting_default_has_no_effect(self):
@@ -151,7 +151,7 @@ class TestScriptForm(MAASServerTestCase):
                 "default": True,
             }
         )
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         script = form.save()
         self.assertFalse(script.default)
 
@@ -214,25 +214,25 @@ class TestScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form.errors)
         script = form.save()
 
-        self.assertEqual(name, script.name)
-        self.assertEqual(title, script.title)
-        self.assertEqual(description, script.description)
+        self.assertEquals(name, script.name)
+        self.assertEquals(title, script.title)
+        self.assertEquals(description, script.description)
         self.assertThat(script.tags, ContainsAll(tags))
-        self.assertEqual(script_type, script.script_type)
-        self.assertEqual(hardware_type, script.hardware_type)
-        self.assertEqual(parallel, script.parallel)
+        self.assertEquals(script_type, script.script_type)
+        self.assertEquals(hardware_type, script.hardware_type)
+        self.assertEquals(parallel, script.parallel)
         self.assertDictEqual({}, script.results)
         self.assertDictEqual({}, script.parameters)
         self.assertDictEqual(packages, script.packages)
-        self.assertEqual(timedelta(0, timeout), script.timeout)
-        self.assertEqual(destructive, script.destructive)
-        self.assertEqual(script_content, script.script.data)
-        self.assertEqual(comment, script.script.comment)
-        self.assertEqual(
+        self.assertEquals(timedelta(0, timeout), script.timeout)
+        self.assertEquals(destructive, script.destructive)
+        self.assertEquals(script_content, script.script.data)
+        self.assertEquals(comment, script.script.comment)
+        self.assertEquals(
             orig_script_content, script.script.previous_version.data
         )
-        self.assertEqual(None, script.script.previous_version.comment)
-        self.assertEqual(
+        self.assertEquals(None, script.script.previous_version.comment)
+        self.assertEquals(
             apply_configured_networking, script.apply_configured_networking
         )
         self.assertFalse(script.default)
@@ -276,7 +276,7 @@ class TestScriptForm(MAASServerTestCase):
                 value = factory.make_string()
             form = ScriptForm(data={name: value}, instance=script)
             self.assertFalse(form.is_valid())
-            self.assertEqual(1, VersionedTextFile.objects.all().count())
+            self.assertEquals(1, VersionedTextFile.objects.all().count())
 
     def test_update_edit_default_allows_update_of_all_fields(self):
         script = factory.make_Script(default=True)
@@ -317,11 +317,11 @@ class TestScriptForm(MAASServerTestCase):
             data={"tags": ",".join(tags), "timeout": str(timeout)},
             instance=script,
         )
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         script = form.save()
 
         self.assertThat(script.tags, ContainsAll(tags))
-        self.assertEqual(timedelta(0, timeout), script.timeout)
+        self.assertEquals(timedelta(0, timeout), script.timeout)
 
     def test_update_requires_script_with_comment(self):
         script = factory.make_Script()
@@ -362,23 +362,23 @@ class TestScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form.errors)
         script = form.save()
 
-        self.assertEqual(name, script.name)
-        self.assertEqual(title, script.title)
-        self.assertEqual(description, script.description)
-        self.assertEqual(tags, script.tags)
-        self.assertEqual(script_type, script.script_type)
-        self.assertEqual(hardware_type, script.hardware_type)
+        self.assertEquals(name, script.name)
+        self.assertEquals(title, script.title)
+        self.assertEquals(description, script.description)
+        self.assertEquals(tags, script.tags)
+        self.assertEquals(script_type, script.script_type)
+        self.assertEquals(hardware_type, script.hardware_type)
         self.assertDictEqual(packages, script.packages)
-        self.assertEqual(parallel, script.parallel)
+        self.assertEquals(parallel, script.parallel)
         self.assertDictEqual(results, script.results)
         self.assertDictEqual(parameters, script.parameters)
-        self.assertEqual(timeout, script.timeout)
-        self.assertEqual(destructive, script.destructive)
+        self.assertEquals(timeout, script.timeout)
+        self.assertEquals(destructive, script.destructive)
         self.assertFalse(script.default)
-        self.assertEqual(script_content, script.script.data)
-        self.assertEqual(may_reboot, script.may_reboot)
+        self.assertEquals(script_content, script.script.data)
+        self.assertEquals(may_reboot, script.may_reboot)
         self.assertItemsEqual(for_hardware, script.for_hardware)
-        self.assertEqual(recommission, script.recommission)
+        self.assertEquals(recommission, script.recommission)
 
     def test_yaml_doesnt_update_tags(self):
         script = factory.make_Script()
@@ -410,7 +410,7 @@ class TestScriptForm(MAASServerTestCase):
         )
         self.assertTrue(form.is_valid(), form.errors)
         script = form.save()
-        self.assertEqual(orig_timeout, script.timeout)
+        self.assertEquals(orig_timeout, script.timeout)
 
     def test_can_use_script_type_name(self):
         script_type = factory.pick_choice(SCRIPT_TYPE_CHOICES)
@@ -424,7 +424,7 @@ class TestScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form.errors)
         script = form.save()
 
-        self.assertEqual(script_type, script.script_type)
+        self.assertEquals(script_type, script.script_type)
 
     def test_errors_on_invalid_script_type(self):
         form = ScriptForm(
@@ -453,7 +453,7 @@ class TestScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form.errors)
         script = form.save()
 
-        self.assertEqual(hardware_type, script.hardware_type)
+        self.assertEquals(hardware_type, script.hardware_type)
 
     def test_errors_on_invalid_hardware_type(self):
         form = ScriptForm(
@@ -467,7 +467,7 @@ class TestScriptForm(MAASServerTestCase):
         self.assertDictEqual(
             {
                 "hardware_type": [
-                    "Hardware type must be node, cpu, memory, storage, or gpu"
+                    "Hardware type must be node, cpu, memory, or storage"
                 ]
             },
             form.errors,
@@ -486,7 +486,7 @@ class TestScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form.errors)
         script = form.save()
 
-        self.assertEqual(script_parallel, script.parallel)
+        self.assertEquals(script_parallel, script.parallel)
 
     def test_errors_on_invalid_parallel_name(self):
         form = ScriptForm(
@@ -596,9 +596,9 @@ class TestScriptForm(MAASServerTestCase):
                 "type": script_type,
             }
         )
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
         script = form.save()
-        self.assertEqual(script_type, script.script_type)
+        self.assertEquals(script_type, script.script_type)
 
     def test_loads_yaml_embedded_attributes(self):
         embedded_yaml = {
@@ -634,33 +634,33 @@ class TestScriptForm(MAASServerTestCase):
         form = ScriptForm(data={"script": script_content})
         self.assertTrue(form.is_valid(), form.errors)
         script = form.save()
-        self.assertEqual(embedded_yaml["name"], script.name)
-        self.assertEqual(embedded_yaml["title"], script.title)
-        self.assertEqual(embedded_yaml["description"], script.description)
+        self.assertEquals(embedded_yaml["name"], script.name)
+        self.assertEquals(embedded_yaml["title"], script.title)
+        self.assertEquals(embedded_yaml["description"], script.description)
         self.assertThat(script.tags, ContainsAll(embedded_yaml["tags"]))
-        self.assertEqual(embedded_yaml["script_type"], script.script_type)
-        self.assertEqual(embedded_yaml["hardware_type"], script.hardware_type)
-        self.assertEqual(embedded_yaml["parallel"], script.parallel)
+        self.assertEquals(embedded_yaml["script_type"], script.script_type)
+        self.assertEquals(embedded_yaml["hardware_type"], script.hardware_type)
+        self.assertEquals(embedded_yaml["parallel"], script.parallel)
         self.assertItemsEqual(embedded_yaml["results"], script.results)
         self.assertItemsEqual(embedded_yaml["parameters"], script.parameters)
         self.assertDictEqual(embedded_yaml["packages"], script.packages)
-        self.assertEqual(
+        self.assertEquals(
             timedelta(0, embedded_yaml["timeout"]), script.timeout
         )
-        self.assertEqual(embedded_yaml["destructive"], script.destructive)
-        self.assertEqual(embedded_yaml["may_reboot"], script.may_reboot)
+        self.assertEquals(embedded_yaml["destructive"], script.destructive)
+        self.assertEquals(embedded_yaml["may_reboot"], script.may_reboot)
         if embedded_yaml["script_type"] == SCRIPT_TYPE.COMMISSIONING:
             self.assertItemsEqual(
                 embedded_yaml["for_hardware"], script.for_hardware
             )
-            self.assertEqual(
+            self.assertEquals(
                 embedded_yaml["recommission"], script.recommission
             )
         else:
             self.assertItemsEqual([], script.for_hardware)
             self.assertFalse(script.recommission)
         self.assertFalse(script.default)
-        self.assertEqual(script_content, script.script.data)
+        self.assertEquals(script_content, script.script.data)
 
     def test_only_loads_when_script_updated(self):
         script = factory.make_Script(
@@ -672,7 +672,7 @@ class TestScriptForm(MAASServerTestCase):
         form = ScriptForm(instance=script, data={"name": name})
         self.assertTrue(form.is_valid(), form.errors)
         script = form.save()
-        self.assertEqual(name, script.name)
+        self.assertEquals(name, script.name)
 
     def test_user_option_unable_to_over_yaml_value(self):
         name = factory.make_name("name")
@@ -698,7 +698,7 @@ class TestScriptForm(MAASServerTestCase):
                 ),
             }
         )
-        self.assertTrue(form.is_valid(), form.errors)
+        self.assertTrue(form.is_valid())
 
     def test_errors_on_bad_yaml(self):
         form = ScriptForm(
@@ -733,7 +733,7 @@ class TestScriptForm(MAASServerTestCase):
         )
         self.assertTrue(form.is_valid(), form.errors)
         script = form.save()
-        self.assertEqual(name, script.name)
+        self.assertEquals(name, script.name)
 
     def tests_yaml_tags_can_be_string(self):
         tags = [factory.make_name("tag") for _ in range(3)]
@@ -1149,8 +1149,8 @@ class TestCommissioningScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form._errors)
         form.save(request)
         new_script = Script.objects.get(name=name)
-        self.assertEqual(SCRIPT_TYPE.COMMISSIONING, new_script.script_type)
-        self.assertEqual(content, new_script.script.data)
+        self.assertEquals(SCRIPT_TYPE.COMMISSIONING, new_script.script_type)
+        self.assertEquals(content, new_script.script.data)
 
     def test_creates_commissioning_script_from_filename(self):
         request = HttpRequest()
@@ -1164,8 +1164,8 @@ class TestCommissioningScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form._errors)
         form.save(request)
         new_script = Script.objects.get(name=name)
-        self.assertEqual(SCRIPT_TYPE.COMMISSIONING, new_script.script_type)
-        self.assertEqual(content, new_script.script.data)
+        self.assertEquals(SCRIPT_TYPE.COMMISSIONING, new_script.script_type)
+        self.assertEquals(content, new_script.script.data)
 
     def test_updates_commissioning_script(self):
         request = HttpRequest()
@@ -1179,8 +1179,8 @@ class TestCommissioningScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form._errors)
         form.save(request)
         new_script = Script.objects.get(name=script.name)
-        self.assertEqual(SCRIPT_TYPE.COMMISSIONING, new_script.script_type)
-        self.assertEqual(content, new_script.script.data)
+        self.assertEquals(SCRIPT_TYPE.COMMISSIONING, new_script.script_type)
+        self.assertEquals(content, new_script.script.data)
 
     def test_creates_audit_event(self):
         request = HttpRequest()
@@ -1227,8 +1227,8 @@ class TestTestingScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form._errors)
         form.save(request)
         new_script = Script.objects.get(name=name)
-        self.assertEqual(SCRIPT_TYPE.TESTING, new_script.script_type)
-        self.assertEqual(content, new_script.script.data)
+        self.assertEquals(SCRIPT_TYPE.TESTING, new_script.script_type)
+        self.assertEquals(content, new_script.script.data)
 
     def test_creates_test_script_from_filename(self):
         request = HttpRequest()
@@ -1242,8 +1242,8 @@ class TestTestingScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form._errors)
         form.save(request)
         new_script = Script.objects.get(name=name)
-        self.assertEqual(SCRIPT_TYPE.TESTING, new_script.script_type)
-        self.assertEqual(content, new_script.script.data)
+        self.assertEquals(SCRIPT_TYPE.TESTING, new_script.script_type)
+        self.assertEquals(content, new_script.script.data)
 
     def test_updates_test_script(self):
         request = HttpRequest()
@@ -1257,8 +1257,8 @@ class TestTestingScriptForm(MAASServerTestCase):
         self.assertTrue(form.is_valid(), form._errors)
         form.save(request)
         new_script = Script.objects.get(name=script.name)
-        self.assertEqual(SCRIPT_TYPE.TESTING, new_script.script_type)
-        self.assertEqual(content, new_script.script.data)
+        self.assertEquals(SCRIPT_TYPE.TESTING, new_script.script_type)
+        self.assertEquals(content, new_script.script.data)
 
     def test_creates_audit_event(self):
         request = HttpRequest()

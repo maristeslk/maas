@@ -1,4 +1,4 @@
-# Copyright 2012-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Metadata API."""
@@ -650,14 +650,14 @@ class VersionIndexHandler(MetadataViewHandler):
         ):
             # XXX 2014-10-21 newell, bug=1382075
             # Auto detection for IPMI tries to save power parameters
-            # for Moonshot.  This causes issues if the node's power
-            # type is already mscm as it uses SSH instead of IPMI.
+            # for Moonshot and RSD.  This causes issues if the node's power
+            # type is already mscm or rsd as it uses SSH instead of IPMI.
             # This fix is temporary as power parameters should not be
             # overwritten during commissioning because MAAS already has
             # knowledge to boot the node.
             # See MP discussion bug=1389808, for further details on why
             # we are using bug fix 1382075 here.
-            if node.power_type != "mscm":
+            if node.power_type not in ("mscm", "rsd"):
                 store_node_power_parameters(node, request)
 
         signaling_statuses = {
@@ -870,7 +870,6 @@ class VersionIndexHandler(MetadataViewHandler):
         """
         node = get_queried_node(request, for_mac=mac)
         node.set_netboot(False)
-        node.set_boot_order(False)
         return rc.ALL_OK
 
     @operation(idempotent=False)
@@ -878,7 +877,6 @@ class VersionIndexHandler(MetadataViewHandler):
         """Turn on netboot on the node."""
         node = get_queried_node(request, for_mac=mac)
         node.set_netboot(True)
-        node.set_boot_order(True)
         return rc.ALL_OK
 
 
@@ -1045,9 +1043,9 @@ class UserDataHandler(MetadataViewHandler):
             # for user-data is when MAAS hands the node
             # off to a user.
             if node.status == NODE_STATUS.DEPLOYING:
-                if node.install_kvm or node.register_vmhost:
+                if node.install_kvm:
                     # Rather than ending deployment here, note that we're
-                    # deploying a VM host.
+                    # installing a KVM pod.
                     node.agent_name = "maas-kvm-pod"
                     node.save()
                 else:
@@ -1067,32 +1065,6 @@ class UserDataHandler(MetadataViewHandler):
                 )
             else:
                 user_data = NodeUserData.objects.get_user_data(node)
-                # user-data must be sent as plain text or MIME encoded. If the
-                # user uploaded user_data base64 encoded decode it.
-                try:
-                    # Check if its valid base64 data with no new lines or spaces.
-                    user_data_decoded = base64.b64decode(
-                        user_data, validate=True
-                    )
-                    user_data_stripped = None
-                except Exception:
-                    # Check if its valid base64 data with new lines or spaces.
-                    try:
-                        # Remove new lines and spaces, validator chokes on them.
-                        user_data_stripped = "".join(
-                            [x.strip() for x in user_data.decode().split()]
-                        ).encode()
-                        user_data_decoded = base64.b64decode(
-                            user_data_stripped, validate=True
-                        )
-                    except Exception:
-                        # Data can't be decoded either way, send it as is.
-                        user_data_decoded = None
-                # If the encoded user_data is the same as the decoded data its base64 encoded.
-                if user_data_decoded is not None and base64.b64encode(
-                    user_data_decoded
-                ) in {user_data, user_data_stripped}:
-                    user_data = user_data_decoded
             if node.status == NODE_STATUS.COMMISSIONING:
                 # Create a status message for GATHERING_INFO.
                 Event.objects.create_node_event(
@@ -1225,7 +1197,7 @@ class AnonMAASScriptsHandler(AnonymousOperationsHandler):
                             "name": script.name,
                             "path": path,
                             "script_version_id": script.script.id,
-                            "timeout_seconds": script.timeout.total_seconds(),
+                            "timeout_seconds": script.timeout.seconds,
                             "parallel": script.parallel,
                             "hardware_type": script.hardware_type,
                             "parameters": parameters,
@@ -1248,46 +1220,17 @@ class AnonMAASScriptsHandler(AnonymousOperationsHandler):
         )
 
 
-def get_script_result_properties(script_result):
-    return {
-        "name": script_result.name,
-        "script_result_id": script_result.id,
-        "script_version_id": script_result.script.script.id,
-        "timeout_seconds": (script_result.script.timeout.total_seconds()),
-        "parallel": script_result.script.parallel,
-        "hardware_type": script_result.script.hardware_type,
-        "parameters": script_result.parameters,
-        "packages": script_result.script.packages,
-        "for_hardware": script_result.script.for_hardware,
-        "apply_configured_networking": (
-            script_result.script.apply_configured_networking
-        ),
-        "has_started": script_result.status != SCRIPT_STATUS.PENDING,
-        "has_finished": (
-            script_result.status not in SCRIPT_STATUS_RUNNING_OR_PENDING
-        ),
-        "default": script_result.script.default,
-        "tags": script_result.script.tags,
-    }
-
-
 class MAASScriptsHandler(OperationsHandler):
 
     anonymous = AnonMAASScriptsHandler
 
-    def _add_script_set_to_tar(
-        self, script_set, tar, prefix, mtime, include_finshed=False
-    ):
+    def _add_script_set_to_tar(self, script_set, tar, prefix, mtime):
         if script_set is None:
             return []
         meta_data = []
         for script_result in script_set:
             # Don't rerun Scripts which have already run.
-            if (
-                not include_finshed
-                and script_result.status
-                not in SCRIPT_STATUS_RUNNING_OR_PENDING
-            ):
+            if script_result.status not in SCRIPT_STATUS_RUNNING_OR_PENDING:
                 continue
 
             path = os.path.join(prefix, script_result.name)
@@ -1297,11 +1240,28 @@ class MAASScriptsHandler(OperationsHandler):
                 # commissioning script. Don't expect a result.
                 script_result.delete()
                 continue
-            content = script_result.script.script.data.encode()
-            add_file_to_tar(tar, path, content, mtime)
-            md_item = get_script_result_properties(script_result)
-            md_item["path"] = path
-            if md_item["has_started"]:
+            else:
+                content = script_result.script.script.data.encode()
+                add_file_to_tar(tar, path, content, mtime)
+                md_item = {
+                    "name": script_result.name,
+                    "path": path,
+                    "script_result_id": script_result.id,
+                    "script_version_id": script_result.script.script.id,
+                    "timeout_seconds": script_result.script.timeout.seconds,
+                    "parallel": script_result.script.parallel,
+                    "hardware_type": script_result.script.hardware_type,
+                    "parameters": script_result.parameters,
+                    "packages": script_result.script.packages,
+                    "for_hardware": script_result.script.for_hardware,
+                    "apply_configured_networking": (
+                        script_result.script.apply_configured_networking
+                    ),
+                }
+            if script_result.status == SCRIPT_STATUS.PENDING:
+                md_item["has_started"] = False
+            else:
+                md_item["has_started"] = True
                 # If the script has already started send any results MAAS has
                 # received. The script runner will append these files and send
                 # them back when done.
@@ -1377,7 +1337,6 @@ class MAASScriptsHandler(OperationsHandler):
                 node.status
                 in (
                     NODE_STATUS.COMMISSIONING,
-                    NODE_STATUS.DEPLOYED,
                     NODE_STATUS.ENTERING_RESCUE_MODE,
                     NODE_STATUS.RESCUE_MODE,
                 )
@@ -1405,7 +1364,6 @@ class MAASScriptsHandler(OperationsHandler):
                     tar,
                     "commissioning",
                     mtime,
-                    include_finshed=node.status == NODE_STATUS.DEPLOYED,
                 )
                 if meta_data != []:
                     tar_meta_data["commissioning_scripts"] = sorted(
@@ -1475,7 +1433,6 @@ class AnonMetaDataHandler(VersionIndexHandler):
         """
         node = get_object_or_404(Node, system_id=system_id)
         node.set_netboot(False)
-        node.set_boot_order(False)
 
         # Build and register an event for "node installation finished".
         # This is a best-guess. At the moment, netboot_off() only gets

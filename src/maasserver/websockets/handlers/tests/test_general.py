@@ -1,4 +1,4 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Tests for `maasserver.websockets.handlers.general`"""
@@ -16,7 +16,8 @@ from maasserver.enum import (
     BOOT_RESOURCE_TYPE,
     NODE_TYPE,
 )
-from maasserver.models import Config, ControllerInfo, PackageRepository
+from maasserver.models.config import Config
+from maasserver.models.packagerepository import PackageRepository
 from maasserver.models.signals.testing import SignalsDisabled
 from maasserver.node_action import ACTIONS_DICT
 from maasserver.testing.factory import factory
@@ -24,9 +25,6 @@ from maasserver.testing.osystems import make_osystem_with_releases
 from maasserver.testing.testcase import MAASServerTestCase
 from maasserver.websockets.handlers import general
 from maasserver.websockets.handlers.general import GeneralHandler
-from provisioningserver.boot import BootMethodRegistry
-from provisioningserver.utils.snap import SnapVersionsInfo
-from provisioningserver.utils.version import MAASVersion
 
 
 class TestGeneralHandler(MAASServerTestCase):
@@ -276,48 +274,9 @@ class TestGeneralHandler(MAASServerTestCase):
     def test_version(self):
         handler = GeneralHandler(factory.make_User(), {}, None)
         self.patch_autospec(
-            general, "get_maas_version"
-        ).return_value = MAASVersion.from_string("1.2.3~rc1")
-        self.assertEqual(handler.version({}), "1.2.3~rc1")
-
-    def test_target_version(self):
-        controller = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            controller,
-            SnapVersionsInfo(
-                current={
-                    "version": "3.0.0~beta2-123-g.asdf",
-                    "revision": "1234",
-                },
-                update={
-                    "version": "3.0.0~beta3-456-g.cafe",
-                    "revision": "5678",
-                },
-                channel="3.0/beta",
-            ),
-        )
-        handler = GeneralHandler(factory.make_User(), {}, None)
-        result = handler.target_version({})
-        self.assertEqual(result["version"], "3.0.0~beta3-456-g.cafe")
-        self.assertEqual(result["snap_channel"], "3.0/beta")
-        self.assertIsNotNone(result["first_reported"])
-
-    def test_target_version_snap_cohort(self):
-        controller = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            controller,
-            SnapVersionsInfo(
-                current={
-                    "version": "3.0.0~beta2-123-g.asdf",
-                    "revision": "1234",
-                },
-                channel="3.0/beta",
-                cohort="abc",
-            ),
-        )
-        handler = GeneralHandler(factory.make_User(), {}, None)
-        result = handler.target_version({})
-        self.assertEqual(result["snap_cohort"], "abc")
+            general, "get_maas_version_ui"
+        ).return_value = sentinel.version
+        self.assertEqual(sentinel.version, handler.version({}))
 
     def test_power_types(self):
         handler = GeneralHandler(factory.make_User(), {}, None)
@@ -343,25 +302,6 @@ class TestGeneralHandler(MAASServerTestCase):
             handler.release_options({}),
         )
 
-    def test_known_boot_architectures(self):
+    def test_navigation_options(self):
         handler = GeneralHandler(factory.make_User(), {}, None)
-        self.assertEqual(
-            [
-                {
-                    "name": boot_method.name,
-                    "bios_boot_method": boot_method.bios_boot_method,
-                    "bootloader_arches": "/".join(
-                        boot_method.bootloader_arches
-                    ),
-                    "arch_octet": boot_method.arch_octet,
-                    "protocol": (
-                        "http"
-                        if boot_method.http_url or boot_method.user_class
-                        else "tftp"
-                    ),
-                }
-                for _, boot_method in BootMethodRegistry
-                if boot_method.arch_octet or boot_method.user_class
-            ],
-            handler.known_boot_architectures({}),
-        )
+        self.assertEqual({"rsd": False}, handler.navigation_options({}))

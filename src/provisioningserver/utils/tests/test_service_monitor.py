@@ -34,7 +34,7 @@ from maastesting.runtest import MAASTwistedRunTest
 from maastesting.testcase import MAASTestCase
 from maastesting.twisted import always_fail_with
 from provisioningserver.utils import service_monitor as service_monitor_module
-from provisioningserver.utils import snap
+from provisioningserver.utils import snappy
 from provisioningserver.utils.service_monitor import (
     Service,
     SERVICE_STATE,
@@ -47,7 +47,6 @@ from provisioningserver.utils.service_monitor import (
     ToggleableService,
 )
 from provisioningserver.utils.shell import get_env_with_bytes_locale
-from provisioningserver.utils.snap import SnapPaths
 from provisioningserver.utils.twisted import pause
 
 EMPTY_SET = frozenset()
@@ -176,8 +175,8 @@ class TestServiceMonitor(MAASTestCase):
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
 
-    def run_under_snap(self):
-        self.patch(snap, "running_in_snap").return_value = True
+    def run_under_snappy(self):
+        self.patch(snappy, "running_in_snap").return_value = True
 
     def make_service_monitor(self, fake_services=None):
         if fake_services is None:
@@ -194,7 +193,7 @@ class TestServiceMonitor(MAASTestCase):
     def test_getServiceByName_returns_service(self):
         fake_service = make_fake_service()
         service_monitor = self.make_service_monitor([fake_service])
-        self.assertEqual(
+        self.assertEquals(
             fake_service, service_monitor.getServiceByName(fake_service.name)
         )
 
@@ -216,11 +215,11 @@ class TestServiceMonitor(MAASTestCase):
             name, active_state, process_state
         )
         state = service_monitor._serviceStates[name]
-        self.assertEqual(
+        self.assertEquals(
             (active_state, process_state),
             (state.active_state, state.process_state),
         )
-        self.assertEqual(state, observed_state)
+        self.assertEquals(state, observed_state)
 
     @inlineCallbacks
     def test_updateServiceState_does_not_hold_service_lock(self):
@@ -251,11 +250,11 @@ class TestServiceMonitor(MAASTestCase):
             fake_service.name, now=True
         )
         state = service_monitor._serviceStates[fake_service.name]
-        self.assertEqual(
+        self.assertEquals(
             (active_state, process_state),
             (state.active_state, state.process_state),
         )
-        self.assertEqual(state, observed_state)
+        self.assertEquals(state, observed_state)
         self.assertThat(
             mock_loadSystemDServiceState, MockCalledOnceWith(fake_service)
         )
@@ -271,11 +270,11 @@ class TestServiceMonitor(MAASTestCase):
             fake_service.name, now=False
         )
         state = service_monitor._serviceStates[fake_service.name]
-        self.assertEqual(
+        self.assertEquals(
             (SERVICE_STATE.UNKNOWN, None),
             (state.active_state, state.process_state),
         )
-        self.assertEqual(state, observed_state)
+        self.assertEquals(state, observed_state)
         self.assertThat(mock_loadSystemDServiceState, MockNotCalled())
 
     @inlineCallbacks
@@ -293,7 +292,7 @@ class TestServiceMonitor(MAASTestCase):
             service_monitor, "ensureService"
         ).side_effect = lambda name: succeed(expected_states[name])
         observed = yield service_monitor.ensureServices()
-        self.assertEqual(expected_states, observed)
+        self.assertEquals(expected_states, observed)
 
     @inlineCallbacks
     def test_ensureServices_handles_errors(self):
@@ -347,7 +346,7 @@ class TestServiceMonitor(MAASTestCase):
         mock_ensureService = self.patch(service_monitor, "_ensureService")
         mock_ensureService.return_value = succeed(service_state)
         observed = yield service_monitor.ensureService(fake_service.name)
-        self.assertEqual(service_state, observed)
+        self.assertEquals(service_state, observed)
         self.assertThat(mock_ensureService, MockCalledOnceWith(fake_service))
 
     @inlineCallbacks
@@ -369,7 +368,7 @@ class TestServiceMonitor(MAASTestCase):
         mock_getServiceState = self.patch(service_monitor, "getServiceState")
         mock_getServiceState.return_value = succeed(service_state)
         observed = yield service_monitor.restartService(fake_service.name)
-        self.assertEqual(service_state, observed)
+        self.assertEquals(service_state, observed)
         self.assertThat(
             mock_getServiceState,
             MockCalledOnceWith(fake_service.name, now=True),
@@ -619,9 +618,7 @@ class TestServiceMonitor(MAASTestCase):
     @inlineCallbacks
     def test_execSupervisorServiceAction_calls_supervisorctl(self):
         snap_path = factory.make_name("path")
-        self.patch(snap.SnapPaths, "from_environ").return_value = SnapPaths(
-            snap=snap_path
-        )
+        self.patch(snappy, "get_snap_path").return_value = snap_path
         service_monitor = self.make_service_monitor()
         service_name = factory.make_name("service")
         action = factory.make_name("action")
@@ -648,9 +645,7 @@ class TestServiceMonitor(MAASTestCase):
     @inlineCallbacks
     def test_execSupervisorServiceAction_emulates_kill(self):
         snap_path = factory.make_name("path")
-        self.patch(snap.SnapPaths, "from_environ").return_value = SnapPaths(
-            snap=snap_path
-        )
+        self.patch(snappy, "get_snap_path").return_value = snap_path
         service_monitor = self.make_service_monitor()
         service_name = factory.make_name("service")
         fake_pid = random.randint(1, 100)
@@ -693,9 +688,7 @@ class TestServiceMonitor(MAASTestCase):
         example_stdout = example_text[: len(example_text) // 2]
         example_stderr = example_text[len(example_text) // 2 :]
         snap_path = factory.make_name("path")
-        self.patch(snap.SnapPaths, "from_environ").return_value = SnapPaths(
-            snap=snap_path
-        )
+        self.patch(snappy, "get_snap_path").return_value = snap_path
         service_monitor = self.make_service_monitor()
         mock_getProcessOutputAndValue = self.patch(
             service_monitor_module, "getProcessOutputAndValue"
@@ -742,7 +735,7 @@ class TestServiceMonitor(MAASTestCase):
 
     @inlineCallbacks
     def test_performServiceAction_holds_lock_perform_supervisor_action(self):
-        self.run_under_snap()
+        self.run_under_snappy()
         service = make_fake_service(SERVICE_STATE.ON)
         service_monitor = self.make_service_monitor()
         service_locks = service_monitor._serviceLocks
@@ -818,7 +811,7 @@ class TestServiceMonitor(MAASTestCase):
         )
 
     def test_loadServiceState_uses_supervisor(self):
-        self.run_under_snap()
+        self.run_under_snappy()
         service = make_fake_service(SERVICE_STATE.ON)
         service_monitor = self.make_service_monitor([service])
         mock_loadSupervisorServiceState = self.patch(

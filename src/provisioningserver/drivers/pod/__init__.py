@@ -116,9 +116,17 @@ class Capabilities:
     # implement the `compose` and `decompose` methods when set.
     COMPOSABLE = "composable"
 
+    # Supports fixed local storage. Block devices are fixed in size locally
+    # and its possible to get a disk larger than requested.
+    FIXED_LOCAL_STORAGE = "fixed_local_storage"
+
     # Supports dynamic local storage. Block devices are dynamically created,
     # attached locally and will always be the exact requested size.
     DYNAMIC_LOCAL_STORAGE = "dynamic_local_storage"
+
+    # Supports built-in iscsi storage. Remote block devices can be created of
+    # exact size with this pod connected storage systems.
+    ISCSI_STORAGE = "iscsi_storage"
 
     # Ability to overcommit the cores and memory of the pod. Mainly used
     # for virtual pod.
@@ -129,11 +137,22 @@ class Capabilities:
     STORAGE_POOLS = "storage_pools"
 
 
+class BlockDeviceType:
+    """Different types of block devices."""
+
+    # Block device is connected physically to the discovered machine.
+    PHYSICAL = "physical"
+
+    # Block device is connected to the discovered device over iSCSI.
+    ISCSI = "iscsi"
+
+
 class InterfaceAttachType:
     """Different interface attachment types."""
 
-    # Interface attached to a network predefined in the hypervisor. This is
-    # used only by the Virsh driver.
+    # Interface attached to a network predefined in the hypervisor.
+    # (This is the default if no constraints are specified; MAAS will look for
+    # a 'maas' network, and then fall back to a 'default' network.)
     NETWORK = "network"
 
     # Interface attached to a bridge interface on the hypervisor.
@@ -154,16 +173,21 @@ InterfaceAttachTypeChoices = (
 )
 
 
+class AttrHelperMixin:
+    """Mixin to add the `fromdict` and `asdict` to the classes."""
+
+    @classmethod
+    def fromdict(cls, data):
+        """Convert from a dictionary."""
+        return cls(**data)
+
+    def asdict(self):
+        """Convert to a dictionary."""
+        return attr.asdict(self)
+
+
 @attr.s
-class DiscoveredPodProject:
-    """Discovered project in a pod."""
-
-    name = attr.ib(converter=str)
-    description = attr.ib(converter=str)
-
-
-@attr.s
-class DiscoveredMachineInterface:
+class DiscoveredMachineInterface(AttrHelperMixin):
     """Discovered machine interface."""
 
     mac_address = attr.ib(converter=converter_obj(str, optional=True))
@@ -179,7 +203,7 @@ class DiscoveredMachineInterface:
 
 
 @attr.s
-class DiscoveredMachineBlockDevice:
+class DiscoveredMachineBlockDevice(AttrHelperMixin):
     """Discovered machine block device."""
 
     model = attr.ib(converter=converter_obj(str, optional=True))
@@ -190,6 +214,7 @@ class DiscoveredMachineBlockDevice:
     id_path = attr.ib(
         converter=converter_obj(str, optional=True), default=None
     )
+    type = attr.ib(converter=str, default=BlockDeviceType.PHYSICAL)
 
     # Optional id of the storage pool this block device exists on. Only
     # used when the Pod supports STORAGE_POOLS.
@@ -197,9 +222,16 @@ class DiscoveredMachineBlockDevice:
         converter=converter_obj(str, optional=True), default=None
     )
 
+    # Used when `type` is set to `BlockDeviceType.ISCSI`. The pod driver must
+    # define an `iscsi_target` or it will not create the device for the
+    # discovered machine.
+    iscsi_target = attr.ib(
+        converter=converter_obj(str, optional=True), default=None
+    )
+
 
 @attr.s
-class DiscoveredMachine:
+class DiscoveredMachine(AttrHelperMixin):
     """Discovered machine."""
 
     architecture = attr.ib(converter=str)
@@ -224,18 +256,9 @@ class DiscoveredMachine:
         converter=converter_obj(str, optional=True), default=None
     )
 
-    @property
-    def instance_name(self):
-        """Return the name of the discovered VM, or None."""
-        return self.power_parameters.get(
-            "instance_name"
-        ) or self.power_parameters.get(  # for LXD
-            "power_id"
-        )  # for virsh
-
 
 @attr.s
-class DiscoveredPodStoragePool:
+class DiscoveredPodStoragePool(AttrHelperMixin):
     """Discovered pod storage pool.
 
     Provide information on the storage pool.
@@ -249,7 +272,7 @@ class DiscoveredPodStoragePool:
 
 
 @attr.s
-class DiscoveredPodHints:
+class DiscoveredPodHints(AttrHelperMixin):
     """Discovered pod hints.
 
     Hints provide helpful information to a user trying to compose a machine.
@@ -260,15 +283,16 @@ class DiscoveredPodHints:
     cpu_speed = attr.ib(converter=int, default=-1)
     memory = attr.ib(converter=int, default=-1)
     local_storage = attr.ib(converter=int, default=-1)
+    local_disks = attr.ib(converter=int, default=-1)
+    iscsi_storage = attr.ib(converter=int, default=-1)
 
 
 @attr.s
-class DiscoveredPod:
+class DiscoveredPod(AttrHelperMixin):
     """Discovered pod information."""
 
     architectures = attr.ib(converter=converter_list(str))
     name = attr.ib(converter=converter_obj(str, optional=True), default=None)
-    version = attr.ib(converter=converter_obj(str, optional=True), default="")
     cores = attr.ib(converter=int, default=-1)
     cpu_speed = attr.ib(converter=int, default=-1)
     memory = attr.ib(converter=int, default=-1)
@@ -277,13 +301,15 @@ class DiscoveredPod:
         converter=converter_obj(DiscoveredPodHints),
         default=DiscoveredPodHints(),
     )
+    local_disks = attr.ib(converter=int, default=-1)
+    iscsi_storage = attr.ib(converter=int, default=-1)
     # XXX - This should be the hardware UUID but LXD doesn't provide it.
     mac_addresses = attr.ib(
         converter=converter_list(str), default=attr.Factory(list)
     )
     capabilities = attr.ib(
         converter=converter_list(str),
-        default=attr.Factory(list),
+        default=attr.Factory(lambda: [Capabilities.FIXED_LOCAL_STORAGE]),
     )
     machines = attr.ib(
         converter=converter_list(DiscoveredMachine), default=attr.Factory(list)
@@ -296,7 +322,7 @@ class DiscoveredPod:
 
 
 @attr.s
-class RequestedMachineBlockDevice:
+class RequestedMachineBlockDevice(AttrHelperMixin):
     """Requested machine block device information."""
 
     size = attr.ib(converter=int)
@@ -304,7 +330,7 @@ class RequestedMachineBlockDevice:
 
 
 @attr.s
-class RequestedMachineInterface:
+class RequestedMachineInterface(AttrHelperMixin):
     """Requested machine interface information."""
 
     ifname = attr.ib(converter=converter_obj(str, optional=True), default=None)
@@ -329,7 +355,7 @@ class RequestedMachineInterface:
 
 
 @attr.s
-class KnownHostInterface:
+class KnownHostInterface(AttrHelperMixin):
     """Known host interface information."""
 
     ifname = attr.ib(converter=str, default=None)
@@ -342,7 +368,7 @@ class KnownHostInterface:
 
 
 @attr.s
-class RequestedMachine:
+class RequestedMachine(AttrHelperMixin):
     """Requested machine information."""
 
     hostname = attr.ib(converter=str)
@@ -367,6 +393,15 @@ class RequestedMachine:
         default=attr.Factory(list),
     )
     hugepages_backed = attr.ib(converter=bool, default=False)
+
+    @classmethod
+    def fromdict(cls, data):
+        """Convert from a dictionary."""
+        return cls(**data)
+
+    def asdict(self):
+        """Convert to a dictionary."""
+        return attr.asdict(self)
 
 
 class PodDriverBase(PowerDriverBase):
@@ -421,23 +456,6 @@ class PodDriverBase(PowerDriverBase):
         )
         schema["driver_type"] = "pod"
         return schema
-
-    def get_default_interface_parent(self, known_host_interfaces):
-        """Return the default KnownHostInterface to connect interfaces to.
-
-        If no valid parent interfaces are found, None is returned.
-        """
-        attach_preference = [
-            InterfaceAttachType.BRIDGE,
-            InterfaceAttachType.SRIOV,
-            InterfaceAttachType.NETWORK,
-            InterfaceAttachType.MACVLAN,
-        ]
-        return min(
-            (iface for iface in known_host_interfaces if iface.dhcp_enabled),
-            default=None,
-            key=lambda iface: attach_preference.index(iface.attach_type),
-        )
 
 
 def get_error_message(err):

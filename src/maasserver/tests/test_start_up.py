@@ -7,15 +7,15 @@
 import random
 from unittest.mock import call
 
-from testtools.matchers import HasLength, Is, Not
+from testtools.matchers import HasLength, Is, IsInstance, Not
 from twisted.internet import reactor
+from twisted.internet.defer import Deferred
 
 from maasserver import eventloop, locks, start_up
 from maasserver.models.config import Config
 from maasserver.models.node import RegionController
 from maasserver.models.notification import Notification
 from maasserver.models.signals import bootsources
-from maasserver.testing.config import RegionConfigurationFixture
 from maasserver.testing.eventloop import RegionEventLoopFixture
 from maasserver.testing.factory import factory
 from maasserver.testing.testcase import (
@@ -24,15 +24,15 @@ from maasserver.testing.testcase import (
 )
 from maasserver.utils.orm import post_commit_hooks, reload_object
 from maastesting.matchers import (
+    DocTestMatches,
     MockCalledOnceWith,
     MockCallsMatch,
     MockNotCalled,
 )
+from maastesting.twisted import extract_result, TwistedLoggerFixture
 from provisioningserver.drivers.osystem.ubuntu import UbuntuOS
-from provisioningserver.utils import ipaddr
 from provisioningserver.utils.env import get_maas_id
 from provisioningserver.utils.testing import MAASIDFixture
-from provisioningserver.utils.version import get_running_version
 
 
 class TestStartUp(MAASTransactionServerTestCase):
@@ -46,7 +46,6 @@ class TestStartUp(MAASTransactionServerTestCase):
     def setUp(self):
         super().setUp()
         self.useFixture(RegionEventLoopFixture())
-        self.patch(ipaddr, "get_ip_addr").return_value = {}
 
     def tearDown(self):
         super().tearDown()
@@ -95,7 +94,6 @@ class TestInnerStartUp(MAASServerTestCase):
         self.useFixture(MAASIDFixture(None))
         self.patch_autospec(start_up, "dns_kms_setting_changed")
         self.patch_autospec(start_up, "post_commit_do")
-        self.patch(ipaddr, "get_ip_addr").return_value = {}
         # Disable boot source cache signals.
         self.addCleanup(bootsources.signals.enable)
         bootsources.signals.disable()
@@ -129,7 +127,7 @@ class TestInnerStartUp(MAASServerTestCase):
         with post_commit_hooks:
             start_up.inner_start_up(master=True)
         ubuntu = UbuntuOS()
-        self.assertEqual(
+        self.assertEquals(
             Config.objects.get_config("commissioning_distro_series"),
             ubuntu.get_default_commissioning_release(),
         )
@@ -144,7 +142,7 @@ class TestInnerStartUp(MAASServerTestCase):
         Config.objects.set_config("commissioning_distro_series", release)
         with post_commit_hooks:
             start_up.inner_start_up(master=False)
-        self.assertEqual(
+        self.assertEquals(
             Config.objects.get_config("commissioning_distro_series"), release
         )
         self.assertFalse(
@@ -153,38 +151,14 @@ class TestInnerStartUp(MAASServerTestCase):
             ).exists()
         )
 
-    def test_sets_maas_url_master(self):
-        Config.objects.set_config("maas_url", "http://default.example.com/")
-        self.useFixture(
-            RegionConfigurationFixture(maas_url="http://custom.example.com/")
-        )
-        with post_commit_hooks:
-            start_up.inner_start_up(master=True)
-
-        self.assertEqual(
-            "http://custom.example.com/", Config.objects.get_config("maas_url")
-        )
-
-    def test_sets_maas_url_not_master(self):
-        Config.objects.set_config("maas_url", "http://default.example.com/")
-        self.useFixture(
-            RegionConfigurationFixture(maas_url="http://my.example.com/")
-        )
-        with post_commit_hooks:
-            start_up.inner_start_up(master=False)
-
-        self.assertEqual(
-            "http://default.example.com/",
-            Config.objects.get_config("maas_url"),
-        )
-
-    def test_generates_certificate_if_master(self):
+    def test_calls_refresh_and_generates_certificate_if_master(self):
         with post_commit_hooks:
             start_up.inner_start_up(master=True)
         region = RegionController.objects.first()
         self.assertThat(
             start_up.post_commit_do,
             MockCallsMatch(
+                call(reactor.callLater, 0, start_up.refreshRegion, region),
                 call(
                     reactor.callLater,
                     0,
@@ -237,8 +211,28 @@ class TestInnerStartUp(MAASServerTestCase):
             0,
         )
 
-    def test_updates_version(self):
-        with post_commit_hooks:
-            start_up.inner_start_up()
-        region = RegionController.objects.first()
-        self.assertEqual(region.version, str(get_running_version()))
+
+class TestFunctions(MAASServerTestCase):
+    """Tests for other functions in the `start_up` module."""
+
+    def test_regionRefresh_refreshes_a_region(self):
+        region = factory.make_RegionController()
+        self.patch(region, "refresh").return_value = Deferred()
+        d = start_up.refreshRegion(region)
+        self.assertThat(d, IsInstance(Deferred))
+        exception = factory.make_exception_type()
+        with TwistedLoggerFixture() as logger:
+            d.errback(exception("boom"))
+            # The exception is suppressed ...
+            self.assertThat(extract_result(d), Is(None))
+        # ... but it has been logged.
+        self.assertThat(
+            logger.output,
+            DocTestMatches(
+                """
+                Failure when refreshing region.
+                Traceback (most recent call last):...
+                Failure: maastesting.factory.TestException#...: boom
+                """
+            ),
+        )

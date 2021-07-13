@@ -1,4 +1,4 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 __all__ = [
@@ -34,9 +34,9 @@ from maasserver.api.nodes import (
     AnonNodesHandler,
     NodeHandler,
     NodesHandler,
+    OwnerDataMixin,
     PowerMixin,
     PowersMixin,
-    WorkloadAnnotationsMixin,
 )
 from maasserver.api.support import admin_method, operation
 from maasserver.api.utils import (
@@ -70,10 +70,7 @@ from maasserver.forms import (
     MachineForm,
 )
 from maasserver.forms.clone import CloneForm
-from maasserver.forms.ephemeral import (
-    CommissionForm,
-    CreateScriptsForDeployedForm,
-)
+from maasserver.forms.ephemeral import CommissionForm
 from maasserver.forms.filesystem import (
     MountNonStorageFilesystemForm,
     UnmountNonStorageFilesystemForm,
@@ -83,6 +80,7 @@ from maasserver.models import (
     Config,
     Domain,
     Interface,
+    ISCSIBlockDevice,
     Machine,
     NodeMetadata,
     PhysicalBlockDevice,
@@ -158,6 +156,7 @@ DISPLAYED_MACHINE_FIELDS = (
     "constraints_by_type",
     "boot_disk",
     "blockdevice_set",
+    "iscsiblockdevice_set",
     "physicalblockdevice_set",
     "virtualblockdevice_set",
     "volume_groups",
@@ -192,7 +191,6 @@ DISPLAYED_MACHINE_FIELDS = (
     "interface_test_status_name",
     ("numanode_set", DISPLAYED_NUMANODE_FIELDS),
     "virtualmachine_id",
-    "workload_annotations",
 )
 
 # Limited set of machine fields exposed on the anonymous API.
@@ -224,7 +222,6 @@ AllocationOptions = namedtuple(
         "comment",
         "install_rackd",
         "install_kvm",
-        "register_vmhost",
         "ephemeral_deploy",
     ),
 )
@@ -265,13 +262,10 @@ def get_allocation_options(request) -> AllocationOptions:
     install_kvm = get_optional_param(
         request.POST, "install_kvm", default=False, validator=StringBool
     )
-    register_vmhost = get_optional_param(
-        request.POST, "register_vmhost", default=False, validator=StringBool
-    )
     ephemeral_deploy = get_optional_param(
         request.POST, "ephemeral_deploy", default=False, validator=StringBool
     )
-    if (install_kvm or register_vmhost) and not ephemeral_deploy:
+    if install_kvm and not ephemeral_deploy:
         default_bridge_all = True
     bridge_all = get_optional_param(
         request.POST,
@@ -306,7 +300,6 @@ def get_allocation_options(request) -> AllocationOptions:
         comment,
         install_rackd,
         install_kvm,
-        register_vmhost,
         ephemeral_deploy,
     )
 
@@ -358,7 +351,7 @@ def get_allocated_composed_machine(
     return machine, storage, interfaces
 
 
-class MachineHandler(NodeHandler, WorkloadAnnotationsMixin, PowerMixin):
+class MachineHandler(NodeHandler, OwnerDataMixin, PowerMixin):
     """
     Manage an individual machine.
 
@@ -426,6 +419,15 @@ class MachineHandler(NodeHandler, WorkloadAnnotationsMixin, PowerMixin):
             }
         else:
             return None
+
+    @classmethod
+    def iscsiblockdevice_set(handler, machine):
+        """Use precached queries instead of attribute on the object."""
+        return [
+            block_device.actual_instance
+            for block_device in machine.blockdevice_set.all()
+            if isinstance(block_device.actual_instance, ISCSIBlockDevice)
+        ]
 
     @classmethod
     def physicalblockdevice_set(handler, machine):
@@ -698,9 +700,6 @@ class MachineHandler(NodeHandler, WorkloadAnnotationsMixin, PowerMixin):
         @param (boolean) "install_kvm" [required=false] If true, KVM will be
         installed on this machine and added to MAAS.
 
-        @param (boolean) "register_vmhost" [required=false] If true, the
-        machine will be registered as a LXD VM host in MAAS.
-
         @param (boolean) "ephemeral_deploy" [required=false] If true, machine
         will be deployed ephemerally even if it has disks.
 
@@ -737,19 +736,19 @@ class MachineHandler(NodeHandler, WorkloadAnnotationsMixin, PowerMixin):
         # Deploying a node requires re-checking for EDIT permissions.
         if not request.user.has_perm(NodePermission.edit, machine):
             raise PermissionDenied()
+        # Deploying with 'install_rackd' requires ADMIN permissions.
         if options.install_rackd and not request.user.has_perm(
             NodePermission.admin, machine
         ):
-            raise PermissionDenied("Only administrators can deploy MAAS racks")
-        if (
-            options.install_kvm or options.register_vmhost
-        ) and not request.user.has_perm(NodePermission.admin, machine):
-            raise PermissionDenied("Only administratros can deploy VM hosts")
-        if (
-            options.install_kvm or options.register_vmhost
-        ) and machine.ephemeral_deployment:
+            raise PermissionDenied()
+        # Deploying with 'install_kvm' requires ADMIN permissions.
+        if options.install_kvm and not request.user.has_perm(
+            NodePermission.admin, machine
+        ):
+            raise PermissionDenied()
+        if options.install_kvm and machine.ephemeral_deployment:
             raise MAASAPIBadRequest(
-                "Cannot deploy as a VM host for ephemeral deployments."
+                "Cannot install KVM host for ephemeral deployments."
             )
         if machine.status == NODE_STATUS.READY:
             with locks.node_acquire:
@@ -849,7 +848,7 @@ class MachineHandler(NodeHandler, WorkloadAnnotationsMixin, PowerMixin):
 
         @param (string) "{system_id}" [required=true] The machines's system_id.
 
-        @param (string) "comment" [required=false] Optional comment for the
+        @param (string) "comment" [required=true] Optional comment for the
         event log.
 
         @param (boolean) "erase" [required=false] Erase the disk when
@@ -1985,26 +1984,15 @@ class MachinesHandler(NodesHandler, PowersMixin):
         commission = get_optional_param(
             request.data, "commission", default=True, validator=StringBool
         )
-        deployed = get_optional_param(
-            request.data, "deployed", default=False, validator=StringBool
-        )
         machine = create_machine(request)
-        if request.user.is_superuser:
-            if deployed:
-                form = CreateScriptsForDeployedForm(
-                    instance=machine,
-                    data=request.data,
-                )
-                form.save()
-            elif commission:
-                form = CommissionForm(
-                    instance=machine, user=request.user, data=request.data
-                )
-                # Silently ignore errors to prevent 500 errors. The commissioning
-                # callbacks have their own logging. This fixes LP:1600328.
-                if form.is_valid():
-                    machine = form.save()
-
+        if request.user.is_superuser and commission:
+            form = CommissionForm(
+                instance=machine, user=request.user, data=request.data
+            )
+            # Silently ignore errors to prevent 500 errors. The commissioning
+            # callbacks have their own logging. This fixes LP1600328.
+            if form.is_valid():
+                machine = form.save()
         return machine
 
     def _check_system_ids_exist(self, system_ids):
@@ -2398,19 +2386,6 @@ class MachinesHandler(NodesHandler, PowersMixin):
         @param (int) "bridge_fd" [required=false] Optionally adjust the forward
         delay to time seconds.  (Default: 15)
 
-        @param (string) "devices": [required=false] Only return a node which
-        have one or more devices containing the following constraints in the
-        format key=value[,key2=value2[,...]]
-
-        Each key can be one of the following:
-
-        - ``vendor_id``: The device vendor id
-        - ``product_id``: The device product id
-        - ``vendor_name``: The device vendor name, not case sensative
-        - ``product_name``: The device product name, not case sensative
-        - ``commissioning_driver``: The device uses this driver during
-          commissioning.
-
         @param (boolean) "dry_run" [required=false] Optional boolean to
         indicate that the machine should not actually be acquired (this is for
         support/troubleshooting, or users who want to see which machine would
@@ -2597,11 +2572,9 @@ class MachinesHandler(NodesHandler, PowersMixin):
         @param (string) "chassis_type" [required=true,formatting=true] The type
         of hardware:
 
-        - ``hmcz``: IBM Hardware Management Console (HMC) for Z
         - ``mscm``: Moonshot Chassis Manager.
         - ``msftocs``: Microsoft OCS Chassis Manager.
         - ``powerkvm``: Virtual Machines on Power KVM, managed by Virsh.
-        - ``proxmox``: Virtual Machines managed by Proxmox
         - ``recs_box``: Christmann RECS|Box servers.
         - ``sm15k``: Seamicro 1500 Chassis.
         - ``ucsm``: Cisco UCS Manager.
@@ -2613,12 +2586,12 @@ class MachinesHandler(NodesHandler, PowersMixin):
 
         @param (string) "username" [required=false] The username used to access
         the chassis. This field is required for the recs_box, seamicro15k,
-        vmware, mscm, msftocs, ucsm, and hmcz chassis types.
+        vmware, mscm, msftocs, and ucsm chassis types.
 
         @param (string) "password" [required=false] The password used to access
         the chassis. This field is required for the ``recs_box``,
-        ``seamicro15k``, ``vmware``, ``mscm``, ``msftocs``, ``ucsm``, and
-        ``hmcz`` chassis types.
+        ``seamicro15k``, ``vmware``, ``mscm``, ``msftocs``, and ``ucsm``
+        chassis types.
 
         @param (string) "accept_all" [required=false] If true, all enlisted
         machines will be commissioned.
@@ -2631,23 +2604,10 @@ class MachinesHandler(NodesHandler, PowersMixin):
         machine added should use.
 
         @param (string) "prefix_filter" [required=false] (``virsh``,
-        ``vmware``, ``powerkvm``, ``proxmox``, ``hmcz`` only.) Filter machines
-        with supplied prefix.
+        ``vmware``, ``powerkvm`` only.) Filter machines with supplied prefix.
 
         @param (string) "power_control" [required=false] (``seamicro15k`` only)
         The power_control to use, either ipmi (default), restapi, or restapi2.
-
-        The following are optional if you are adding a proxmox chassis.
-
-        @param (string) "token_name" [required=false] The name the
-        authentication token to be used instead of a password.
-
-        @param (string) "token_secret" [required=false] The token secret
-        to be used in combination with the power_token_name used in place of
-        a password.
-
-        @param (boolean) "verify_ssl" [required=false] Whether SSL
-        connections should be verified.
 
         The following are optional if you are adding a recs_box, vmware or
         msftocs chassis.
@@ -2655,7 +2615,7 @@ class MachinesHandler(NodesHandler, PowersMixin):
         @param (int) "port" [required=false] (``recs_box``, ``vmware``,
         ``msftocs`` only) The port to use when accessing the chassis.
 
-        The following are optional if you are adding a vmware chassis:
+        The following are optioanl if you are adding a vmware chassis:
 
         @param (string) "protocol" [required=false] (``vmware`` only) The
         protocol to use when accessing the VMware chassis (default: https).
@@ -2686,7 +2646,6 @@ class MachinesHandler(NodesHandler, PowersMixin):
         hostname = get_mandatory_param(request.POST, "hostname")
 
         if chassis_type in (
-            "hmcz",
             "mscm",
             "msftocs",
             "recs_box",
@@ -2696,31 +2655,9 @@ class MachinesHandler(NodesHandler, PowersMixin):
         ):
             username = get_mandatory_param(request.POST, "username")
             password = get_mandatory_param(request.POST, "password")
-            token_name = None
-            token_secret = None
-        elif chassis_type == "proxmox":
-            username = get_mandatory_param(request.POST, "username")
-            password = get_optional_param(request.POST, "password")
-            token_name = get_optional_param(request.POST, "token_name")
-            token_secret = get_optional_param(request.POST, "token_secret")
-            if not any([password, token_name, token_secret]):
-                return HttpResponseBadRequest(
-                    "You must use a password or token with Proxmox."
-                )
-            elif all([password, token_name, token_secret]):
-                return HttpResponseBadRequest(
-                    "You may only use a password or token with Proxmox, "
-                    "not both."
-                )
-            elif password is None and not all([token_name, token_secret]):
-                return HttpResponseBadRequest(
-                    "Proxmox requires both a token_name and token_secret."
-                )
         else:
             username = get_optional_param(request.POST, "username")
             password = get_optional_param(request.POST, "password")
-            token_name = None
-            token_secret = None
             if username is not None and chassis_type in ("powerkvm", "virsh"):
                 return HttpResponseBadRequest(
                     "username can not be specified when using the %s chassis."
@@ -2736,14 +2673,12 @@ class MachinesHandler(NodesHandler, PowersMixin):
         else:
             accept_all = False
 
-        # Only available with virsh, vmware, powerkvm, and proxmox
+        # Only available with virsh, vmware, and powerkvm
         prefix_filter = get_optional_param(request.POST, "prefix_filter")
         if prefix_filter is not None and chassis_type not in (
-            "hmcz",
             "powerkvm",
             "virsh",
             "vmware",
-            "proxmox",
         ):
             return HttpResponseBadRequest(
                 "prefix_filter is unavailable with the %s chassis type"
@@ -2794,10 +2729,6 @@ class MachinesHandler(NodesHandler, PowersMixin):
                     "text/plain; charset=%s" % settings.DEFAULT_CHARSET
                 ),
             )
-
-        verify_ssl = get_optional_param(
-            request.POST, "verify_ssl", default=False, validator=StringBool
-        )
 
         # If given a domain make sure it exists first
         domain_name = get_optional_param(request.POST, "domain")
@@ -2855,9 +2786,6 @@ class MachinesHandler(NodesHandler, PowersMixin):
                 power_control,
                 port,
                 protocol,
-                token_name,
-                token_secret,
-                verify_ssl,
             )
 
         return HttpResponse(

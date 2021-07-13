@@ -29,10 +29,12 @@ from maasserver.enum import (
     NODE_TYPE_CHOICES,
 )
 from maasserver.listener import PostgresListenerService
-from maasserver.models import Config, ControllerInfo, Node, OwnerData
+from maasserver.models import ControllerInfo
 from maasserver.models.blockdevice import MIN_BLOCK_DEVICE_SIZE
+from maasserver.models.config import Config
+from maasserver.models.node import Node
 from maasserver.models.partition import MIN_PARTITION_SIZE
-from maasserver.storage_layouts import MIN_BOOT_PARTITION_SIZE
+from maasserver.models.switch import Switch
 from maasserver.testing import get_data
 from maasserver.testing.factory import factory
 from maasserver.testing.fixtures import UserSkipCreateAuthorisationTokenFixture
@@ -46,7 +48,6 @@ from maasserver.utils.orm import transactional
 from maasserver.utils.threads import deferToDatabase
 from metadataserver.builtin_scripts import load_builtin_scripts
 from metadataserver.enum import SCRIPT_STATUS
-from provisioningserver.utils.snap import SnapVersionsInfo
 from provisioningserver.utils.twisted import (
     asynchronous,
     DeferredValue,
@@ -109,11 +110,7 @@ class TestNodeListener(
         (
             "machine",
             {
-                "params": {
-                    "node_type": NODE_TYPE.MACHINE,
-                    # This is needed to avoid updating the node after creating it
-                    "with_boot_disk": False,
-                },
+                "params": {"node_type": NODE_TYPE.MACHINE},
                 "listener": "machine",
             },
         ),
@@ -173,26 +170,6 @@ class TestNodeListener(
                 self.update_node,
                 node.system_id,
                 {"hostname": factory.make_name("hostname")},
-            )
-            yield dv.get(timeout=2)
-            self.assertEqual(("update", node.system_id), dv.value)
-        finally:
-            yield listener.stopService()
-
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_calls_handler_on_description_update(self):
-        yield deferToDatabase(register_websocket_triggers)
-        listener = self.make_listener_without_delay()
-        dv = DeferredValue()
-        listener.register(self.listener, lambda *args: dv.set(args))
-        node = yield deferToDatabase(self.create_node, self.params)
-        yield listener.startService()
-        try:
-            yield deferToDatabase(
-                self.update_node,
-                node.system_id,
-                {"description": factory.make_name("hostname")},
             )
             yield dv.get(timeout=2)
             self.assertEqual(("update", node.system_id), dv.value)
@@ -273,7 +250,7 @@ class TestNodeListener(
 
     def test_expected_number_of_fields_watched(self):
         self.assertEqual(
-            26,
+            25,
             len(node_fields),
             "Any field listed here will be monitored for changes causing "
             "the UI on all clients to refresh this node object. This is "
@@ -314,8 +291,10 @@ class TestControllerListener(
     def set_version(self, controller, version):
         ControllerInfo.objects.set_version(controller, version)
 
-    def set_versions_info(self, controller, versions_info):
-        ControllerInfo.objects.set_versions_info(controller, versions_info)
+    def set_interface_update_info(self, controller, interfaces, hints):
+        ControllerInfo.objects.set_interface_update_info(
+            controller, interfaces, hints
+        )
 
     def delete_controllerinfo(self, controller):
         ControllerInfo.objects.filter(node=controller).delete()
@@ -326,11 +305,14 @@ class TestControllerListener(
         yield deferToDatabase(register_websocket_triggers)
         listener = self.make_listener_without_delay()
         dv = DeferredValue()
-        controller = yield deferToDatabase(self.create_node, self.params)
+        params = self.params.copy()
+        controller = yield deferToDatabase(self.create_node, params)
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
         try:
-            yield deferToDatabase(self.set_version, controller, "2.10.0")
+            yield deferToDatabase(
+                self.set_version, controller, factory.make_string()
+            )
             yield dv.get(timeout=2)
         finally:
             yield listener.stopService()
@@ -341,37 +323,36 @@ class TestControllerListener(
         yield deferToDatabase(register_websocket_triggers)
         listener = self.make_listener_without_delay()
         dv = DeferredValue()
-        controller = yield deferToDatabase(self.create_node, self.params)
-        yield deferToDatabase(self.set_version, controller, "2.10.0")
+        params = self.params.copy()
+        controller = yield deferToDatabase(self.create_node, params)
+        yield deferToDatabase(self.set_version, controller, "")
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
         try:
-            yield deferToDatabase(self.set_version, controller, "2.10.1")
+            yield deferToDatabase(
+                self.set_version, controller, factory.make_string()
+            )
             yield dv.get(timeout=2)
         finally:
             yield listener.stopService()
 
     @wait_for_reactor
     @inlineCallbacks
-    def test_calls_handler_on_controllerinfo_versionsinfo_update(self):
+    def test_skips_notify_on_controllerinfo_interface_update(self):
         yield deferToDatabase(register_websocket_triggers)
         listener = self.make_listener_without_delay()
         dv = DeferredValue()
-        controller = yield deferToDatabase(self.create_node, self.params)
-        # first set the version
-        yield deferToDatabase(self.set_version, controller, "3.0.0")
+        params = self.params.copy()
+        controller = yield deferToDatabase(self.create_node, params)
+        yield deferToDatabase(self.set_version, controller, "")
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
         try:
-            # update other fields but keep the same version
             yield deferToDatabase(
-                self.set_versions_info,
-                controller,
-                SnapVersionsInfo(
-                    current={"version": "3.0.0", "revision": "1234"}
-                ),
+                self.set_interface_update_info, controller, "{]", "{}"
             )
-            yield dv.get(timeout=2)
+            with ExpectedException(CancelledError):
+                yield dv.get(timeout=0.2)
         finally:
             yield listener.stopService()
 
@@ -381,8 +362,9 @@ class TestControllerListener(
         yield deferToDatabase(register_websocket_triggers)
         listener = self.make_listener_without_delay()
         dv = DeferredValue()
-        controller = yield deferToDatabase(self.create_node, self.params)
-        yield deferToDatabase(self.set_version, controller, "2.10.0")
+        params = self.params.copy()
+        controller = yield deferToDatabase(self.create_node, params)
+        yield deferToDatabase(self.set_version, controller, "")
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
         try:
@@ -946,109 +928,6 @@ class TestNodeTagListener(
             yield listener.stopService()
 
 
-class TestOwnerDataTriggers(
-    MAASTransactionServerTestCase, TransactionalHelpersMixin
-):
-
-    scenarios = (
-        (
-            "machine",
-            {
-                "params": {"node_type": NODE_TYPE.MACHINE},
-                "listener": "machine",
-            },
-        ),
-        (
-            "device",
-            {"params": {"node_type": NODE_TYPE.DEVICE}, "listener": "device"},
-        ),
-        (
-            "rack",
-            {
-                "params": {"node_type": NODE_TYPE.RACK_CONTROLLER},
-                "listener": "controller",
-            },
-        ),
-        (
-            "region_and_rack",
-            {
-                "params": {"node_type": NODE_TYPE.REGION_AND_RACK_CONTROLLER},
-                "listener": "controller",
-            },
-        ),
-        (
-            "region",
-            {
-                "params": {"node_type": NODE_TYPE.REGION_CONTROLLER},
-                "listener": "controller",
-            },
-        ),
-    )
-
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_calls_handler_with_update_on_create(self):
-        yield deferToDatabase(register_websocket_triggers)
-        node = yield deferToDatabase(self.create_node, self.params)
-
-        listener = self.make_listener_without_delay()
-        dv = DeferredValue()
-        listener.register(self.listener, lambda *args: dv.set(args))
-        yield listener.startService()
-        try:
-            yield deferToDatabase(
-                OwnerData.objects.set_owner_data, node, {"foo": "baz"}
-            )
-            yield dv.get(timeout=2)
-            self.assertEqual(("update", node.system_id), dv.value)
-        finally:
-            yield listener.stopService()
-
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_calls_handler_with_update_on_update(self):
-        yield deferToDatabase(register_websocket_triggers)
-        node = yield deferToDatabase(self.create_node, self.params)
-
-        listener = self.make_listener_without_delay()
-        dv = DeferredValue()
-        listener.register(self.listener, lambda *args: dv.set(args))
-        yield deferToDatabase(
-            OwnerData.objects.set_owner_data, node, {"foo": "bar"}
-        )
-        yield listener.startService()
-        try:
-            yield deferToDatabase(
-                OwnerData.objects.set_owner_data, node, {"foo": "baz"}
-            )
-            yield dv.get(timeout=2)
-            self.assertEqual(("update", node.system_id), dv.value)
-        finally:
-            yield listener.stopService()
-
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_calls_handler_with_update_on_replace(self):
-        yield deferToDatabase(register_websocket_triggers)
-        node = yield deferToDatabase(self.create_node, self.params)
-
-        listener = self.make_listener_without_delay()
-        dv = DeferredValue()
-        listener.register(self.listener, lambda *args: dv.set(args))
-        yield deferToDatabase(
-            OwnerData.objects.set_owner_data, node, {"foo": "bar"}
-        )
-        yield listener.startService()
-        try:
-            yield deferToDatabase(
-                OwnerData.objects.set_owner_data, node, {"new": "value"}
-            )
-            yield dv.get(timeout=2)
-            self.assertEqual(("update", node.system_id), dv.value)
-        finally:
-            yield listener.stopService()
-
-
 class TestNodeMetadataTriggers(
     MAASTransactionServerTestCase, TransactionalHelpersMixin
 ):
@@ -1417,7 +1296,7 @@ class TestNodeStaticIPAddressListener(
             self.get_node_boot_interface, node.system_id
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -1442,7 +1321,7 @@ class TestNodeStaticIPAddressListener(
             self.create_staticipaddress, {"interface": interface}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -1471,7 +1350,7 @@ class TestDeviceWithParentStaticIPAddressListener(
             self.get_node_boot_interface, device.system_id
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -1498,7 +1377,7 @@ class TestDeviceWithParentStaticIPAddressListener(
             self.create_staticipaddress, {"interface": interface}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -1558,7 +1437,7 @@ class TestScriptSetListener(
         yield deferToDatabase(register_websocket_triggers)
         node = yield deferToDatabase(self.create_node, self.params)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -1577,7 +1456,7 @@ class TestScriptSetListener(
         node = yield deferToDatabase(self.create_node, self.params)
         result = yield deferToDatabase(self.create_scriptset, node)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -1602,7 +1481,7 @@ class TestDeviceWithParentScriptSetListener(
         yield deferToDatabase(register_websocket_triggers)
         device, parent = yield deferToDatabase(self.create_device_with_parent)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -1621,7 +1500,7 @@ class TestDeviceWithParentScriptSetListener(
         device, parent = yield deferToDatabase(self.create_device_with_parent)
         result = yield deferToDatabase(self.create_scriptset, device)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -1682,7 +1561,7 @@ class TestNDScriptResultListener(
         node = yield deferToDatabase(self.create_node, self.params)
         script_set = yield deferToDatabase(self.create_scriptset, node)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -1706,7 +1585,7 @@ class TestNDScriptResultListener(
             {"status": SCRIPT_STATUS.PENDING},
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -1728,7 +1607,7 @@ class TestNDScriptResultListener(
             self.create_scriptresult, script_set
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -1755,7 +1634,7 @@ class TestScriptResultListener(
         node = yield deferToDatabase(self.create_node)
         script_set = yield deferToDatabase(self.create_scriptset, node)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("scriptresult", lambda *args: dv.set(args))
         yield listener.startService()
@@ -1781,7 +1660,7 @@ class TestScriptResultListener(
             {"status": SCRIPT_STATUS.PENDING},
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("scriptresult", lambda *args: dv.set(args))
         yield listener.startService()
@@ -1804,7 +1683,7 @@ class TestScriptResultListener(
         )
         script_result_id = script_result.id
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("scriptresult", lambda *args: dv.set(args))
         yield listener.startService()
@@ -1939,7 +1818,7 @@ class TestNodeInterfaceListener(
         yield deferToDatabase(register_websocket_triggers)
         node = yield deferToDatabase(self.create_node, self.params)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -1959,7 +1838,7 @@ class TestNodeInterfaceListener(
             self.create_interface, {"node": node}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -1980,7 +1859,7 @@ class TestNodeInterfaceListener(
             self.create_interface, {"node": node}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -2012,7 +1891,7 @@ class TestNodeInterfaceListener(
                     dv.set(args)
                     break
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         listener.register(self.listener, set_defer_value)
         yield listener.startService()
         try:
@@ -2044,7 +1923,7 @@ class TestDeviceWithParentInterfaceListener(
         yield deferToDatabase(register_websocket_triggers)
         device, parent = yield deferToDatabase(self.create_device_with_parent)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -2064,7 +1943,7 @@ class TestDeviceWithParentInterfaceListener(
             self.create_interface, {"node": device}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -2084,7 +1963,7 @@ class TestDeviceWithParentInterfaceListener(
             self.create_interface, {"node": device}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -2120,7 +1999,7 @@ class TestDeviceWithParentInterfaceListener(
                     dv.set(args)
                     break
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         listener.register("machine", set_defer_value)
         yield listener.startService()
         try:
@@ -2489,7 +2368,7 @@ class TestDomainListener(
         )
 
         selected_ip = factory.pick_ip_in_network(subnet.get_ipnetwork())
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("domain", lambda *args: dv.set(args))
         yield listener.startService()
@@ -2517,7 +2396,7 @@ class TestDomainListener(
         subnet = yield deferToDatabase(self.create_subnet)
 
         selected_ip = factory.pick_ip_in_network(subnet.get_ipnetwork())
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("domain", lambda *args: dv.set(args))
         yield listener.startService()
@@ -2558,7 +2437,7 @@ class TestDomainListener(
             },
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("domain", lambda *args: dv.set(args))
         yield listener.startService()
@@ -2831,7 +2710,7 @@ class TestSubnetListener(
         )
         subnet = yield deferToDatabase(self.create_subnet)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("subnet", lambda *args: dv.set(args))
         yield listener.startService()
@@ -2873,7 +2752,7 @@ class TestSubnetListener(
             },
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("subnet", lambda *args: dv.set(args))
         yield listener.startService()
@@ -2908,7 +2787,7 @@ class TestSubnetListener(
             },
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("subnet", lambda *args: dv.set(args))
         yield listener.startService()
@@ -3069,7 +2948,7 @@ class TestNodeNetworkListener(
         )
         fabric = yield deferToDatabase(self.get_interface_fabric, interface.id)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3096,7 +2975,8 @@ class TestNodeNetworkListener(
             self.create_staticipaddress, {"interface": interface}
         )
         vlan = yield deferToDatabase(self.get_interface_vlan, interface.id)
-        listener = self.make_listener_without_delay()
+
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3122,7 +3002,7 @@ class TestNodeNetworkListener(
         )
         subnet = yield deferToDatabase(self.get_ipaddress_subnet, ipaddress.id)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3150,7 +3030,7 @@ class TestNodeNetworkListener(
         )
         space = yield deferToDatabase(self.get_ipaddress_space, ipaddress.id)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3185,7 +3065,7 @@ class TestNodeNetworkListener(
             },
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3221,7 +3101,7 @@ class TestDeviceWithParentNetworkListener(
         )
         fabric = yield deferToDatabase(self.get_interface_fabric, interface.id)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -3251,7 +3131,7 @@ class TestDeviceWithParentNetworkListener(
         )
         vlan = yield deferToDatabase(self.get_interface_vlan, interface.id)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -3279,7 +3159,7 @@ class TestDeviceWithParentNetworkListener(
         )
         subnet = yield deferToDatabase(self.get_ipaddress_subnet, ipaddress.id)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -3309,7 +3189,7 @@ class TestDeviceWithParentNetworkListener(
         )
         space = yield deferToDatabase(self.get_ipaddress_space, ipaddress.id)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -3346,7 +3226,7 @@ class TestDeviceWithParentNetworkListener(
             },
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -3377,7 +3257,7 @@ class TestStaticIPAddressSubnetListener(
             {"alloc_type": IPADDRESS_TYPE.AUTO, "subnet": subnet, "ip": ""},
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("subnet", lambda *args: dv.set(args))
         yield listener.startService()
@@ -3413,7 +3293,7 @@ class TestStaticIPAddressSubnetListener(
                     dv.set(args)
                     break
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         listener.register("subnet", set_defer_value)
         yield listener.startService()
         try:
@@ -3458,7 +3338,7 @@ class TestMachineBlockDeviceListener(
         yield deferToDatabase(register_websocket_triggers)
         node = yield deferToDatabase(self.create_node, self.params)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3478,7 +3358,7 @@ class TestMachineBlockDeviceListener(
             self.create_blockdevice, {"node": node}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3498,7 +3378,7 @@ class TestMachineBlockDeviceListener(
             self.create_blockdevice, {"node": node}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3522,7 +3402,7 @@ class TestMachineBlockDeviceListener(
             self.create_physicalblockdevice, {"node": node}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3543,11 +3423,10 @@ class TestMachineBlockDeviceListener(
         yield deferToDatabase(register_websocket_triggers)
         node = yield deferToDatabase(self.create_node, self.params)
         blockdevice = yield deferToDatabase(
-            self.create_virtualblockdevice,
-            {"node": node, "size": MIN_BOOT_PARTITION_SIZE},
+            self.create_virtualblockdevice, {"node": node}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3585,7 +3464,7 @@ class TestMachinePartitionTableListener(
         yield deferToDatabase(register_websocket_triggers)
         node = yield deferToDatabase(self.create_node, self.params)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3605,7 +3484,7 @@ class TestMachinePartitionTableListener(
             self.create_partitiontable, {"node": node}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3627,7 +3506,7 @@ class TestMachinePartitionTableListener(
             self.create_partitiontable, {"node": node}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3667,7 +3546,7 @@ class TestMachinePartitionListener(
         yield deferToDatabase(register_websocket_triggers)
         node = yield deferToDatabase(self.create_node, self.params)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3687,7 +3566,7 @@ class TestMachinePartitionListener(
             self.create_partition, {"node": node}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3708,7 +3587,7 @@ class TestMachinePartitionListener(
             self.create_partition, {"node": node}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3837,7 +3716,7 @@ class TestMachineFilesystemgroupListener(
         node = yield deferToDatabase(self.create_node, self.params)
         yield deferToDatabase(self.create_partitiontable, {"node": node})
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3858,7 +3737,7 @@ class TestMachineFilesystemgroupListener(
             self.create_filesystemgroup, {"node": node, "group_type": "raid-5"}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3881,7 +3760,7 @@ class TestMachineFilesystemgroupListener(
             self.create_filesystemgroup, {"node": node, "group_type": "bcache"}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3922,7 +3801,7 @@ class TestMachineCachesetListener(
             self.create_partition, {"node": node}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3947,7 +3826,7 @@ class TestMachineCachesetListener(
             self.create_cacheset, {"node": node, "partition": partition}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -3970,7 +3849,7 @@ class TestMachineCachesetListener(
             self.create_cacheset, {"node": node, "partition": partition}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register(self.listener, lambda *args: dv.set(args))
         yield listener.startService()
@@ -4455,7 +4334,7 @@ class TestIPRangeSubnetListener(
             },
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("subnet", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4483,7 +4362,7 @@ class TestIPRangeSubnetListener(
             iprange, but_not=[iprange.start_ip, iprange.end_ip]
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("subnet", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4533,7 +4412,7 @@ class TestIPRangeSubnetListener(
                     dv.set(args)
                     break
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         listener.register("subnet", set_defer_value)
         yield listener.startService()
         try:
@@ -4565,7 +4444,7 @@ class TestIPRangeSubnetListener(
         yield deferToDatabase(register_websocket_triggers)
         iprange = yield deferToDatabase(self.create_iprange)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("subnet", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4588,7 +4467,7 @@ class TestPodListener(
     def test_calls_handler_on_create_notification(self):
         yield deferToDatabase(register_websocket_triggers)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("pod", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4609,7 +4488,7 @@ class TestPodListener(
             self.create_pod, {"name": factory.make_name("pod")}
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("pod", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4630,7 +4509,7 @@ class TestPodListener(
         )
         yield deferToDatabase(register_websocket_triggers)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("pod", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4651,7 +4530,7 @@ class TestPodListener(
         )
         yield deferToDatabase(register_websocket_triggers)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("pod", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4672,7 +4551,7 @@ class TestPodListener(
         )
         yield deferToDatabase(register_websocket_triggers)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("pod", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4691,7 +4570,7 @@ class TestPodListener(
         )
         yield deferToDatabase(register_websocket_triggers)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("pod", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4718,7 +4597,7 @@ class TestPodListener(
             interface.vlan = vlan2
             interface.save()
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("pod", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4745,7 +4624,7 @@ class TestPodListener(
             interface.node = node2
             interface.save()
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("pod", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4767,7 +4646,7 @@ class TestPodListener(
             lambda: factory.make_Interface(node=host)
         )
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("pod", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4791,7 +4670,7 @@ class TestNodePodListener(
         yield deferToDatabase(register_websocket_triggers)
         pod = yield deferToDatabase(self.create_pod)
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("pod", lambda *args: dv.set(args))
         yield listener.startService()
@@ -4821,7 +4700,7 @@ class TestNodePodListener(
                     dv.set(args)
                     break
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         listener.register("pod", set_defer_value)
         yield listener.startService()
         try:
@@ -4847,7 +4726,7 @@ class TestNodePodListener(
         pod = yield deferToDatabase(self.create_pod)
         node = yield deferToDatabase(self.create_node, {"bmc": pod})
 
-        listener = self.make_listener_without_delay()
+        listener = PostgresListenerService()
         dv = DeferredValue()
         listener.register("pod", lambda *args: dv.set(args))
         yield listener.startService()
@@ -5038,6 +4917,78 @@ class TestNodeTypeChange(
             yield listener2.stopService()
 
 
+class TestSwitchListener(
+    MAASTransactionServerTestCase, TransactionalHelpersMixin
+):
+    """End-to-end test of both the listeners code and the triggers code."""
+
+    @transactional
+    def create_switch(self, node):
+        return factory.make_Switch(node)
+
+    @transactional
+    def delete_switch(self, switch):
+        switch.delete()
+
+    @transactional
+    def set_switch_nos_driver(self, switch, nos_driver):
+        Switch.objects.update_or_create(
+            defaults={"nos_driver": nos_driver}, node=switch
+        )
+
+    @wait_for_reactor
+    @inlineCallbacks
+    def test_calls_handler_on_switch_insert(self):
+        yield deferToDatabase(register_websocket_triggers)
+        listener = self.make_listener_without_delay()
+        dv = DeferredValue()
+        node = yield deferToDatabase(self.create_node)
+        listener.register("switch", lambda *args: dv.set(args))
+        yield listener.startService()
+        try:
+            yield deferToDatabase(self.create_switch, node)
+            event = yield dv.get(timeout=2)
+        finally:
+            yield listener.stopService()
+        self.assertEqual(("create", node.system_id), event)
+
+    @wait_for_reactor
+    @inlineCallbacks
+    def test_calls_handler_on_switch_delete(self):
+        yield deferToDatabase(register_websocket_triggers)
+        listener = self.make_listener_without_delay()
+        dv = DeferredValue()
+        node = yield deferToDatabase(self.create_node)
+        yield deferToDatabase(self.create_switch, node)
+        listener.register("switch", lambda *args: dv.set(args))
+        yield listener.startService()
+        try:
+            yield deferToDatabase(self.delete_switch, node)
+            event = yield dv.get(timeout=2)
+        finally:
+            yield listener.stopService()
+        self.assertEqual(("delete", node.system_id), event)
+
+    @wait_for_reactor
+    @inlineCallbacks
+    def test_calls_handler_on_switch_update(self):
+        yield deferToDatabase(register_websocket_triggers)
+        listener = self.make_listener_without_delay()
+        dv = DeferredValue()
+        node = yield deferToDatabase(self.create_node)
+        yield deferToDatabase(self.create_switch, node)
+        listener.register("switch", lambda *args: dv.set(args))
+        yield listener.startService()
+        try:
+            yield deferToDatabase(
+                self.set_switch_nos_driver, node, "new-driver"
+            )
+            event = yield dv.get(timeout=2)
+        finally:
+            yield listener.stopService()
+        self.assertEqual(("update", node.system_id), event)
+
+
 class TestNotificationListener(
     MAASTransactionServerTestCase, TransactionalHelpersMixin
 ):
@@ -5184,68 +5135,5 @@ class TestScriptListener(
             yield deferToDatabase(self.delete_script, script.id)
             yield dv.get(timeout=2)
             self.assertEqual(("delete", "%s" % script.id), dv.value)
-        finally:
-            yield listener.stopService()
-
-
-class TestNodeDeviceListener(
-    MAASTransactionServerTestCase, TransactionalHelpersMixin
-):
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_calls_handler_on_create_notification(self):
-        yield deferToDatabase(register_websocket_triggers)
-        node = yield deferToDatabase(self.create_node)
-        listener = self.make_listener_without_delay()
-        dv = DeferredValue()
-        listener.register("nodedevice", lambda *args: dv.set(args))
-        yield listener.startService()
-        try:
-            node_device = yield deferToDatabase(
-                self.create_node_device, {"node": node}
-            )
-            yield dv.get(timeout=2)
-            self.assertEqual(("create", "%s" % node_device.id), dv.value)
-        finally:
-            yield listener.stopService()
-
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_calls_handler_on_update_notification(self):
-        yield deferToDatabase(register_websocket_triggers)
-        listener = self.make_listener_without_delay()
-        dv = DeferredValue()
-        listener.register("nodedevice", lambda *args: dv.set(args))
-        node_device = yield deferToDatabase(self.create_node_device)
-
-        yield listener.startService()
-        try:
-            yield deferToDatabase(
-                self.update_node_device,
-                node_device.id,
-                {
-                    "commissioning_driver": factory.make_name(
-                        "commissioning_driver"
-                    )
-                },
-            )
-            yield dv.get(timeout=2)
-            self.assertEqual(("update", "%s" % node_device.id), dv.value)
-        finally:
-            yield listener.stopService()
-
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_calls_handler_on_delete_notification(self):
-        yield deferToDatabase(register_websocket_triggers)
-        listener = self.make_listener_without_delay()
-        dv = DeferredValue()
-        listener.register("nodedevice", lambda *args: dv.set(args))
-        node_device = yield deferToDatabase(self.create_node_device)
-        yield listener.startService()
-        try:
-            yield deferToDatabase(self.delete_node_device, node_device.id)
-            yield dv.get(timeout=2)
-            self.assertEqual(("delete", "%s" % node_device.id), dv.value)
         finally:
             yield listener.stopService()

@@ -4,15 +4,10 @@
 """Tests for services."""
 
 
-from collections import defaultdict
-from datetime import timedelta
 from functools import partial
-import json
-from pathlib import Path
 import random
-import socket
 import threading
-from unittest.mock import ANY, call, Mock
+from unittest.mock import call, Mock, sentinel
 from uuid import uuid1
 
 from testtools import ExpectedException
@@ -22,7 +17,6 @@ from twisted.internet import reactor
 from twisted.internet.defer import (
     Deferred,
     DeferredQueue,
-    fail,
     inlineCallbacks,
     succeed,
 )
@@ -46,8 +40,6 @@ from maastesting.matchers import (
 )
 from maastesting.testcase import MAASTestCase, MAASTwistedRunTest
 from maastesting.twisted import TwistedLoggerFixture
-from provisioningserver import refresh as refresh_module
-from provisioningserver.refresh.node_info_scripts import LXD_OUTPUT_NAME
 from provisioningserver.tests.test_security import SharedSecretTestCase
 from provisioningserver.utils import services
 from provisioningserver.utils.beaconing import (
@@ -66,253 +58,35 @@ from provisioningserver.utils.services import (
     ProcessProtocolService,
     ProtocolForObserveARP,
     ProtocolForObserveBeacons,
-    SingleInstanceService,
 )
-
-
-class FakeScriptRun:
-    """Information about a script run.
-
-    The output of the script run be found in the `out`, `err` and
-    `combined` attributes.
-    """
-
-    out = None
-    err = None
-    combined = None
-
-    def __init__(self):
-        self.status = "running"
-
-
-class FakePOpen:
-    def __init__(self, *args, **kwargs):
-        self.returncode = None
-
-
-class FakeRefresher:
-    """A better replacement for simply mocking out the "refresh()" function.
-
-    It hooks into the refresh code and allow to inspect which scripts
-    were being run and what output was sent to the metadata server.
-
-    In addition, it ensures that the credentials were being passed
-    correct, and it keeps track of the metadata URL that was being used.
-
-    The script_runs dict has the metadata URL as key, and the scripts
-    results that were being sent as the value. Normally there should be
-    exactly one key.
-
-    You may control the output of the scripts by using the
-    stdout_content and stderr_contents. The script name is the key, and
-    the content is the value in bytes.
-
-    It only deals with successful runs. If you need to test failed test
-    runs, you'll have to amend this class to cope with it.
-    """
-
-    def __init__(self, testcase, credentials):
-        self.testcase = testcase
-        self.mock_signal = testcase.patch(refresh_module, "signal")
-        self.mock_signal.side_effect = self.fake_signal
-        self.mock_proc = testcase.patch(refresh_module, "Popen")
-        self.mock_proc.side_effect = self.fake_popen
-        self.mock_capture_script_output = testcase.patch(
-            refresh_module, "capture_script_output"
-        )
-        self.mock_capture_script_output.side_effect = (
-            self.fake_capture_script_output
-        )
-        self.credentials = {"consumer_secret": ""}
-        self.credentials.update(credentials)
-        self.reset()
-
-    def reset(self):
-        self.stdout_content = defaultdict(lambda: b"{}")
-        self.stderr_content = defaultdict(bytes)
-        self.script_runs = defaultdict(dict)
-
-    def fake_popen(self, *args, **kwargs):
-        return FakePOpen(*args, **kwargs)
-
-    def fake_capture_script_output(
-        self, proc, combined_path, stdout_path, stderr_path, timeout
-    ):
-        script_name = Path(combined_path).stem
-        stdout = self.stdout_content[script_name]
-        stderr = self.stderr_content[script_name]
-        combined = stderr + stdout
-
-        for content, path in [
-            (stdout, stdout_path),
-            (stderr, stderr_path),
-            (combined, combined_path),
-        ]:
-            Path(path).write_bytes(content)
-        proc.returncode = 0
-
-    def fake_signal(
-        self, url, creds, status, error=None, files=None, exit_status=None
-    ):
-        self.testcase.assertEqual(
-            self.credentials["token_key"], creds.token_key
-        )
-        self.testcase.assertEqual(
-            self.credentials["token_secret"], creds.token_secret
-        )
-        self.testcase.assertEqual(
-            self.credentials["consumer_key"], creds.consumer_key
-        )
-        self.testcase.assertEqual(
-            self.credentials["consumer_secret"], creds.consumer_secret
-        )
-        script_runs = self.script_runs[url]
-        if status == "WORKING":
-            if error.startswith("Starting"):
-                script_name = error.split(" ")[1]
-                assert script_name not in self.script_runs
-                script_runs[script_name] = FakeScriptRun()
-            elif error.startswith("Finished"):
-                script_name = error.split(" ")[1]
-                script_runs[script_name].status = "finished"
-                script_runs[script_name].out = files[f"{script_name}.out"]
-                script_runs[script_name].err = files[f"{script_name}.err"]
-                script_runs[script_name].combined = files[script_name]
-
-
-class SampleSingleInstanceService(SingleInstanceService):
-
-    SERVICE_NAME = "sample"
-    LOCK_NAME = "sample-lock"
-    INTERVAL = timedelta(minutes=1)
-
-    def __init__(self, clock=None):
-        super().__init__(clock=clock)
-        self.action_times = []
-
-    @inlineCallbacks
-    def do_action(self):
-        self.action_times.append(self.clock.seconds())
-        yield
-
-
-class TestSingleInstanceService(MAASTestCase):
-    run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
-
-    def test_init(self):
-        clock = Clock()
-        service = SampleSingleInstanceService(clock=clock)
-        self.assertTrue(service._lock.path.endswith("maas:sample-lock"))
-        self.assertEqual(service._timer_service.step, 60)
-        self.assertIs(service._timer_service.parent, service)
-        self.assertIs(service._timer_service.clock, clock)
-
-    @inlineCallbacks
-    def test_is_responsible(self):
-        clock = Clock()
-        service = SampleSingleInstanceService(clock=clock)
-        yield service.startService()
-        self.assertTrue(service.is_responsible)
-
-    @inlineCallbacks
-    def test_is_responsible_false_after_stop(self):
-        clock = Clock()
-        service = SampleSingleInstanceService(clock=clock)
-        yield service.startService()
-        yield service.stopService()
-        self.assertFalse(service.is_responsible)
-
-    @inlineCallbacks
-    def test_call_action(self):
-        clock = Clock()
-        service = SampleSingleInstanceService(clock=clock)
-        yield service.startService()
-        # simulate time elapsed for a single run
-        clock.advance(40)
-        self.assertEqual(service.action_times, [0.0])
-        yield service.stopService()
-
-    @inlineCallbacks
-    def test_call_action_multiple_times(self):
-        clock = Clock()
-        service = SampleSingleInstanceService(clock=clock)
-        yield service.startService()
-        clock.advance(60)
-        self.assertEqual(service.action_times, [0.0, 60.0])
-        yield service.stopService()
-
-    @inlineCallbacks
-    def test_no_action_if_not_running(self):
-        clock = Clock()
-        service = SampleSingleInstanceService(clock=clock)
-        yield service._do_action()
-        clock.advance(0)
-        self.assertEqual(service.action_times, [])
-
-    @inlineCallbacks
-    def test_no_run_if_not_responsible(self):
-        clock = Clock()
-        service1 = SampleSingleInstanceService(clock=clock)
-        service2 = SampleSingleInstanceService(clock=clock)
-        yield service1.startService()
-        clock.advance(10)
-        self.assertTrue(service1.is_responsible)
-        yield service2.startService()
-        clock.advance(10)
-        self.assertFalse(service2.is_responsible)
-        self.assertEqual(service1.action_times, [0.0])
-        self.assertEqual(service2.action_times, [])
 
 
 class StubNetworksMonitoringService(NetworksMonitoringService):
     """Concrete subclass for testing."""
 
     def __init__(
-        self,
-        enable_monitoring=False,
-        enable_beaconing=False,
-        system_id=None,
-        maas_url="http://localhost:5240/MAAS",
-        credentials=None,
-        *args,
-        **kwargs,
+        self, enable_monitoring=False, enable_beaconing=False, *args, **kwargs
     ):
         super().__init__(
             *args,
             enable_monitoring=enable_monitoring,
             enable_beaconing=enable_beaconing,
-            **kwargs,
+            **kwargs
         )
         self.iterations = DeferredQueue()
         self.interfaces = []
         self.update_interface__calls = 0
-        if system_id is None:
-            system_id = factory.make_string()
-        self.system_id = system_id
-        self.maas_url = maas_url
-        if credentials is None:
-            credentials = {
-                "consumer_key": factory.make_string(),
-                "token_key": factory.make_string(),
-                "token_secret": factory.make_string(),
-            }
-        self.credentials = credentials
 
     def getDiscoveryState(self):
         return {}
 
-    def getRefreshDetails(self):
-        """Record the interfaces information."""
-        return succeed((self.maas_url, self.system_id, self.credentials))
-
-    def _do_action(self):
+    def updateInterfaces(self):
         self.update_interface__calls += 1
-        d = super()._do_action()
+        d = super().updateInterfaces()
         d.addBoth(self.iterations.put)
         return d
 
-    def _interfacesRecorded(self, interfaces):
-        super()._interfacesRecorded(interfaces)
+    def recordInterfaces(self, interfaces, hints=None):
         self.interfaces.append(interfaces)
 
     def reportNeighbours(self, neighbours):
@@ -323,77 +97,56 @@ class StubNetworksMonitoringService(NetworksMonitoringService):
 
 
 class TestNetworksMonitoringService(MAASTestCase):
+    """Tests of `NetworksMonitoringService`."""
+
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
 
-    def setUp(self):
-        super().setUp()
-        self.all_interfaces_mock = self.patch(
-            services, "get_all_interfaces_definition"
-        )
-        self.all_interfaces_mock.return_value = {}
-        self.metadata_credentials = {
-            "consumer_key": factory.make_string(),
-            "token_key": factory.make_string(),
-            "token_secret": factory.make_string(),
-        }
-        self.fake_refresher = FakeRefresher(self, self.metadata_credentials)
-
     def makeService(self, *args, **kwargs):
-        service = StubNetworksMonitoringService(*args, clock=Clock(), **kwargs)
-        service.credentials = self.metadata_credentials.copy()
-        self.addCleanup(service._release_sole_responsibility)
+        service = StubNetworksMonitoringService(*args, **kwargs)
+        self.addCleanup(service._releaseSoleResponsibility)
         return service
 
     def test_init(self):
         service = self.makeService()
-        self.assertIsInstance(service, MultiService)
-        self.assertEqual(
-            service._timer_service.step, service.INTERVAL.total_seconds()
+        self.assertThat(service, IsInstance(MultiService))
+        self.assertThat(
+            service.interface_monitor.step, Equals(service.interval)
         )
-        self.assertEqual(
-            (service._do_action, (), {}),
-            service._timer_service.call,
+        self.assertThat(
+            service.interface_monitor.call,
+            Equals((service.updateInterfaces, (), {})),
         )
 
     @inlineCallbacks
     def test_get_all_interfaces_definition_is_called_in_thread(self):
-        def record_thread():
-            threads.append(threading.current_thread())
-            return {}
-
-        threads = []
         service = self.makeService()
-        service.running = 1
-        self.all_interfaces_mock.side_effect = record_thread
-        yield service._do_action()
-        self.assertEqual(1, len(service.interfaces))
-        [thread] = threads
+        self.patch(
+            services, "get_all_interfaces_definition", threading.current_thread
+        )
+        yield service.updateInterfaces()
+        self.assertThat(service.interfaces, HasLength(1))
+        [thread] = service.interfaces
         self.assertThat(thread, IsInstance(threading.Thread))
         self.assertThat(thread, Not(Equals(threadable.ioThread)))
 
     @inlineCallbacks
     def test_getInterfaces_called_to_get_configuration(self):
         service = self.makeService()
-        service.running = 1
         getInterfaces = self.patch(service, "getInterfaces")
-        my_interfaces = {
-            "eth0": {"type": "physical", "parents": [], "enabled": True},
-        }
-        getInterfaces.return_value = succeed(my_interfaces)
-        yield service._do_action()
-        self.assertThat(service.interfaces, Equals([my_interfaces]))
+        getInterfaces.return_value = succeed(sentinel.config)
+        yield service.updateInterfaces()
+        self.assertThat(service.interfaces, Equals([sentinel.config]))
 
     @inlineCallbacks
     def test_logs_errors(self):
         service = self.makeService()
-        service.running = 1
         with TwistedLoggerFixture() as logger:
             error_message = factory.make_string()
             get_interfaces = self.patch(
                 services, "get_all_interfaces_definition"
             )
             get_interfaces.side_effect = Exception(error_message)
-            yield service._do_action()
+            yield service.updateInterfaces()
         self.assertThat(
             logger.output,
             DocTestMatches(
@@ -404,127 +157,39 @@ class TestNetworksMonitoringService(MAASTestCase):
 
     @inlineCallbacks
     def test_starting_service_triggers_interface_update(self):
-        service = self.makeService()
+        get_interfaces = self.patch(services, "get_all_interfaces_definition")
+        get_interfaces.side_effect = [sentinel.config]
+        clock = Clock()
+        service = self.makeService(clock=clock)
         yield service.startService()
-        service.clock.advance(0)
-        self.assertEqual(1, service.update_interface__calls)
+        self.assertThat(service.update_interface__calls, Equals(1))
         yield service.stopService()
 
     @inlineCallbacks
-    def test_runs_refresh_and_annotates_commissioning_with_hints(self):
-        # Don't actually wait for beaconing to complete.
-        self.patch(services, "pause")
-        service = self.makeService(enable_beaconing=True)
-        service.maas_url = "http://my.example.com/MAAS"
-        service.system_id = "my-system"
-        service.credentials = {
-            "consumer_key": "my-consumer",
-            "token_key": "my-key",
-            "token_secret": "my-secret",
-        }
-        self.fake_refresher.credentials.update(service.credentials)
-        base_lxd_data = {factory.make_string(): factory.make_string()}
-        base_lxd_output = json.dumps(base_lxd_data)
-        self.fake_refresher.stdout_content[
-            LXD_OUTPUT_NAME
-        ] = base_lxd_output.encode("utf-8")
-        network_extra = {
-            "interfaces": {
-                "eth0": {"type": "physical", "parents": [], "enabled": True},
-                "eth1": {"type": "physical", "parents": [], "enabled": False},
-            },
-            "monitored-interfaces": ["eth0"],
-            "hints": {"my-hint": "foo"},
-        }
-        self.all_interfaces_mock.return_value = network_extra["interfaces"]
-        beaconing_mock = self.patch(services.BeaconingSocketProtocol)
-        beaconing_mock.return_value.getJSONTopologyHints.return_value = (
-            network_extra["hints"]
-        )
+    def test_recordInterfaces_called_when_nothing_previously_recorded(self):
+        get_interfaces = self.patch(services, "get_all_interfaces_definition")
+        get_interfaces.side_effect = [sentinel.config]
 
-        yield service.startService()
-        service.clock.advance(0)
-        yield service.stopService()
-
-        metadata_url = service.maas_url + "/metadata/2012-03-01/"
-        script_runs = self.fake_refresher.script_runs[metadata_url]
-        self.assertEqual("finished", script_runs[LXD_OUTPUT_NAME].status)
-        commissioning_data_out = json.loads(
-            script_runs[LXD_OUTPUT_NAME].out.decode("utf-8")
-        )
-        commissioning_data_combined = json.loads(
-            script_runs[LXD_OUTPUT_NAME].combined.decode("utf-8")
-        )
-        expected_commisioning_data = base_lxd_data.copy()
-        expected_commisioning_data.update({"network-extra": network_extra})
-        self.assertEqual(expected_commisioning_data, commissioning_data_out)
-        self.assertEqual(
-            expected_commisioning_data, commissioning_data_combined
-        )
-
-    @inlineCallbacks
-    def test_runs_refresh_and_annotates_commissioning_without_hints(self):
         service = self.makeService()
-        service.maas_url = "http://my.example.com/MAAS"
-        service.system_id = "my-system"
-        service.credentials = {
-            "consumer_key": "my-consumer",
-            "token_key": "my-key",
-            "token_secret": "my-secret",
-        }
-        self.fake_refresher.credentials.update(service.credentials)
-        base_lxd_data = {factory.make_string(): factory.make_string()}
-        base_lxd_output = json.dumps(base_lxd_data)
-        self.fake_refresher.stdout_content[
-            LXD_OUTPUT_NAME
-        ] = base_lxd_output.encode("utf-8")
-        network_extra = {
-            "interfaces": {
-                "eth0": {"type": "physical", "parents": [], "enabled": True},
-                "eth1": {"type": "physical", "parents": [], "enabled": False},
-            },
-            "monitored-interfaces": ["eth0"],
-            "hints": None,
-        }
-        self.all_interfaces_mock.return_value = network_extra["interfaces"]
+        self.assertThat(service.interfaces, Equals([]))
+        yield service.updateInterfaces()
+        self.assertThat(service.interfaces, Equals([sentinel.config]))
 
-        yield service.startService()
-        service.clock.advance(0)
-        yield service.stopService()
-
-        metadata_url = service.maas_url + "/metadata/2012-03-01/"
-        script_runs = self.fake_refresher.script_runs[metadata_url]
-        self.assertEqual("finished", script_runs[LXD_OUTPUT_NAME].status)
-        commissioning_data_out = json.loads(
-            script_runs[LXD_OUTPUT_NAME].out.decode("utf-8")
-        )
-        commissioning_data_combined = json.loads(
-            script_runs[LXD_OUTPUT_NAME].combined.decode("utf-8")
-        )
-        expected_commisioning_data = base_lxd_data.copy()
-        expected_commisioning_data.update({"network-extra": network_extra})
-        self.assertEqual(expected_commisioning_data, commissioning_data_out)
-        self.assertEqual(
-            expected_commisioning_data, commissioning_data_combined
-        )
+        self.assertThat(get_interfaces, MockCalledOnceWith())
 
     @inlineCallbacks
     def test_recordInterfaces_called_when_interfaces_changed(self):
         get_interfaces = self.patch(services, "get_all_interfaces_definition")
         # Configuration changes between the first and second call.
-        my_interfaces1 = {"foo": {"parents": [], "enabled": True}}
-        my_interfaces2 = {"bar": {"parents": [], "enabled": True}}
-        get_interfaces.side_effect = [my_interfaces1, my_interfaces2]
+        get_interfaces.side_effect = [sentinel.config1, sentinel.config2]
 
         service = self.makeService()
-        service.running = 1
         self.assertThat(service.interfaces, HasLength(0))
-        yield service._do_action()
-        self.assertThat(service.interfaces, Equals([my_interfaces1]))
-        self.fake_refresher.reset()
-        yield service._do_action()
+        yield service.updateInterfaces()
+        self.assertThat(service.interfaces, Equals([sentinel.config1]))
+        yield service.updateInterfaces()
         self.assertThat(
-            service.interfaces, Equals([my_interfaces1, my_interfaces2])
+            service.interfaces, Equals([sentinel.config1, sentinel.config2])
         )
 
         self.assertThat(get_interfaces, MockCallsMatch(call(), call()))
@@ -536,11 +201,10 @@ class TestNetworksMonitoringService(MAASTestCase):
         get_interfaces.side_effect = [{}, {}]
 
         service = self.makeService()
-        service.running = 1
         self.assertThat(service.interfaces, HasLength(0))
-        yield service._do_action()
+        yield service.updateInterfaces()
         self.assertThat(service.interfaces, Equals([{}]))
-        yield service._do_action()
+        yield service.updateInterfaces()
         self.assertThat(service.interfaces, Equals([{}]))
 
         self.assertThat(get_interfaces, MockCallsMatch(call(), call()))
@@ -551,34 +215,28 @@ class TestNetworksMonitoringService(MAASTestCase):
         get_interfaces.return_value = {}
 
         service = self.makeService()
-        service.running = 1
-        run_refresh = self.patch(service, "_run_refresh")
-        run_refresh.side_effect = [
-            fail(Exception()),
-            succeed(None),
-            succeed(None),
-        ]
+        recordInterfaces = self.patch(service, "recordInterfaces")
+        recordInterfaces.side_effect = [Exception, None, None]
 
         # Using the logger fixture prevents the test case from failing due
         # to the logged exception.
         with TwistedLoggerFixture():
-            # _run_refresh is called the first time, as expected.
-            run_refresh.reset_mock()
-            yield service._do_action()
-            self.assertEqual(1, run_refresh.call_count)
+            # recordInterfaces is called the first time, as expected.
+            recordInterfaces.reset_mock()
+            yield service.updateInterfaces()
+            self.assertThat(recordInterfaces, MockCalledOnceWith({}, None))
 
-            # _run_refresh is called the second time too; the service noted
+            # recordInterfaces is called the second time too; the service noted
             # that it crashed last time and knew to run it again.
-            run_refresh.reset_mock()
-            yield service._do_action()
-            self.assertEqual(1, run_refresh.call_count)
+            recordInterfaces.reset_mock()
+            yield service.updateInterfaces()
+            self.assertThat(recordInterfaces, MockCalledOnceWith({}, None))
 
-            # _run_refresh is NOT called the third time; the service noted
+            # recordInterfaces is NOT called the third time; the service noted
             # that the configuration had not changed.
-            run_refresh.reset_mock()
-            self.assertEqual(0, run_refresh.call_count)
-            yield service._do_action()
-            self.assertEqual(0, run_refresh.call_count)
+            recordInterfaces.reset_mock()
+            yield service.updateInterfaces()
+            self.assertThat(recordInterfaces, MockNotCalled())
 
     @inlineCallbacks
     def test_assumes_sole_responsibility_before_updating(self):
@@ -598,7 +256,7 @@ class TestNetworksMonitoringService(MAASTestCase):
             self.assertTrue(lock.is_locked())
 
             # It remains locked as the service iterates.
-            yield service._do_action()
+            yield service.updateInterfaces()
             self.assertTrue(lock.is_locked())
 
         finally:
@@ -618,11 +276,10 @@ class TestNetworksMonitoringService(MAASTestCase):
 
         with lock:
             service = self.makeService()
-            service.running = 1
             # Iterate a few times.
-            yield service._do_action()
-            yield service._do_action()
-            yield service._do_action()
+            yield service.updateInterfaces()
+            yield service.updateInterfaces()
+            yield service.updateInterfaces()
 
         # Interfaces were NOT recorded.
         self.assertThat(service.interfaces, Equals([]))
@@ -635,14 +292,13 @@ class TestNetworksMonitoringService(MAASTestCase):
 
         with lock:
             service = self.makeService()
-            service.running = 1
             # Iterate one time.
-            yield service._do_action()
+            yield service.updateInterfaces()
 
         # Interfaces have not been recorded yet.
         self.assertThat(service.interfaces, Equals([]))
         # Iterate once more and ...
-        yield service._do_action()
+        yield service.updateInterfaces()
         # ... interfaces ARE recorded.
         self.assertThat(service.interfaces, Not(Equals([])))
 
@@ -1600,28 +1256,4 @@ class TestBeaconingSocketProtocol(SharedSecretTestCase):
         clock.advance(5)
         self.assertThat(
             send_mcast_mock, MockCalledOnceWith({}, "solicitation")
-        )
-
-    def test_send_multicast_beacons(self):
-        interfaces = {
-            "eth0": {"enabled": True, "links": []},
-            "eth1": {"enabled": True, "links": []},
-            "eth2": {"enabled": True, "links": []},
-        }
-        self.patch(socket, "if_nametoindex", lambda name: int(name[3:]))
-        protocol = BeaconingSocketProtocol(
-            Clock(),
-            port=0,
-            process_incoming=False,
-            loopback=True,
-            interface="::",
-            debug=True,
-        )
-        self.patch(services, "create_beacon_payload")
-        send_mcast_mock = self.patch(protocol, "send_multicast_beacon")
-        protocol.send_multicast_beacons(interfaces)
-        # beaconing is sent for each interface ID
-        self.assertEqual(
-            send_mcast_mock.mock_calls,
-            [call(0, ANY), call(1, ANY), call(2, ANY)],
         )

@@ -61,8 +61,6 @@ FakeNotify = namedtuple("FakeNotify", ["channel", "payload"])
 class PostgresListenerServiceSpy(PostgresListenerService):
     """Save received notifies `captured_notifies` before processing them.."""
 
-    HANDLE_NOTIFY_DELAY = CHANNEL_REGISTRAR_DELAY = 0
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Captured notifications from the database will go here.
@@ -122,7 +120,6 @@ class TestPostgresListenerService(MAASServerTestCase):
     @inlineCallbacks
     def test_calls_system_handler_on_notification(self):
         listener = PostgresListenerService()
-        listener.HANDLE_NOTIFY_DELAY = listener.CHANNEL_REGISTRAR_DELAY = 0
         # Change notifications to a frozenset. This makes sure that
         # the system message does not go into the queue. Instead if should
         # call the handler directly in `doRead`.
@@ -201,7 +198,6 @@ class TestPostgresListenerService(MAASServerTestCase):
     @inlineCallbacks
     def test_calls_handler_on_notification(self):
         listener = PostgresListenerService()
-        listener.HANDLE_NOTIFY_DELAY = listener.CHANNEL_REGISTRAR_DELAY = 0
         dv = DeferredValue()
         listener.register("machine", lambda *args: dv.set(args))
         yield listener.startService()
@@ -217,7 +213,6 @@ class TestPostgresListenerService(MAASServerTestCase):
     @inlineCallbacks
     def test_calls_handler_on_notification_with_delayed_registration(self):
         listener = PostgresListenerService()
-        listener.HANDLE_NOTIFY_DELAY = listener.CHANNEL_REGISTRAR_DELAY = 0
         dv = DeferredValue()
         yield listener.startService()
         try:
@@ -310,7 +305,6 @@ class TestPostgresListenerService(MAASServerTestCase):
     @inlineCallbacks
     def test_tryConnection_reregisters_channels(self):
         listener = PostgresListenerService()
-        listener.HANDLE_NOTIFY_DELAY = listener.CHANNEL_REGISTRAR_DELAY = 0
         handler = object()
         listener.register("channel", handler)
         yield listener.startService()
@@ -442,7 +436,6 @@ class TestPostgresListenerService(MAASServerTestCase):
     @inlineCallbacks
     def test_register_adds_channel_and_handler(self):
         listener = PostgresListenerService()
-        listener.HANDLE_NOTIFY_DELAY = listener.CHANNEL_REGISTRAR_DELAY = 0
         channel = factory.make_name("channel", sep="_").lower()
         listener.register(channel, sentinel.handler)
         yield listener.startService()
@@ -573,9 +566,9 @@ class TestPostgresListenerService(MAASServerTestCase):
         listener = PostgresListenerService()
         channel = factory.make_name("channel", sep="_").lower()
         listener.register(channel, sentinel.handler)
-        self.assertEqual({channel: [sentinel.handler]}, listener.listeners)
+        self.assertEquals({channel: [sentinel.handler]}, listener.listeners)
         listener.unregister(channel, sentinel.handler)
-        self.assertEqual({}, listener.listeners)
+        self.assertEquals({}, listener.listeners)
 
     def test_unregister_removes_handler_others(self):
         listener = PostgresListenerService()
@@ -583,13 +576,12 @@ class TestPostgresListenerService(MAASServerTestCase):
         listener.register(channel, sentinel.handler1)
         listener.register(channel, sentinel.handler2)
         listener.unregister(channel, sentinel.handler2)
-        self.assertEqual({channel: [sentinel.handler1]}, listener.listeners)
+        self.assertEquals({channel: [sentinel.handler1]}, listener.listeners)
 
     @wait_for_reactor
     @inlineCallbacks
     def test_unregister_calls_unregisterChannel_when_connected(self):
         listener = PostgresListenerService()
-        listener.HANDLE_NOTIFY_DELAY = listener.CHANNEL_REGISTRAR_DELAY = 0
         channel = factory.make_name("channel", sep="_").lower()
         listener.register(channel, sentinel.handler)
         yield listener.startService()
@@ -607,7 +599,6 @@ class TestPostgresListenerService(MAASServerTestCase):
     @inlineCallbacks
     def test_unregister_doesnt_call_unregisterChannel_multi_handlers(self):
         listener = PostgresListenerService()
-        listener.HANDLE_NOTIFY_DELAY = listener.CHANNEL_REGISTRAR_DELAY = 0
         channel = factory.make_name("channel", sep="_").lower()
         listener.register(channel, sentinel.handler)
         listener.register(channel, sentinel.other_handler)

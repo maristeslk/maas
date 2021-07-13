@@ -4,14 +4,11 @@
 #
 # - update python project version
 # - add d/changelog entry for the release
-# - commit changes
+# - commit changes and tag commit with release tag
 #
 # The script must be called with a single argument for the MAAS python version
 # to update to.
 #
-
-export DEBFULLNAME="${DEBFULLNAME:-$(git config user.name)}"
-export DEBEMAIL="${DEBEMAIL:-$(git config user.email)}"
 
 SCRIPT="$(basename "$0")"
 MAAS_PATH="$(realpath "$(dirname "$0")/../")"
@@ -23,10 +20,6 @@ exit_error() {
 
 git_tree_clean() {
     git diff-index --quiet HEAD
-}
-
-git_show_commit() {
-    git show HEAD
 }
 
 deb_version() {
@@ -50,7 +43,7 @@ tag_version() {
 
 replace_setup_version() {
     local version="$1"
-    sed -i 's/\bversion = .*$/version = '"$version"'/' setup.cfg
+    sed -i 's/\bversion=".*$/version="'"$version"'",/' setup.py
 }
 
 add_debian_changelog() {
@@ -60,28 +53,28 @@ add_debian_changelog() {
     dch -r ""
 }
 
-commit() {
+commit_and_tag() {
     local version="$1"
     local message
-    message="Prepare for $(verbose_version "$version") release"
+    message="Release $(verbose_version "$version")"
 
     git commit -a -m "$message"
+    git tag -a "$(tag_version "$version")" -m "$message"
 }
 
 version="$1"
-major_version="$(echo "${version}" | cut -d'.' -f-2)"
-current_branch="$(git branch --show-current)"
 
 if [ -z "$version" ]; then
     exit_error "Usage $SCRIPT <MAJOR>.<MINOR>.<MICRO>(a<num>|b<num>|rc<num>)"
 elif ! echo "$version" | grep -Eq "^[2-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$"; then
     echo "Invalid version!" >&2
     exit_error "Usage $SCRIPT <MAJOR>.<MINOR>.<MICRO>(a<num>|b<num>|rc<num>)"
-elif [[ "$major_version" != *${current_branch}* ]]; then
+elif [[ $version != *$(git branch --show-current)* ]]; then
     # Verify tags are created from the branch for that version if it exists.
     for branch in $(git ls-remote --heads origin | awk 'FS="/" { print $3 }'); do
-	if [[ "$major_version" == *${branch}* ]]; then
-	    exit_error "Branch ${branch} exists for version ${version}. Refusing to tag ${current_branch}."
+	if [[ $version == *${branch}* ]]; then
+	    echo "Branch($branch) exists for version($version)!"
+	    exit_error "Usage $SCRIPT <MAJOR>.<MINOR>.<MICRO>(a<num>|b<num>|rc<num>)"
 	fi
     done
 fi
@@ -92,5 +85,4 @@ fi
 
 replace_setup_version "$version"
 add_debian_changelog "$version"
-commit "$version"
-git_show_commit
+commit_and_tag "$version"

@@ -52,7 +52,9 @@ from provisioningserver.dhcp.detect import (
 )
 
 
-class TestMakeDHCPTransactionID(MAASTestCase):
+class MakeDHCPTransactionID(MAASTestCase):
+    """Tests for `make_dhcp_transaction_id`."""
+
     def test_produces_well_formed_id(self):
         # The DHCP transaction ID should be 4 bytes long.
         transaction_id = make_dhcp_transaction_id()

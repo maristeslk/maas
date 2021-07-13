@@ -1,4 +1,4 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2018 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """The general handler for the WebSocket connection."""
@@ -17,14 +17,10 @@ from maasserver.enum import (
 )
 from maasserver.models.bootresource import BootResource
 from maasserver.models.config import Config
-from maasserver.models.controllerinfo import (
-    get_maas_version,
-    get_target_version,
-)
 from maasserver.models.node import Node
 from maasserver.models.packagerepository import PackageRepository
 from maasserver.node_action import ACTIONS_DICT
-from maasserver.permissions import NodePermission
+from maasserver.permissions import NodePermission, PodPermission
 from maasserver.utils.osystems import (
     list_all_usable_hwe_kernels,
     list_all_usable_osystems,
@@ -34,7 +30,7 @@ from maasserver.utils.osystems import (
     list_release_choices,
 )
 from maasserver.websockets.base import Handler
-from provisioningserver.boot import BootMethodRegistry
+from provisioningserver.utils.version import get_maas_version_ui
 
 
 class GeneralHandler(Handler):
@@ -43,25 +39,24 @@ class GeneralHandler(Handler):
     class Meta:
         allowed_methods = [
             "architectures",
-            "bond_options",
-            "components_to_disable",
-            "default_min_hwe_kernel",
-            "device_actions",
-            "hwe_kernels",
             "known_architectures",
-            "known_boot_architectures",
-            "machine_actions",
-            "min_hwe_kernels",
-            "osinfo",
             "pockets_to_disable",
-            "power_types",
+            "components_to_disable",
+            "hwe_kernels",
+            "min_hwe_kernels",
+            "default_min_hwe_kernel",
+            "osinfo",
+            "machine_actions",
+            "device_actions",
             "rack_controller_actions",
-            "random_hostname",
-            "region_and_rack_controller_actions",
             "region_controller_actions",
-            "release_options",
-            "target_version",
+            "region_and_rack_controller_actions",
+            "random_hostname",
+            "bond_options",
             "version",
+            "power_types",
+            "release_options",
+            "navigation_options",
         ]
 
     def architectures(self, params):
@@ -189,17 +184,7 @@ class GeneralHandler(Handler):
 
     def version(self, params):
         """Return the MAAS version."""
-        return str(get_maas_version())
-
-    def target_version(self, params):
-        """Return the deployment target version."""
-        target_version = get_target_version()
-        return {
-            "version": str(target_version.version),
-            "snap_channel": str(target_version.snap_channel),
-            "snap_cohort": target_version.snap_cohort,
-            "first_reported": target_version.first_reported,
-        }
+        return get_maas_version_ui()
 
     def power_types(self, params):
         """Return all power types."""
@@ -219,20 +204,8 @@ class GeneralHandler(Handler):
             ),
         }
 
-    def known_boot_architectures(self, params):
-        """Return all known boot architectures."""
-        return [
-            {
-                "name": boot_method.name,
-                "bios_boot_method": boot_method.bios_boot_method,
-                "bootloader_arches": "/".join(boot_method.bootloader_arches),
-                "arch_octet": boot_method.arch_octet,
-                "protocol": (
-                    "http"
-                    if boot_method.http_url or boot_method.user_class
-                    else "tftp"
-                ),
-            }
-            for _, boot_method in BootMethodRegistry
-            if boot_method.arch_octet or boot_method.user_class
-        ]
+    def navigation_options(self, params):
+        """Return the options for navigation."""
+        from maasserver.models.bmc import Pod  # circular import
+
+        return {"rsd": Pod.objects.have_rsd(self.user, PodPermission.view)}

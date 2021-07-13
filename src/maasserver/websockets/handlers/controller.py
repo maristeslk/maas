@@ -4,34 +4,20 @@
 """The controller handler for the WebSocket connection."""
 
 
-from collections import Counter
-from functools import cached_property
 import logging
 
-from django.contrib.postgres.aggregates import ArrayAgg
-from django.db.models import (
-    BooleanField,
-    ExpressionWrapper,
-    OuterRef,
-    Q,
-    Subquery,
-)
+from django.db.models import OuterRef, Subquery
 
 from maasserver.config import RegionConfiguration
 from maasserver.forms import ControllerForm
-from maasserver.models import Config, Controller, Event, RackController, VLAN
-from maasserver.models.controllerinfo import get_target_version
+from maasserver.models.config import Config
+from maasserver.models.event import Event
+from maasserver.models.node import Controller, RackController
 from maasserver.permissions import NodePermission
 from maasserver.websockets.base import HandlerError, HandlerPermissionError
 from maasserver.websockets.handlers.machine import MachineHandler
 from maasserver.websockets.handlers.node import node_prefetch
-
-# return the list of VLAN ids connected to a controller
-_vlan_ids_aggr = ArrayAgg(
-    "interface__ip_addresses__subnet__vlan__id",
-    distinct=True,
-    filter=Q(interface__ip_addresses__subnet__vlan__isnull=False),
-)
+from provisioningserver.utils.version import get_version_tuple
 
 
 class ControllerHandler(MachineHandler):
@@ -40,14 +26,12 @@ class ControllerHandler(MachineHandler):
         queryset = node_prefetch(
             Controller.controllers.all().prefetch_related("service_set"),
             "controllerinfo",
-        ).annotate(vlan_ids=_vlan_ids_aggr)
+        )
         list_queryset = (
             Controller.controllers.all()
             .select_related("controllerinfo", "domain", "bmc")
             .prefetch_related("service_set")
             .prefetch_related("tags")
-            .prefetch_related("ownerdata_set")
-            .prefetch_related("interface_set__ip_addresses__subnet__vlan")
             .annotate(
                 status_event_type_description=Subquery(
                     Event.objects.filter(
@@ -63,7 +47,6 @@ class ControllerHandler(MachineHandler):
                     .order_by("-created", "-id")
                     .values("description")[:1]
                 ),
-                vlan_ids=_vlan_ids_aggr,
             )
         )
         allowed_methods = [
@@ -144,54 +127,22 @@ class ControllerHandler(MachineHandler):
     def dehydrate(self, obj, data, for_list=False):
         obj = obj.as_self()
         data = super().dehydrate(obj, data, for_list=for_list)
-
-        vlan_counts = Counter()
-        for vlan_id in obj.vlan_ids:
-            vlan_counts[self._vlans_ha[vlan_id]] += 1
-
-        data.update(
-            {
-                "vlans_ha": {
-                    "true": vlan_counts[True],
-                    "false": vlan_counts[False],
-                },
-                "versions": self.dehydrate_versions(obj.info),
-                "service_ids": [
-                    service.id for service in obj.service_set.all()
-                ],
-            }
-        )
+        data["version"] = obj.version
+        if obj.version is not None and len(obj.version) > 0:
+            version = get_version_tuple(obj.version)
+            data["version__short"] = version.short_version
+            long_version = version.short_version
+            if len(version.extended_info) > 0:
+                long_version += " (%s)" % version.extended_info
+            if version.is_snap:
+                long_version += " (snap)"
+            data["version__long"] = long_version
+        data["service_ids"] = [service.id for service in obj.service_set.all()]
         if not for_list:
             data["vlan_ids"] = [
                 interface.vlan_id for interface in obj.interface_set.all()
             ]
         return data
-
-    def dehydrate_versions(self, info):
-        if not info:
-            return {}
-
-        versions = {
-            "install_type": info.install_type,
-            "current": {
-                "version": info.version,
-            },
-            "origin": info.update_origin,
-            "up_to_date": info.is_up_to_date(self._target_version),
-            "issues": info.get_version_issues(self._target_version),
-        }
-        if info.update_version:
-            versions["update"] = {
-                "version": info.update_version,
-            }
-
-        if info.snap_revision:
-            versions["current"]["snap_revision"] = info.snap_revision
-        if info.snap_cohort:
-            versions["snap_cohort"] = info.snap_cohort
-        if info.snap_update_revision:
-            versions["update"]["snap_revision"] = info.snap_update_revision
-        return versions
 
     def check_images(self, params):
         """Get the image sync statuses of requested controllers."""
@@ -222,21 +173,3 @@ class ControllerHandler(MachineHandler):
             maas_url = config.maas_url
 
         return {"url": maas_url, "secret": rpc_shared_secret}
-
-    @cached_property
-    def _vlans_ha(self):
-        """Return a dict mapping VLAN IDs to their HA status."""
-        return dict(
-            VLAN.objects.values_list("id").annotate(
-                is_ha=ExpressionWrapper(
-                    Q(primary_rack__isnull=False)
-                    & Q(secondary_rack__isnull=False),
-                    output_field=BooleanField(),
-                )
-            )
-        )
-
-    @cached_property
-    def _target_version(self):
-        """Cache the deployment target version"""
-        return get_target_version()

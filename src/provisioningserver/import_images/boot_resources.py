@@ -249,13 +249,12 @@ def main_with_services(args):
     from sys import stderr
     import traceback
 
-    from twisted.internet import reactor
-    from twisted.internet.threads import deferToThread
-
     from provisioningserver import services
     from provisioningserver.rpc.clusterservice import ClusterClientService
     from provisioningserver.rpc.exceptions import NoConnectionsAvailable
-    from provisioningserver.utils.twisted import pause, retries
+    from provisioningserver.utils.twisted import retries, pause
+    from twisted.internet import reactor
+    from twisted.internet.threads import deferToThread
 
     @inlineCallbacks
     def start_services():

@@ -1,6 +1,8 @@
 # Copyright 2017 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Tests for `maastesting.parallel`."""
+
 
 import os
 import random
@@ -8,10 +10,10 @@ from unittest.mock import ANY
 
 import junitxml
 import subunit
-import testtools
 from testtools import (
     ExtendedToOriginalDecorator,
     MultiTestResult,
+    TestByTestResult,
     TextTestResult,
 )
 from testtools.matchers import (
@@ -56,8 +58,10 @@ class TestSelectorArguments(MAASTestCase):
         self.assertThat(sysexit.code, Equals(0))
         self.assertScriptsMatch(
             MatchesUnselectableScript("bin/test.region.legacy"),
+            MatchesSelectableScript("cli"),
             MatchesSelectableScript("rack"),
             MatchesSelectableScript("region"),
+            MatchesSelectableScript("testing"),
         )
 
     def test_scripts_can_be_selected_by_path(self):
@@ -65,17 +69,21 @@ class TestSelectorArguments(MAASTestCase):
             SystemExit,
             parallel.main,
             [
+                "src/maascli/001",
                 "src/provisioningserver/002",
                 "src/maasserver/003",
                 "src/metadataserver/004",
+                "src/maastesting/005",
             ],
         )
         self.assertThat(sysexit.code, Equals(0))
         self.assertScriptsMatch(
+            MatchesSelectableScript("cli", "src/maascli/001"),
             MatchesSelectableScript("rack", "src/provisioningserver/002"),
             MatchesSelectableScript(
                 "region", "src/maasserver/003", "src/metadataserver/004"
             ),
+            MatchesSelectableScript("testing", "src/maastesting/005"),
         )
 
     def test_scripts_can_be_selected_by_module(self):
@@ -83,17 +91,21 @@ class TestSelectorArguments(MAASTestCase):
             SystemExit,
             parallel.main,
             [
+                "maascli.001",
                 "provisioningserver.002",
                 "maasserver.003",
                 "metadataserver.004",
+                "maastesting.005",
             ],
         )
         self.assertThat(sysexit.code, Equals(0))
         self.assertScriptsMatch(
+            MatchesSelectableScript("cli", "maascli.001"),
             MatchesSelectableScript("rack", "provisioningserver.002"),
             MatchesSelectableScript(
                 "region", "maasserver.003", "metadataserver.004"
             ),
+            MatchesSelectableScript("testing", "maastesting.005"),
         )
 
 
@@ -209,8 +221,7 @@ class TestEmissionArguments(MAASTestCase):
         self.assertThat(
             result,
             IsMultiResultOf(
-                IsInstance(TextTestResult),
-                IsInstance(testtools.TestByTestResult),
+                IsInstance(TextTestResult), IsInstance(TestByTestResult)
             ),
         )
 
@@ -224,8 +235,7 @@ class TestEmissionArguments(MAASTestCase):
         self.assertThat(
             result,
             IsMultiResultOf(
-                IsInstance(TextTestResult),
-                IsInstance(testtools.TestByTestResult),
+                IsInstance(TextTestResult), IsInstance(TestByTestResult)
             ),
         )
 

@@ -14,7 +14,7 @@ from twisted.internet import defer
 from maastesting.factory import factory
 from maastesting.matchers import MockCalledOnceWith
 from maastesting.testcase import MAASTestCase, MAASTwistedRunTest
-from provisioningserver.rpc import clusterservice, region
+from provisioningserver.rpc import region
 from provisioningserver.rpc.exceptions import (
     CommissionNodeFailed,
     NodeAlreadyExists,
@@ -28,12 +28,6 @@ import provisioningserver.utils
 class TestCreateNode(MAASTestCase):
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
-
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def prepare_region_rpc(self):
         fixture = self.useFixture(MockLiveClusterToRegionRPCFixture())
@@ -192,12 +186,6 @@ class TestCreateNode(MAASTestCase):
 class TestCommissionNode(MAASTestCase):
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
-
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def prepare_region_rpc(self):
         fixture = self.useFixture(MockLiveClusterToRegionRPCFixture())

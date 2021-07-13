@@ -91,7 +91,7 @@ class TestTranslateScriptType(MAASServerTestCase):
             with self.assertRaisesRegex(ValidationError, self.exception):
                 translate_script_type(self.value)
         else:
-            self.assertEqual(
+            self.assertEquals(
                 self.return_value, translate_script_type(self.value)
             )
 
@@ -151,13 +151,6 @@ class TestTranslateHardwareType(MAASServerTestCase):
             },
         ),
         (
-            "numeric string gpu",
-            {
-                "value": str(HARDWARE_TYPE.GPU),
-                "return_value": HARDWARE_TYPE.GPU,
-            },
-        ),
-        (
             "invalid id",
             {
                 "value": random.randint(100, 1000),
@@ -171,7 +164,6 @@ class TestTranslateHardwareType(MAASServerTestCase):
             {"value": "controller", "return_value": HARDWARE_TYPE.NODE},
         ),
         ("other", {"value": "other", "return_value": HARDWARE_TYPE.NODE}),
-        ("generic", {"value": "generic", "return_value": HARDWARE_TYPE.NODE}),
         ("cpu", {"value": "cpu", "return_value": HARDWARE_TYPE.CPU}),
         (
             "processor",
@@ -195,24 +187,10 @@ class TestTranslateHardwareType(MAASServerTestCase):
             {"value": "interface", "return_value": HARDWARE_TYPE.NETWORK},
         ),
         (
-            "gpu",
-            {
-                "value": "gpu",
-                "return_value": HARDWARE_TYPE.GPU,
-            },
-        ),
-        (
-            "graphics",
-            {
-                "value": "graphics",
-                "return_value": HARDWARE_TYPE.GPU,
-            },
-        ),
-        (
             "invalid value",
             {
                 "value": factory.make_name("value"),
-                "exception": "Hardware type must be node, cpu, memory, storage, or gpu",
+                "exception": "Hardware type must be node, cpu, memory, or storage",
             },
         ),
     ]
@@ -222,7 +200,7 @@ class TestTranslateHardwareType(MAASServerTestCase):
             with self.assertRaisesRegex(ValidationError, self.exception):
                 translate_hardware_type(self.value)
         else:
-            self.assertEqual(
+            self.assertEquals(
                 self.return_value, translate_hardware_type(self.value)
             )
 
@@ -306,7 +284,7 @@ class TestTranslateScriptParallel(MAASServerTestCase):
             with self.assertRaisesRegex(ValidationError, self.exception):
                 translate_script_parallel(self.value)
         else:
-            self.assertEqual(
+            self.assertEquals(
                 self.return_value, translate_script_parallel(self.value)
             )
 
@@ -323,8 +301,8 @@ class TestScriptManager(MAASServerTestCase):
             name=name, script=script_str, comment=comment
         )
 
-        self.assertEqual(script_str, script.script.data)
-        self.assertEqual(comment, script.script.comment)
+        self.assertEquals(script_str, script.script.data)
+        self.assertEquals(comment, script.script.comment)
 
     def test_create_accepts_ver_txt_file_for_script(self):
         name = factory.make_name("name")
@@ -333,8 +311,8 @@ class TestScriptManager(MAASServerTestCase):
 
         script = Script.objects.create(name=name, script=ver_txt_file)
 
-        self.assertEqual(script_str, script.script.data)
-        self.assertEqual(ver_txt_file, script.script)
+        self.assertEquals(script_str, script.script.data)
+        self.assertEquals(ver_txt_file, script.script)
 
     def test_create_accepts_int_for_timeout(self):
         name = factory.make_name("name")
@@ -345,7 +323,7 @@ class TestScriptManager(MAASServerTestCase):
             name=name, script=script_str, timeout=timeout
         )
 
-        self.assertEqual(timedelta(seconds=timeout), script.timeout)
+        self.assertEquals(timedelta(seconds=timeout), script.timeout)
 
     def test_create_accepts_timedelta_for_timeout(self):
         name = factory.make_name("name")
@@ -356,7 +334,7 @@ class TestScriptManager(MAASServerTestCase):
             name=name, script=script_str, timeout=timeout
         )
 
-        self.assertEqual(timeout, script.timeout)
+        self.assertEquals(timeout, script.timeout)
 
 
 class TestScript(MAASServerTestCase):
@@ -376,7 +354,7 @@ class TestScript(MAASServerTestCase):
         script.add_tag(new_tag)
         script.save()
         script = reload_object(script)
-        self.assertEqual(len(set(script.tags)), len(script.tags))
+        self.assertEquals(len(set(script.tags)), len(script.tags))
 
     def test_remove_tag(self):
         script = factory.make_Script()
@@ -392,7 +370,7 @@ class TestScript(MAASServerTestCase):
         tag_count = len(script.tags)
         script.remove_tag(factory.make_name("tag"))
         script.save()
-        self.assertEqual(tag_count, len(reload_object(script).tags))
+        self.assertEquals(tag_count, len(reload_object(script).tags))
 
     def test_destructive_true_adds_tag(self):
         script = factory.make_Script(destructive=False)

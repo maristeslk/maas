@@ -6,7 +6,7 @@
 
 import random
 from statistics import mean
-from unittest.mock import call, Mock, sentinel
+from unittest.mock import Mock, sentinel
 
 from crochet import wait_for
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -27,6 +27,7 @@ from twisted.internet.defer import fail, inlineCallbacks, succeed
 from maasserver.enum import (
     INTERFACE_TYPE,
     IPADDRESS_TYPE,
+    NODE_CREATION_TYPE,
     NODE_STATUS,
     NODE_TYPE,
     POWER_STATE,
@@ -43,9 +44,12 @@ from maasserver.models.bmc import (
 from maasserver.models.fabric import Fabric
 from maasserver.models.filesystem import Filesystem
 from maasserver.models.interface import Interface
+from maasserver.models.iscsiblockdevice import (
+    get_iscsi_target,
+    ISCSIBlockDevice,
+)
 from maasserver.models.node import Machine
 from maasserver.models.physicalblockdevice import PhysicalBlockDevice
-from maasserver.models.podstoragepool import PodStoragePool
 from maasserver.models.resourcepool import ResourcePool
 from maasserver.models.staticipaddress import StaticIPAddress
 from maasserver.models.virtualmachine import (
@@ -64,6 +68,7 @@ from maasserver.utils.orm import reload_object
 from maasserver.utils.threads import deferToDatabase
 from maastesting.matchers import MockCalledOnceWith
 from provisioningserver.drivers.pod import (
+    BlockDeviceType,
     DiscoveredMachine,
     DiscoveredMachineBlockDevice,
     DiscoveredMachineInterface,
@@ -734,6 +739,25 @@ class TestPodManager(MAASServerTestCase):
             pod, Pod.objects.get_pod_or_404(pod.id, user, PodPermission.view)
         )
 
+    def test_have_rsd_with_no_rsd(self):
+        factory.make_Pod()
+        user = factory.make_User()
+        self.patch(user, "has_perm").return_value = True
+        self.assertFalse(Pod.objects.have_rsd(user, PodPermission.view))
+
+    def test_have_rsd_with_rsd(self):
+        factory.make_Pod(pod_type="rsd")
+        user = factory.make_User()
+        self.patch(user, "has_perm").return_value = True
+        self.assertTrue(Pod.objects.have_rsd(user, PodPermission.view))
+
+    def test_have_rsd_with_forbidden_rsd(self):
+        self.enable_rbac()
+        factory.make_Pod(pod_type="rsd")
+        user = factory.make_User()
+        self.patch(user, "has_perm").return_value = False
+        self.assertFalse(Pod.objects.have_rsd(user, PodPermission.view))
+
 
 class TestPod(MAASServerTestCase):
     def make_discovered_block_device(
@@ -741,16 +765,27 @@ class TestPod(MAASServerTestCase):
         model=None,
         serial=None,
         id_path=None,
+        target=None,
+        block_type=BlockDeviceType.PHYSICAL,
         storage_pools=None,
     ):
-        if id_path is None:
-            if model is None:
-                model = factory.make_name("model")
-            if serial is None:
-                serial = factory.make_name("serial")
+        if block_type == BlockDeviceType.PHYSICAL:
+            if id_path is None:
+                if model is None:
+                    model = factory.make_name("model")
+                if serial is None:
+                    serial = factory.make_name("serial")
+            else:
+                model = None
+                serial = None
+        elif block_type == BlockDeviceType.ISCSI:
+            if target is None:
+                target = "%s::::%s" % (
+                    factory.make_name("host"),
+                    factory.make_name("target"),
+                )
         else:
-            model = None
-            serial = None
+            raise ValueError("Unknown block_type: %s" % block_type)
         storage_pool = None
         if storage_pools is not None:
             storage_pool = random.choice(storage_pools).id
@@ -761,6 +796,8 @@ class TestPod(MAASServerTestCase):
             block_size=random.choice([512, 4096]),
             tags=[factory.make_name("tag") for _ in range(3)],
             id_path=id_path,
+            type=block_type,
+            iscsi_target=target,
             storage_pool=storage_pool,
         )
 
@@ -785,7 +822,6 @@ class TestPod(MAASServerTestCase):
 
     def make_discovered_machine(
         self,
-        project=None,
         block_devices=None,
         interfaces=None,
         storage_pools=None,
@@ -794,7 +830,13 @@ class TestPod(MAASServerTestCase):
         if block_devices is None:
             block_devices = [
                 self.make_discovered_block_device(
+                    block_type=BlockDeviceType.PHYSICAL,
                     storage_pools=storage_pools,
+                )
+                for _ in range(3)
+            ] + [
+                self.make_discovered_block_device(
+                    block_type=BlockDeviceType.ISCSI
                 )
                 for _ in range(3)
             ]
@@ -804,9 +846,6 @@ class TestPod(MAASServerTestCase):
         hostname = factory.make_name("hostname")
         if memory is None:
             memory = random.randint(8192, 8192 * 8)
-        power_parameters = {"instance_name": hostname}
-        if project:
-            power_parameters["project"] = project
         return DiscoveredMachine(
             hostname=hostname,
             architecture="amd64/generic",
@@ -816,7 +855,7 @@ class TestPod(MAASServerTestCase):
             interfaces=interfaces,
             block_devices=block_devices,
             power_state=random.choice([POWER_STATE.ON, POWER_STATE.OFF]),
-            power_parameters=power_parameters,
+            power_parameters={"instance_name": hostname},
             tags=[factory.make_name("tag") for _ in range(3)],
         )
 
@@ -847,16 +886,19 @@ class TestPod(MAASServerTestCase):
         return DiscoveredPod(
             architectures=["amd64/generic"],
             name=name,
-            version=factory.make_name("version"),
             cores=random.randint(8, 120),
             cpu_speed=random.randint(2000, 4000),
             memory=random.randint(8192, 8192 * 8),
             local_storage=random.randint(20000, 40000),
+            local_disks=1,
+            iscsi_storage=random.randint(20000, 40000),
             hints=DiscoveredPodHints(
                 cores=random.randint(8, 16),
                 cpu_speed=random.randint(2000, 4000),
                 memory=random.randint(8192, 8192 * 2),
                 local_storage=random.randint(10000, 20000),
+                local_disks=1,
+                iscsi_storage=random.randint(20000, 40000),
             ),
             storage_pools=storage_pools,
             machines=machines,
@@ -914,10 +956,7 @@ class TestPod(MAASServerTestCase):
         # to make sure no duplicates are added on sync.
         pod = Pod(
             power_type="lxd",
-            power_parameters={
-                "power_address": "https://10.0.0.1:8443",
-                "project": "prj",
-            },
+            power_parameters={"power_address": "https://10.0.0.1:8443"},
             tags=[discovered.tags[0]],
         )
         self.patch(pod, "sync_machines")
@@ -927,11 +966,12 @@ class TestPod(MAASServerTestCase):
             MatchesStructure(
                 architectures=Equals(discovered.architectures),
                 name=Equals(discovered.name),
-                version=Equals(discovered.version),
                 cores=Equals(discovered.cores),
                 cpu_speed=Equals(discovered.cpu_speed),
                 memory=Equals(discovered.memory),
                 local_storage=Equals(discovered.local_storage),
+                local_disks=Equals(discovered.local_disks),
+                iscsi_storage=Equals(discovered.iscsi_storage),
                 capabilities=Equals(discovered.capabilities),
                 tags=MatchesSetwise(*[Equals(tag) for tag in discovered.tags]),
                 hints=MatchesStructure(
@@ -939,6 +979,7 @@ class TestPod(MAASServerTestCase):
                     cpu_speed=Equals(discovered.hints.cpu_speed),
                     memory=Equals(discovered.hints.memory),
                     local_storage=Equals(discovered.hints.local_storage),
+                    local_disks=Equals(discovered.hints.local_disks),
                 ),
                 default_storage_pool=MatchesStructure(
                     pool_id=Equals(discovered.storage_pools[0].id)
@@ -994,7 +1035,7 @@ class TestPod(MAASServerTestCase):
                         instance_power_parameters=Equals(
                             machine.power_parameters
                         ),
-                        dynamic=Equals(False),
+                        creation_type=Equals(NODE_CREATION_TYPE.PRE_EXISTING),
                         tags=MatchesSetwiseWithAll(
                             *[
                                 MatchesStructure(name=Equals(tag))
@@ -1017,8 +1058,35 @@ class TestPod(MAASServerTestCase):
                                     tags=MatchesSetwise(
                                         *[Equals(tag) for tag in bd.tags]
                                     ),
+                                    storage_pool=Equals(
+                                        pod._get_storage_pool_by_id(
+                                            bd.storage_pool
+                                        )
+                                    ),
                                 )
                                 for idx, bd in enumerate(machine.block_devices)
+                                if bd.type == BlockDeviceType.PHYSICAL
+                            ]
+                        ),
+                        iscsiblockdevice_set=MatchesSetwiseWithAll(
+                            *[
+                                MatchesStructure(
+                                    name=Equals(
+                                        BlockDevice._get_block_name_from_idx(
+                                            idx
+                                        )
+                                    ),
+                                    target=Equals(
+                                        get_iscsi_target(bd.iscsi_target)
+                                    ),
+                                    size=Equals(bd.size),
+                                    block_size=Equals(bd.block_size),
+                                    tags=MatchesSetwise(
+                                        *[Equals(tag) for tag in bd.tags]
+                                    ),
+                                )
+                                for idx, bd in enumerate(machine.block_devices)
+                                if bd.type == BlockDeviceType.ISCSI
                             ]
                         ),
                         boot_interface=IsInstance(Interface),
@@ -1062,122 +1130,38 @@ class TestPod(MAASServerTestCase):
             Equals(len(discovered.machines)),
         )
 
-    def test_sync_creates_vms_all_projects(self):
-        project1 = factory.make_string()
-        project2 = factory.make_string()
-        discovered_machines = [
-            self.make_discovered_machine(project=project1),
-            self.make_discovered_machine(project=project2),
-        ]
-        discovered_pod = self.make_discovered_pod(machines=discovered_machines)
-        pod = factory.make_Pod(
-            pod_type="lxd", parameters={"project": project1}
-        )
-        self.patch(Machine, "start_commissioning")
-        pod.sync(discovered_pod, factory.make_User())
-        discovered_vms = {
-            discovered_vm.power_parameters["instance_name"]: discovered_vm
-            for discovered_vm in discovered_machines
-        }
-        vms = VirtualMachine.objects.all()
-        for vm in vms:
-            discovered_vm = discovered_vms.pop(vm.identifier)
-            self.assertEqual(
-                vm.project, discovered_vm.power_parameters["project"]
-            )
-            self.assertEqual(vm.memory, discovered_vm.memory)
-            self.assertEqual(
-                vm.hugepages_backed, discovered_vm.hugepages_backed
-            )
-            self.assertEqual(vm.pinned_cores, discovered_vm.pinned_cores)
-            self.assertEqual(vm.unpinned_cores, discovered_vm.cores)
-        self.assertEqual(discovered_vms, {}, "Found extra vms not discovered")
-        # a machine is created only for the VM in the tracked project
-        [machine] = Machine.objects.all()
-        self.assertEqual(machine.virtualmachine.project, project1)
-
-    def test_sync_deletes_vms_all_projects(self):
-        project1 = factory.make_string()
-        project2 = factory.make_string()
-        discovered_pod = self.make_discovered_pod(machines=[])
-        pod = factory.make_Pod(
-            pod_type="lxd", parameters={"project": project1}
-        )
-        factory.make_VirtualMachine(project=project1, bmc=pod)
-        factory.make_VirtualMachine(project=project2, bmc=pod)
-        self.patch(Machine, "start_commissioning")
-        pod.sync(discovered_pod, factory.make_User())
-        self.assertFalse(VirtualMachine.objects.exists())
-
-    def test_sync_deletes_vms_no_project(self):
-        discovered_pod = self.make_discovered_pod(machines=[])
-        pod = factory.make_Pod(pod_type="virsh")
-        factory.make_VirtualMachine(bmc=pod)
-        factory.make_VirtualMachine(bmc=pod)
-        self.patch(Machine, "start_commissioning")
-        pod.sync(discovered_pod, factory.make_User())
-        self.assertFalse(VirtualMachine.objects.exists())
-
-    def test_sync_pod_links_existing_vm(self):
-        project = factory.make_string()
-        discovered_machine = self.make_discovered_machine(project=project)
+    def test_sync_for_lxd_pod_links_existing_vm(self):
+        discovered_machine = self.make_discovered_machine()
         discovered_pod = self.make_discovered_pod(
             machines=[discovered_machine]
         )
         instance_name = discovered_machine.power_parameters["instance_name"]
-        pod = factory.make_Pod(pod_type="lxd", parameters={"project": project})
+
+        pod = factory.make_Pod(pod_type="lxd")
         virtual_machine = factory.make_VirtualMachine(
-            identifier=instance_name,
-            bmc=pod,
-            project=project,
+            identifier=instance_name, bmc=pod
         )
         self.patch(Machine, "start_commissioning")
         pod.sync(discovered_pod, factory.make_User())
         machine = Machine.objects.get(hostname=instance_name)
         self.assertEqual(machine.virtualmachine, virtual_machine)
 
-    def test_sync_pod_links_different_vm_different_project(self):
-        project = factory.make_string()
-        discovered_machine = self.make_discovered_machine(project=project)
-        discovered_pod = self.make_discovered_pod(
-            machines=[discovered_machine]
-        )
-        instance_name = discovered_machine.power_parameters["instance_name"]
-        pod = factory.make_Pod(pod_type="lxd", parameters={"project": project})
-        other_vm = factory.make_VirtualMachine(
-            identifier=instance_name,
-            bmc=pod,
-            project=factory.make_string(),
-        )
-        self.patch(Machine, "start_commissioning")
-        pod.sync(discovered_pod, factory.make_User())
-        machine = Machine.objects.get(hostname=instance_name)
-        self.assertNotEqual(machine.virtualmachine, other_vm)
-
-    def test_sync_pod_removes_unknown_vms(self):
-        project = factory.make_string()
-        discovered_machine = self.make_discovered_machine(project=project)
-        instance_name = discovered_machine.power_parameters["instance_name"]
-        discovered_pod = self.make_discovered_pod(
-            machines=[discovered_machine]
-        )
-        pod = factory.make_Pod(pod_type="lxd", parameters={"project": project})
+    def test_sync_for_lxd_pod_removes_unknown_vms(self):
+        discovered_pod = self.make_discovered_pod(machines=[])
+        pod = factory.make_Pod(pod_type="lxd")
         machine1 = factory.make_Machine(bmc=pod)
         # a VM linked to a machine that's been removed on the VM host
         factory.make_VirtualMachine(
             identifier=machine1.hostname,
             bmc=pod,
             machine=machine1,
-            project=project,
         )
         # a VM not linked to a machine that's been removed on the VM host
-        factory.make_VirtualMachine(bmc=pod, project=project)
+        factory.make_VirtualMachine(bmc=pod)
         self.patch(Machine, "start_commissioning")
         pod.sync(discovered_pod, factory.make_User())
-        self.assertNotIn(machine1, Machine.objects.all())
-        # only one VM exists, for the new discovered machine
-        [new_vm] = VirtualMachine.objects.all()
-        self.assertEqual(new_vm.identifier, instance_name)
+        self.assertFalse(Machine.objects.exists())
+        self.assertFalse(VirtualMachine.objects.exists())
 
     def test_sync_pod_upgrades_default_storage_pool(self):
         discovered = self.make_discovered_pod(machines=[])
@@ -1227,10 +1211,14 @@ class TestPod(MAASServerTestCase):
         self.assertNotEquals(-1, pod.cpu_speed)
         self.assertNotEquals(-1, pod.memory)
         self.assertNotEquals(-1, pod.local_storage)
+        self.assertNotEquals(-1, pod.local_disks)
+        self.assertNotEquals(-1, pod.iscsi_storage)
         self.assertNotEquals(-1, pod.hints.cores)
         self.assertNotEquals(-1, pod.hints.cpu_speed)
         self.assertNotEquals(-1, pod.hints.memory)
         self.assertNotEquals(-1, pod.hints.local_storage)
+        self.assertNotEquals(-1, pod.hints.local_disks)
+        self.assertNotEquals(-1, pod.hints.iscsi_storage)
 
     def test_create_machine_ensures_unique_hostname(self):
         existing_machine = factory.make_Node()
@@ -1250,60 +1238,42 @@ class TestPod(MAASServerTestCase):
         # that will cause a database exception.
         pod.create_machine(discovered_machine, factory.make_User())
 
-    def test_create_machine_creates_virtualmachine(self):
+    def test_create_machine_for_lxd_creates_virtualmachine(self):
         self.patch(Machine, "set_default_storage_layout")
         self.patch(Machine, "set_initial_networking_configuration")
         self.patch(Machine, "start_commissioning")
-        project = factory.make_string()
-        pod = factory.make_Pod(pod_type="lxd", parameters={"project": project})
+        pod = factory.make_Pod(pod_type="lxd")
         discovered_machine = self.make_discovered_machine()
-        instance_name = discovered_machine.power_parameters["instance_name"]
+        instance_name = factory.make_string()
+        discovered_machine.power_parameters["instance_name"] = instance_name
         machine = pod.create_machine(discovered_machine, factory.make_User())
         vm = machine.virtualmachine
         self.assertEqual(vm.identifier, instance_name)
         self.assertEqual(vm.bmc, pod)
-        self.assertEqual(vm.project, project)
         self.assertEqual(vm.machine, machine)
         self.assertEqual(vm.memory, machine.memory)
         self.assertEqual(vm.unpinned_cores, machine.cpu_count)
         self.assertFalse(vm.hugepages_backed)
 
-    def test_create_machine_creates_virtualmachine_no_project(self):
-        self.patch(Machine, "set_default_storage_layout")
-        self.patch(Machine, "set_initial_networking_configuration")
-        self.patch(Machine, "start_commissioning")
-        pod = factory.make_Pod(pod_type="virsh")
-        discovered_machine = self.make_discovered_machine()
-        instance_name = factory.make_string()
-        discovered_machine.power_parameters = {"power_id": instance_name}
-        machine = pod.create_machine(discovered_machine, factory.make_User())
-        vm = machine.virtualmachine
-        self.assertEqual(vm.identifier, instance_name)
-        self.assertEqual(vm.project, "")
-
-    def test_create_machine_creates_virtualmachine_with_hugepages(
+    def test_create_machine_for_lxd_creates_virtualmachine_with_hugepages(
         self,
     ):
         self.patch(Machine, "set_default_storage_layout")
         self.patch(Machine, "set_initial_networking_configuration")
         self.patch(Machine, "start_commissioning")
-        project = factory.make_string()
-        pod = factory.make_Pod(
-            pod_type="lxd",
-            parameters={"project": project},
-        )
-        discovered_machine = self.make_discovered_machine(project=project)
+        pod = factory.make_Pod(pod_type="lxd")
+        discovered_machine = self.make_discovered_machine()
+        instance_name = factory.make_string()
+        discovered_machine.power_parameters["instance_name"] = instance_name
         discovered_machine.hugepages_backed = True
         machine = pod.create_machine(discovered_machine, factory.make_User())
         self.assertTrue(machine.virtualmachine.hugepages_backed)
 
-    def test_create_machine_creates_virtualmachine_pinned_cores(self):
+    def test_create_machine_for_lxd_creates_virtualmachine_pinned_cores(self):
         self.patch(Machine, "set_default_storage_layout")
         self.patch(Machine, "set_initial_networking_configuration")
         self.patch(Machine, "start_commissioning")
-        pod = factory.make_Pod(
-            pod_type="lxd", parameters={"project": factory.make_string()}
-        )
+        pod = factory.make_Pod(pod_type="lxd")
         discovered_machine = self.make_discovered_machine()
         instance_name = factory.make_string()
         discovered_machine.power_parameters["instance_name"] = instance_name
@@ -1796,42 +1766,6 @@ class TestPod(MAASServerTestCase):
             ),
         )
 
-    def test_create_machine_with_disks_creates_vmdisk(self):
-        d_storage_pool1 = self.make_discovered_storage_pool()
-        d_storage_pool2 = self.make_discovered_storage_pool()
-        d_block_device1 = self.make_discovered_block_device(
-            id_path="/dev/sda",
-            storage_pools=[d_storage_pool1],
-        )
-        d_block_device2 = self.make_discovered_block_device(
-            id_path="/dev/sdb",
-            storage_pools=[d_storage_pool2],
-        )
-        discovered_machine = self.make_discovered_machine(
-            block_devices=[d_block_device1, d_block_device2],
-        )
-        discovered_pool = self.make_discovered_pod(
-            machines=[], storage_pools=[d_storage_pool1, d_storage_pool2]
-        )
-        self.patch(Machine, "set_default_storage_layout")
-        self.patch(Machine, "set_initial_networking_configuration")
-        self.patch(Machine, "start_commissioning")
-        pod = factory.make_Pod()
-        pod.sync(discovered_pool, factory.make_User())
-
-        machine = pod.create_machine(discovered_machine, factory.make_User())
-        vm = machine.virtualmachine
-        vmdisk1, vmdisk2 = vm.disks_set.order_by("block_device__id_path")
-        disk1, disk2 = machine.blockdevice_set.order_by("id_path")
-        pool1 = PodStoragePool.objects.get(pool_id=d_storage_pool1.id)
-        pool2 = PodStoragePool.objects.get(pool_id=d_storage_pool2.id)
-        self.assertEqual(disk1.vmdisk, vmdisk1)
-        self.assertEqual(disk2.vmdisk, vmdisk2)
-        self.assertEqual(vmdisk1.backing_pool, pool1)
-        self.assertEqual(vmdisk2.backing_pool, pool2)
-        self.assertEqual(disk1.size, vmdisk1.size)
-        self.assertEqual(disk2.size, vmdisk2.size)
-
     def test_sync_pod_creates_new_machines_connected_to_dhcp_vlan(self):
         discovered = self.make_discovered_pod()
         mock_set_default_storage_layout = self.patch(
@@ -1870,7 +1804,7 @@ class TestPod(MAASServerTestCase):
                         instance_power_parameters=Equals(
                             machine.power_parameters
                         ),
-                        dynamic=Equals(False),
+                        creation_type=Equals(NODE_CREATION_TYPE.PRE_EXISTING),
                         tags=MatchesSetwiseWithAll(
                             *[
                                 MatchesStructure(name=Equals(tag))
@@ -1893,8 +1827,35 @@ class TestPod(MAASServerTestCase):
                                     tags=MatchesSetwise(
                                         *[Equals(tag) for tag in bd.tags]
                                     ),
+                                    storage_pool=Equals(
+                                        pod._get_storage_pool_by_id(
+                                            bd.storage_pool
+                                        )
+                                    ),
                                 )
                                 for idx, bd in enumerate(machine.block_devices)
+                                if bd.type == BlockDeviceType.PHYSICAL
+                            ]
+                        ),
+                        iscsiblockdevice_set=MatchesSetwiseWithAll(
+                            *[
+                                MatchesStructure(
+                                    name=Equals(
+                                        BlockDevice._get_block_name_from_idx(
+                                            idx
+                                        )
+                                    ),
+                                    target=Equals(
+                                        get_iscsi_target(bd.iscsi_target)
+                                    ),
+                                    size=Equals(bd.size),
+                                    block_size=Equals(bd.block_size),
+                                    tags=MatchesSetwise(
+                                        *[Equals(tag) for tag in bd.tags]
+                                    ),
+                                )
+                                for idx, bd in enumerate(machine.block_devices)
+                                if bd.type == BlockDeviceType.ISCSI
                             ]
                         ),
                         boot_interface=IsInstance(Interface),
@@ -1967,7 +1928,7 @@ class TestPod(MAASServerTestCase):
                 memory=Equals(machine.memory),
                 power_state=Equals(machine.power_state),
                 instance_power_parameters=Equals(machine.power_parameters),
-                dynamic=Equals(False),
+                creation_type=Equals(NODE_CREATION_TYPE.PRE_EXISTING),
                 tags=MatchesSetwiseWithAll(
                     *[
                         MatchesStructure(name=Equals(tag))
@@ -2046,7 +2007,9 @@ class TestPod(MAASServerTestCase):
 
     def test_sync_updates_machine_properties_for_dynamic(self):
         pod = factory.make_Pod()
-        machine = factory.make_Node(interface=True, dynamic=True)
+        machine = factory.make_Node(
+            interface=True, creation_type=NODE_CREATION_TYPE.DYNAMIC
+        )
         discovered_interface = self.make_discovered_interface(
             mac_address=machine.interface_set.first().mac_address
         )
@@ -2080,7 +2043,12 @@ class TestPod(MAASServerTestCase):
 
     def test_sync_updates_machine_properties_for_not_dynamic(self):
         pod = factory.make_Pod()
-        machine = factory.make_Node(interface=True, dynamic=False)
+        machine = factory.make_Node(
+            interface=True,
+            creation_type=random.choice(
+                [NODE_CREATION_TYPE.PRE_EXISTING, NODE_CREATION_TYPE.MANUAL]
+            ),
+        )
         discovered_interface = self.make_discovered_interface(
             mac_address=machine.interface_set.first().mac_address
         )
@@ -2113,30 +2081,13 @@ class TestPod(MAASServerTestCase):
         )
 
     def test_sync_creates_machine_vm(self):
-        project = factory.make_string()
-        pod = factory.make_Pod(pod_type="lxd", parameters={"project": project})
-        machine = factory.make_Node(interface=True)
-        discovered_interface = self.make_discovered_interface(
-            mac_address=machine.interface_set.first().mac_address,
+        pod = factory.make_Pod(pod_type="lxd")
+        machine = factory.make_Node(
+            interface=True,
+            creation_type=random.choice(
+                [NODE_CREATION_TYPE.PRE_EXISTING, NODE_CREATION_TYPE.MANUAL]
+            ),
         )
-        discovered_machine = self.make_discovered_machine(
-            project=project, interfaces=[discovered_interface]
-        )
-        discovered_machine.hugepages_backed = True
-        discovered_machine.pinned_cores = [0, 1, 2]
-        discovered_pod = self.make_discovered_pod(
-            machines=[discovered_machine]
-        )
-        pod.sync(discovered_pod, factory.make_User())
-        machine = reload_object(machine)
-        vm = machine.virtualmachine
-        self.assertTrue(vm.hugepages_backed)
-        self.assertEqual(vm.pinned_cores, [0, 1, 2])
-        self.assertEqual(vm.project, project)
-
-    def test_sync_creates_machine_vm_no_project(self):
-        pod = factory.make_Pod(pod_type="virsh")
-        machine = factory.make_Node(interface=True)
         discovered_interface = self.make_discovered_interface(
             mac_address=machine.interface_set.first().mac_address,
         )
@@ -2152,16 +2103,19 @@ class TestPod(MAASServerTestCase):
         machine = reload_object(machine)
         vm = machine.virtualmachine
         self.assertTrue(vm.hugepages_backed)
-        self.assertEqual(vm.project, "")
+        self.assertEqual(vm.pinned_cores, [0, 1, 2])
 
     def test_sync_updates_machine_vm(self):
-        project = factory.make_string()
-        pod = factory.make_Pod(pod_type="lxd", parameters={"project": project})
-        machine = factory.make_Node(interface=True)
+        pod = factory.make_Pod(pod_type="lxd")
+        machine = factory.make_Node(
+            interface=True,
+            creation_type=random.choice(
+                [NODE_CREATION_TYPE.PRE_EXISTING, NODE_CREATION_TYPE.MANUAL]
+            ),
+        )
         vm = factory.make_VirtualMachine(
             identifier=machine.hostname,
             bmc=pod,
-            project=project,
             machine=machine,
             hugepages_backed=False,
         )
@@ -2169,7 +2123,7 @@ class TestPod(MAASServerTestCase):
             mac_address=machine.interface_set.first().mac_address,
         )
         discovered_machine = self.make_discovered_machine(
-            project=project, interfaces=[discovered_interface]
+            interfaces=[discovered_interface]
         )
         discovered_machine.hugepages_backed = True
         discovered_machine.pinned_cores = [0, 1, 2]
@@ -2240,7 +2194,9 @@ class TestPod(MAASServerTestCase):
 
     def test_sync_updates_existing_machine_block_devices_for_dynamic(self):
         pod = factory.make_Pod()
-        machine = factory.make_Node(with_boot_disk=False, dynamic=True)
+        machine = factory.make_Node(
+            with_boot_disk=False, creation_type=NODE_CREATION_TYPE.DYNAMIC
+        )
         boot_interface = factory.make_Interface(
             INTERFACE_TYPE.PHYSICAL, node=machine
         )
@@ -2248,26 +2204,43 @@ class TestPod(MAASServerTestCase):
         keep_path_bd = factory.make_PhysicalBlockDevice(
             node=machine, id_path=factory.make_name("id_path")
         )
+        keep_iscsi_bd = factory.make_ISCSIBlockDevice(node=machine)
+        # ISCIBlockDevice that exists on another machine. It should be
+        # moved to this machine.
+        other_iscsi_bd = factory.make_ISCSIBlockDevice()
         delete_model_bd = factory.make_PhysicalBlockDevice(node=machine)
         delete_path_bd = factory.make_PhysicalBlockDevice(
             node=machine, id_path=factory.make_name("id_path")
         )
+        delete_iscsi_bd = factory.make_ISCSIBlockDevice(node=machine)
         dkeep_model_bd = self.make_discovered_block_device(
             model=keep_model_bd.model, serial=keep_model_bd.serial
         )
         dkeep_path_bd = self.make_discovered_block_device(
             id_path=keep_path_bd.id_path
         )
+        dkeep_iscsi_bd = self.make_discovered_block_device(
+            target=keep_iscsi_bd.target, block_type=BlockDeviceType.ISCSI
+        )
+        dother_iscsi_bd = self.make_discovered_block_device(
+            target=other_iscsi_bd.target, block_type=BlockDeviceType.ISCSI
+        )
         dnew_model_bd = self.make_discovered_block_device()
         dnew_path_bd = self.make_discovered_block_device(
             id_path=factory.make_name("id_path")
+        )
+        dnew_iscsi_bd = self.make_discovered_block_device(
+            block_type=BlockDeviceType.ISCSI
         )
         discovered_machine = self.make_discovered_machine(
             block_devices=[
                 dkeep_model_bd,
                 dkeep_path_bd,
+                dkeep_iscsi_bd,
+                dother_iscsi_bd,
                 dnew_model_bd,
                 dnew_path_bd,
+                dnew_iscsi_bd,
             ],
             interfaces=[
                 self.make_discovered_interface(
@@ -2275,9 +2248,6 @@ class TestPod(MAASServerTestCase):
                 )
             ],
         )
-        discovered_machine.power_parameters[
-            "instance_name"
-        ] = factory.make_string()
         discovered_pod = self.make_discovered_pod(
             machines=[discovered_machine]
         )
@@ -2285,8 +2255,11 @@ class TestPod(MAASServerTestCase):
         machine = reload_object(machine)
         keep_model_bd = reload_object(keep_model_bd)
         keep_path_bd = reload_object(keep_path_bd)
+        keep_iscsi_bd = reload_object(keep_iscsi_bd)
+        other_iscsi_bd = reload_object(other_iscsi_bd)
         delete_model_bd = reload_object(delete_model_bd)
         delete_path_bd = reload_object(delete_path_bd)
+        delete_iscsi_bd = reload_object(delete_iscsi_bd)
         new_model_bd = PhysicalBlockDevice.objects.filter(
             node=machine,
             model=dnew_model_bd.model,
@@ -2295,8 +2268,12 @@ class TestPod(MAASServerTestCase):
         new_path_bd = PhysicalBlockDevice.objects.filter(
             node=machine, id_path=dnew_path_bd.id_path
         ).first()
+        new_iscsi_bd = ISCSIBlockDevice.objects.filter(
+            node=machine, target=get_iscsi_target(dnew_iscsi_bd.iscsi_target)
+        ).first()
         self.assertIsNone(delete_model_bd)
         self.assertIsNone(delete_path_bd)
+        self.assertIsNone(delete_iscsi_bd)
         self.assertThat(
             keep_model_bd,
             MatchesStructure(
@@ -2307,7 +2284,6 @@ class TestPod(MAASServerTestCase):
                 ),
             ),
         )
-        self.assertEqual(keep_model_bd.vmdisk.size, dkeep_model_bd.size)
         self.assertThat(
             keep_path_bd,
             MatchesStructure(
@@ -2318,7 +2294,27 @@ class TestPod(MAASServerTestCase):
                 ),
             ),
         )
-        self.assertEqual(keep_path_bd.vmdisk.size, dkeep_path_bd.size)
+        self.assertThat(
+            keep_iscsi_bd,
+            MatchesStructure(
+                size=Equals(dkeep_iscsi_bd.size),
+                block_size=Equals(dkeep_iscsi_bd.block_size),
+                tags=MatchesSetwise(
+                    *[Equals(tag) for tag in dkeep_iscsi_bd.tags]
+                ),
+            ),
+        )
+        self.assertThat(
+            other_iscsi_bd,
+            MatchesStructure(
+                node=Equals(machine),
+                size=Equals(dother_iscsi_bd.size),
+                block_size=Equals(dother_iscsi_bd.block_size),
+                tags=MatchesSetwise(
+                    *[Equals(tag) for tag in dother_iscsi_bd.tags]
+                ),
+            ),
+        )
         self.assertThat(
             new_model_bd,
             MatchesStructure(
@@ -2329,7 +2325,6 @@ class TestPod(MAASServerTestCase):
                 ),
             ),
         )
-        self.assertEqual(new_model_bd.vmdisk.size, dnew_model_bd.size)
         self.assertThat(
             new_path_bd,
             MatchesStructure(
@@ -2340,30 +2335,20 @@ class TestPod(MAASServerTestCase):
                 ),
             ),
         )
-        self.assertEqual(new_path_bd.vmdisk.size, dnew_path_bd.size)
-
-    def test_sync_updates_existing_machine_cpu_memory(self):
-        pod = factory.make_Pod(pod_type="virsh")
-        machine = factory.make_Node(interface=True, cpu_count=2, memory=1024)
-        discovered_interface = self.make_discovered_interface(
-            mac_address=machine.interface_set.first().mac_address,
+        self.assertThat(
+            new_iscsi_bd,
+            MatchesStructure(
+                size=Equals(dnew_iscsi_bd.size),
+                block_size=Equals(dnew_iscsi_bd.block_size),
+                tags=MatchesSetwise(
+                    *[Equals(tag) for tag in dnew_iscsi_bd.tags]
+                ),
+            ),
         )
-        discovered_machine = self.make_discovered_machine(
-            interfaces=[discovered_interface]
-        )
-        discovered_machine.cores = 3
-        discovered_machine.memory = 4096
-        discovered_pod = self.make_discovered_pod(
-            machines=[discovered_machine]
-        )
-        pod.sync(discovered_pod, factory.make_User())
-        machine = reload_object(machine)
-        self.assertEqual(machine.cpu_count, 3)
-        self.assertEqual(machine.memory, 4096)
 
     def test_sync_updates_existing_machine_interfaces_for_dynamic(self):
         pod = factory.make_Pod()
-        machine = factory.make_Node(dynamic=True)
+        machine = factory.make_Node(creation_type=NODE_CREATION_TYPE.DYNAMIC)
         other_vlan = factory.make_Fabric().get_default_vlan()
         keep_interface = factory.make_Interface(
             INTERFACE_TYPE.PHYSICAL, node=machine, vlan=other_vlan
@@ -2412,83 +2397,7 @@ class TestPod(MAASServerTestCase):
         )
         self.assertEqual(new_interface, machine.boot_interface)
 
-    def test_sync_updates_existing_machine_vmdisks(self):
-        pod = factory.make_Pod()
-        machine = factory.make_Node(with_boot_disk=False, dynamic=True)
-        boot_interface = factory.make_Interface(
-            INTERFACE_TYPE.PHYSICAL, node=machine
-        )
-        disk1 = factory.make_PhysicalBlockDevice(
-            node=machine,
-            id_path=factory.make_name("id_path"),
-        )
-        disk2 = factory.make_PhysicalBlockDevice(
-            node=machine,
-            id_path=factory.make_name("id_path"),
-        )
-        d_disk1 = self.make_discovered_block_device(id_path=disk1.id_path)
-        d_disk2 = self.make_discovered_block_device(id_path=disk2.id_path)
-        discovered_machine = self.make_discovered_machine(
-            block_devices=[d_disk1, d_disk2],
-            interfaces=[
-                self.make_discovered_interface(
-                    mac_address=boot_interface.mac_address
-                )
-            ],
-        )
-        discovered_machine.power_parameters[
-            "instance_name"
-        ] = factory.make_string()
-        discovered_pod = self.make_discovered_pod(
-            machines=[discovered_machine]
-        )
-        pod.sync(discovered_pod, factory.make_User())
-        machine = reload_object(machine)
-        vmdisk1 = disk1.vmdisk
-        vmdisk2 = disk2.vmdisk
-        self.assertIsNotNone(vmdisk1)
-        self.assertIsNotNone(vmdisk2)
-        discovered_machine.block_devices = [d_disk1]
-        pod.sync(discovered_pod, factory.make_User())
-        # the second disk and its VirtualMachineDisk are removed
-        self.assertIsNone(reload_object(disk2))
-        self.assertIsNone(reload_object(vmdisk2))
-
-    def test_sync_creates_vmdisk_other_project(self):
-        pod = factory.make_Pod(
-            pod_type="lxd", parameters={"project": factory.make_string()}
-        )
-        discovered_pool1 = self.make_discovered_storage_pool()
-        discovered_pool2 = self.make_discovered_storage_pool()
-        discovered_machine = self.make_discovered_machine(
-            block_devices=[
-                self.make_discovered_block_device(
-                    storage_pools=[discovered_pool1]
-                ),
-                self.make_discovered_block_device(
-                    storage_pools=[discovered_pool2]
-                ),
-            ],
-        )
-        instance_name = factory.make_string()
-        discovered_machine.power_parameters = {
-            "instance_name": instance_name,
-            "project": factory.make_string(),
-        }
-        discovered_pod = self.make_discovered_pod(
-            machines=[discovered_machine],
-            storage_pools=[discovered_pool1, discovered_pool2],
-        )
-        pod.sync(discovered_pod, factory.make_User())
-        self.assertEqual(Machine.objects.count(), 0)
-        vm = VirtualMachine.objects.get(identifier=instance_name)
-        vmdisk1, vmdisk2 = vm.disks_set.order_by("backing_pool_id")
-        pool1 = PodStoragePool.objects.get(name=discovered_pool1.name)
-        pool2 = PodStoragePool.objects.get(name=discovered_pool2.name)
-        self.assertEqual(vmdisk1.backing_pool, pool1)
-        self.assertEqual(vmdisk2.backing_pool, pool2)
-
-    def test_sync_associates_existing_node(self):
+    def test_sync_assoicates_existing_node(self):
         pod = factory.make_Pod()
         node = factory.make_Node_with_Interface_on_Subnet()
         pod.sync(
@@ -2504,7 +2413,7 @@ class TestPod(MAASServerTestCase):
         )
         node = reload_object(node)
         self.assertItemsEqual([node], pod.hints.nodes.all())
-        self.assertEqual(NODE_STATUS.DEPLOYED, node.status)
+        self.assertEquals(NODE_STATUS.DEPLOYED, node.status)
         self.assertIsNotNone(node.current_commissioning_script_set)
 
     def test_sync_converts_existing_device(self):
@@ -2525,8 +2434,8 @@ class TestPod(MAASServerTestCase):
         )
         device = reload_object(device)
         self.assertItemsEqual([device], pod.hints.nodes.all())
-        self.assertEqual(NODE_STATUS.DEPLOYED, device.status)
-        self.assertEqual(NODE_TYPE.MACHINE, device.node_type)
+        self.assertEquals(NODE_STATUS.DEPLOYED, device.status)
+        self.assertEquals(NODE_TYPE.MACHINE, device.node_type)
         self.assertIsNotNone(device.current_commissioning_script_set)
 
     def test_sync_creates_machine(self):
@@ -2539,11 +2448,11 @@ class TestPod(MAASServerTestCase):
             ),
             factory.make_User(),
         )
-        self.assertEqual(1, pod.hints.nodes.count())
+        self.assertEquals(1, pod.hints.nodes.count())
         node = pod.hints.nodes.first()
-        self.assertEqual(pod.name, node.hostname)
-        self.assertEqual(NODE_STATUS.DEPLOYED, node.status)
-        self.assertEqual(NODE_TYPE.MACHINE, node.node_type)
+        self.assertEquals(pod.name, node.hostname)
+        self.assertEquals(NODE_STATUS.DEPLOYED, node.status)
+        self.assertEquals(NODE_TYPE.MACHINE, node.node_type)
         self.assertItemsEqual(
             mac_addresses,
             [str(iface.mac_address) for iface in node.interface_set.all()],
@@ -2560,6 +2469,7 @@ class TestPod(MAASServerTestCase):
             numa.save()
             for _ in range(2 ** random.randint(0, 4) - 1):
                 factory.make_NUMANode(node=node)
+            factory.make_ISCSIBlockDevice(node=node)
             pod.hints.nodes.add(node)
 
         pod.sync_hints_from_nodes()
@@ -2568,6 +2478,7 @@ class TestPod(MAASServerTestCase):
         cpu_speeds = []
         memory = 0
         local_storage = 0
+        iscsi_storage = 0
         for node in nodes:
             for numa in node.numanode_set.all():
                 cores += len(numa.cores)
@@ -2576,24 +2487,71 @@ class TestPod(MAASServerTestCase):
             for bd in node.blockdevice_set.all():
                 if bd.type == "physical":
                     local_storage += bd.size
+                elif bd.type == "iscsi":
+                    iscsi_storage += bd.size
 
-        self.assertEqual(pod.hints.cores, cores)
-        self.assertEqual(
+        self.assertEquals(pod.hints.cores, cores)
+        self.assertEquals(
             pod.hints.cpu_speed,
             int(mean(cpu_speeds)),
             f"Wrong hint ({pod.hints.cpu_speed}) for CPU speed. CPU speeds of nodes: {cpu_speeds}",
         )
-        self.assertEqual(pod.hints.memory, memory)
+        self.assertEquals(pod.hints.memory, memory)
+        self.assertEquals(pod.hints.local_disks, len(nodes))
+        self.assertEquals(pod.hints.iscsi_storage, iscsi_storage)
+
+    def test_get_used_cores(self):
+        pod = factory.make_Pod()
+        total_cores = 0
+        for _ in range(3):
+            cores = random.randint(1, 4)
+            total_cores += cores
+            factory.make_Node(bmc=pod, cpu_count=cores)
+        self.assertEquals(total_cores, pod.get_used_cores())
+
+    def test_get_used_memory(self):
+        pod = factory.make_Pod()
+        total_memory = 0
+        for _ in range(3):
+            memory = random.randint(1, 4)
+            total_memory += memory
+            factory.make_Node(bmc=pod, memory=memory)
+        self.assertEquals(total_memory, pod.get_used_memory())
+
+    def test_get_used_local_storage(self):
+        pod = factory.make_Pod()
+        total_storage = 0
+        for _ in range(3):
+            storage = random.randint(1024 ** 3, 4 * (1024 ** 3))
+            total_storage += storage
+            node = factory.make_Node(bmc=pod, with_boot_disk=False)
+            factory.make_PhysicalBlockDevice(node=node, size=storage)
+        self.assertEquals(total_storage, pod.get_used_local_storage())
+
+    def test_get_used_local_disks(self):
+        pod = factory.make_Pod()
+        for _ in range(3):
+            node = factory.make_Node(bmc=pod, with_boot_disk=False)
+            for _ in range(3):
+                factory.make_PhysicalBlockDevice(node=node)
+        self.assertEquals(9, pod.get_used_local_disks())
+
+    def test_get_used_iscsi_storage(self):
+        pod = factory.make_Pod()
+        total_storage = 0
+        for _ in range(3):
+            storage = random.randint(1024 ** 3, 4 * (1024 ** 3))
+            total_storage += storage
+            node = factory.make_Node(bmc=pod, with_boot_disk=False)
+            factory.make_ISCSIBlockDevice(node=node, size=storage)
+        self.assertEquals(total_storage, pod.get_used_iscsi_storage())
 
     def test_sync_machine_memory(self):
-        pod = factory.make_Pod(
-            pod_type="lxd", parameters={"project": factory.make_string()}
-        )
+        pod = factory.make_Pod(pod_type="lxd")
         machine = factory.make_Machine(memory=1234)
         discovered_machine = self.make_discovered_machine(memory=5678)
         VirtualMachine.objects.create(
             identifier=discovered_machine.hostname,
-            project=factory.make_string(),
             bmc=pod,
             memory=9123,
             machine=machine,
@@ -2613,7 +2571,6 @@ class TestPod(MAASServerTestCase):
         )
         VirtualMachine.objects.create(
             identifier=discovered_machine.hostname,
-            project=factory.make_string(),
             bmc=pod,
             machine=machine,
         )
@@ -2635,7 +2592,6 @@ class TestPod(MAASServerTestCase):
             interfaces=[interface],
         )
         vm = VirtualMachine.objects.create(
-            project=factory.make_string(),
             identifier=discovered_machine.hostname,
             bmc=pod,
             machine=machine,
@@ -2667,14 +2623,12 @@ class TestPod(MAASServerTestCase):
             interfaces=[interface],
         )
         vm = VirtualMachine.objects.create(
-            project=factory.make_string(),
             identifier=discovered_machine.hostname,
             bmc=pod,
             machine=machine,
         )
         vm2 = VirtualMachine.objects.create(
             identifier="vm2",
-            project=factory.make_string(),
             bmc=pod2,
             machine=machine2,
         )
@@ -2704,8 +2658,7 @@ class TestPod(MAASServerTestCase):
         self.assertEqual("33:44:55:66:77:88", str(vm2_interface.mac_address))
 
     def test_sync_machine_interface_no_mac_address(self):
-        project = factory.make_string()
-        pod = factory.make_Pod(pod_type="lxd", parameters={"project": project})
+        pod = factory.make_Pod(pod_type="lxd")
         interface1 = self.make_discovered_interface(
             mac_address=None,
             attach_type=InterfaceAttachType.SRIOV,
@@ -2716,7 +2669,6 @@ class TestPod(MAASServerTestCase):
         )
         machine = factory.make_Machine()
         discovered_machine = self.make_discovered_machine(
-            project=project,
             interfaces=[interface1, interface2],
         )
         pod._sync_machine(discovered_machine, machine)
@@ -2733,10 +2685,7 @@ class TestPod(MAASServerTestCase):
         )
 
     def test_sync_machine_interface_no_pod_host(self):
-        project = factory.make_string()
-        pod = factory.make_Pod(
-            pod_type="lxd", host=None, parameters={"project": project}
-        )
+        pod = factory.make_Pod(pod_type="lxd", host=None)
         interface = self.make_discovered_interface(
             mac_address="11:22:33:44:55:66",
             attach_type=InterfaceAttachType.BRIDGE,
@@ -2744,7 +2693,6 @@ class TestPod(MAASServerTestCase):
         )
         machine = factory.make_Machine()
         discovered_machine = self.make_discovered_machine(
-            project=project,
             interfaces=[interface],
         )
         pod._sync_machine(discovered_machine, machine)
@@ -2752,17 +2700,12 @@ class TestPod(MAASServerTestCase):
         self.assertIsNone(pod.host)
         self.assertIsNone(vm_interface.host_interface)
 
-    def test_sync_machine_interface_no_pod_host_interface(self):
-        project = factory.make_string()
+    def test_sync_machine_interface_no_pod_host_interace(self):
         pod_host = factory.make_Machine()
         factory.make_Interface(
             INTERFACE_TYPE.PHYSICAL, name="eth0", node=pod_host
         )
-        pod = factory.make_Pod(
-            pod_type="lxd",
-            parameters={"project": project},
-            host=pod_host,
-        )
+        pod = factory.make_Pod(pod_type="lxd", host=pod_host)
         interface = self.make_discovered_interface(
             mac_address="11:22:33:44:55:66",
             attach_type=InterfaceAttachType.MACVLAN,
@@ -2770,24 +2713,18 @@ class TestPod(MAASServerTestCase):
         )
         machine = factory.make_Machine()
         discovered_machine = self.make_discovered_machine(
-            project=project,
             interfaces=[interface],
         )
         pod._sync_machine(discovered_machine, machine)
         [vm_interface] = list(machine.virtualmachine.interfaces_set.all())
         self.assertIsNone(vm_interface.host_interface)
 
-    def test_sync_machine_interface_with_pod_host_interface(self):
+    def test_sync_machine_interface_with_pod_host_interace(self):
         pod_host = factory.make_Machine()
         host_interface = factory.make_Interface(
             INTERFACE_TYPE.PHYSICAL, name="eth0", node=pod_host
         )
-        project = factory.make_string()
-        pod = factory.make_Pod(
-            pod_type="lxd",
-            parameters={"project": project},
-            host=pod_host,
-        )
+        pod = factory.make_Pod(pod_type="lxd", host=pod_host)
         interface = self.make_discovered_interface(
             mac_address="11:22:33:44:55:66",
             attach_type=InterfaceAttachType.MACVLAN,
@@ -2795,7 +2732,6 @@ class TestPod(MAASServerTestCase):
         )
         machine = factory.make_Machine()
         discovered_machine = self.make_discovered_machine(
-            project=project,
             interfaces=[interface],
         )
         pod._sync_machine(discovered_machine, machine)
@@ -2831,72 +2767,52 @@ class TestPodDelete(MAASTransactionServerTestCase):
 
     @wait_for_reactor
     @inlineCallbacks
-    def test_deletes_machines_and_pod_no_decompose(self):
+    def test_decomposes_and_deletes_machines_and_pod(self):
         pod = yield deferToDatabase(factory.make_Pod)
-        machine = yield deferToDatabase(factory.make_Machine, bmc=pod)
+        decomposable_machine = yield deferToDatabase(
+            factory.make_Machine,
+            bmc=pod,
+            creation_type=NODE_CREATION_TYPE.MANUAL,
+        )
+        delete_machine = yield deferToDatabase(factory.make_Machine, bmc=pod)
         client = Mock()
+        client.return_value = succeed({"hints": None})
         self.patch(
             bmc_module, "getClientFromIdentifiers"
         ).return_value = client
         yield pod.async_delete()
-        client.assert_not_called()
-        machine = yield deferToDatabase(reload_object, machine)
-        pod = yield deferToDatabase(reload_object, pod)
-        self.assertIsNone(machine)
-        self.assertIsNone(pod)
-
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_decomposes_and_deletes_machines_and_pod(self):
-        pod = yield deferToDatabase(factory.make_Pod)
-        machine1 = yield deferToDatabase(factory.make_Machine, bmc=pod)
-        machine2 = yield deferToDatabase(factory.make_Machine, bmc=pod)
-        client = Mock()
-        client.side_effect = lambda *args, **kwargs: succeed({"hints": None})
-        self.patch(
-            bmc_module, "getClientFromIdentifiers"
-        ).return_value = client
-        yield pod.async_delete(decompose=True)
-        client.assert_has_calls(
-            [
-                call(
-                    DecomposeMachine,
-                    type=pod.power_type,
-                    context=pod.power_parameters,
-                    pod_id=pod.id,
-                    name=pod.name,
-                ),
-                call(
-                    DecomposeMachine,
-                    type=pod.power_type,
-                    context=pod.power_parameters,
-                    pod_id=pod.id,
-                    name=pod.name,
-                ),
-            ]
+        self.assertThat(
+            client,
+            MockCalledOnceWith(
+                DecomposeMachine,
+                type=pod.power_type,
+                context=pod.power_parameters,
+                pod_id=pod.id,
+                name=pod.name,
+            ),
         )
-        machine1 = yield deferToDatabase(reload_object, machine1)
-        machine2 = yield deferToDatabase(reload_object, machine2)
+        decomposable_machine = yield deferToDatabase(
+            reload_object, decomposable_machine
+        )
+        delete_machine = yield deferToDatabase(reload_object, delete_machine)
         pod = yield deferToDatabase(reload_object, pod)
-        self.assertIsNone(machine1)
-        self.assertIsNone(machine2)
+        self.assertIsNone(decomposable_machine)
+        self.assertIsNone(delete_machine)
         self.assertIsNone(pod)
 
     @wait_for_reactor
     @inlineCallbacks
     def test_decomposes_handles_failure_after_one_successful(self):
-        pod = yield deferToDatabase(
-            factory.make_Pod,
-            pod_type="lxd",
-            parameters={"project": factory.make_string()},
-        )
+        pod = yield deferToDatabase(factory.make_Pod)
         decomposable_machine_one = yield deferToDatabase(
             factory.make_Machine,
             bmc=pod,
+            creation_type=NODE_CREATION_TYPE.MANUAL,
         )
         decomposable_machine_two = yield deferToDatabase(
             factory.make_Machine,
             bmc=pod,
+            creation_type=NODE_CREATION_TYPE.MANUAL,
         )
         delete_machine = yield deferToDatabase(factory.make_Machine, bmc=pod)
         client = Mock()
@@ -2907,7 +2823,7 @@ class TestPodDelete(MAASTransactionServerTestCase):
         self.patch(
             bmc_module, "getClientFromIdentifiers"
         ).return_value = client
-        yield pod.async_delete(decompose=True)
+        yield pod.async_delete()
         # All the machines should have been deleted.
         decomposable_machine_one = yield deferToDatabase(
             reload_object, decomposable_machine_one
@@ -2921,32 +2837,6 @@ class TestPodDelete(MAASTransactionServerTestCase):
         self.assertIsNone(decomposable_machine_two)
         self.assertIsNone(delete_machine)
         self.assertIsNone(pod)
-
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_delete_and_wait_with_decompose(self):
-        pod = yield deferToDatabase(factory.make_Pod)
-        yield deferToDatabase(factory.make_Machine, bmc=pod)
-        yield deferToDatabase(factory.make_Machine, bmc=pod)
-        mock_result = Mock()
-        mock_async_delete = self.patch(pod, "async_delete")
-        mock_async_delete.return_value = mock_result
-        yield deferToDatabase(pod.delete_and_wait, decompose=True)
-        mock_async_delete.assert_called_with(decompose=True)
-        mock_result.wait.assert_called_with(180)
-
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_delete_and_wait_no_decompose(self):
-        pod = yield deferToDatabase(factory.make_Pod)
-        yield deferToDatabase(factory.make_Machine, bmc=pod)
-        yield deferToDatabase(factory.make_Machine, bmc=pod)
-        mock_result = Mock()
-        mock_async_delete = self.patch(pod, "async_delete")
-        mock_async_delete.return_value = mock_result
-        yield deferToDatabase(pod.delete_and_wait)
-        mock_async_delete.assert_called_with(decompose=False)
-        mock_result.wait.assert_called_with(60)
 
 
 class TestPodDefaultMACVlanMode(MAASServerTestCase):

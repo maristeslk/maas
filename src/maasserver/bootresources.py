@@ -1,4 +1,4 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2018 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Boot Resources."""
@@ -32,6 +32,7 @@ from simplestreams.objectstores import ObjectStore
 from twisted.application.internet import TimerService
 from twisted.internet import reactor
 from twisted.internet.defer import Deferred, DeferredList, inlineCallbacks
+from twisted.protocols.amp import UnhandledCommand
 from twisted.python.failure import Failure
 
 from maasserver import locks
@@ -93,7 +94,7 @@ from provisioningserver.import_images.helpers import (
 from provisioningserver.import_images.keyrings import write_all_keyrings
 from provisioningserver.import_images.product_mapping import map_products
 from provisioningserver.logger import get_maas_logger, LegacyLogger
-from provisioningserver.rpc.cluster import ListBootImages
+from provisioningserver.rpc.cluster import ListBootImages, ListBootImagesV2
 from provisioningserver.upgrade_cluster import create_gnupg_home
 from provisioningserver.utils.fs import tempdir
 from provisioningserver.utils.shell import ExternalProcessError
@@ -103,7 +104,7 @@ from provisioningserver.utils.twisted import (
     pause,
     synchronous,
 )
-from provisioningserver.utils.version import DISTRIBUTION
+from provisioningserver.utils.version import DEFAULT_PARSED_VERSION
 
 maaslog = get_maas_logger("bootresources")
 log = LegacyLogger()
@@ -1123,7 +1124,7 @@ class BootResourceRepoWriter(BasicMirrorWriter):
         # version meets or exceeds that requirement.
         if maas_supported is not None:
             supported_version = parse_version(maas_supported)
-            if supported_version > DISTRIBUTION.parsed_version:
+            if supported_version > DEFAULT_PARSED_VERSION:
                 maaslog.warning(
                     "Ignoring %s, requires a newer version of MAAS(%s)"
                     % (product_name, supported_version)
@@ -1503,7 +1504,7 @@ def stop_import_resources():
 IMPORT_RESOURCES_SERVICE_PERIOD = timedelta(hours=1)
 
 
-class ImportResourcesService(TimerService):
+class ImportResourcesService(TimerService, object):
     """Service to periodically import boot resources.
 
     This will run immediately when it's started, then once again every hour,
@@ -1541,7 +1542,7 @@ class ImportResourcesService(TimerService):
             )
 
 
-class ImportResourcesProgressService(TimerService):
+class ImportResourcesProgressService(TimerService, object):
     """Service to periodically check on the progress of boot imports."""
 
     def __init__(self, interval=timedelta(minutes=3)):
@@ -1611,7 +1612,12 @@ class ImportResourcesProgressService(TimerService):
         clients = getAllClients()
 
         def get_images(client):
-            d = client(ListBootImages)
+            def fallback_v1(failure):
+                failure.trap(UnhandledCommand)
+                return client(ListBootImages)
+
+            d = client(ListBootImagesV2)
+            d.addErrback(fallback_v1)
             d.addCallback(itemgetter("images"))
             return d
 

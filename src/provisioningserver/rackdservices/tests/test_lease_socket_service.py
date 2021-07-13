@@ -23,7 +23,7 @@ from provisioningserver.rackdservices import lease_socket_service
 from provisioningserver.rackdservices.lease_socket_service import (
     LeaseSocketService,
 )
-from provisioningserver.rpc import clusterservice, getRegionClient
+from provisioningserver.rpc import getRegionClient
 from provisioningserver.rpc.region import UpdateLease
 from provisioningserver.rpc.testing import MockLiveClusterToRegionRPCFixture
 from provisioningserver.utils.twisted import DeferredValue, pause, retries
@@ -32,12 +32,6 @@ from provisioningserver.utils.twisted import DeferredValue, pause, retries
 class TestLeaseSocketService(MAASTestCase):
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
-
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def patch_socket_path(self):
         path = self.make_dir()
@@ -65,7 +59,7 @@ class TestLeaseSocketService(MAASTestCase):
         self.assertIsInstance(service, DatagramProtocol)
         self.assertIs(service.reactor, sentinel.reactor)
         self.assertIs(service.client_service, sentinel.service)
-        self.assertEqual(socket_path, service.address)
+        self.assertEquals(socket_path, service.address)
 
     def test_startService_creates_socket(self):
         socket_path = self.patch_socket_path()
@@ -110,7 +104,7 @@ class TestLeaseSocketService(MAASTestCase):
                 yield pause(wait, reactor)
 
         # Should have one notitication.
-        self.assertEqual([packet], list(service.notifications))
+        self.assertEquals([packet], list(service.notifications))
 
     @defer.inlineCallbacks
     def test_processNotification_gets_called_with_notification(self):
@@ -136,7 +130,7 @@ class TestLeaseSocketService(MAASTestCase):
         yield dv.get(timeout=10)
 
         # Packet should be the argument passed to processNotifcation
-        self.assertEqual((packet,), dv.value)
+        self.assertEquals((packet,), dv.value)
 
     @defer.inlineCallbacks
     def test_processNotification_gets_called_multiple_times(self):
@@ -169,8 +163,8 @@ class TestLeaseSocketService(MAASTestCase):
 
         # Packet should be the argument passed to processNotification in
         # order.
-        self.assertEqual((packet1,), dvs[0].value)
-        self.assertEqual((packet2,), dvs[1].value)
+        self.assertEquals((packet1,), dvs[0].value)
+        self.assertEquals((packet2,), dvs[1].value)
 
     @defer.inlineCallbacks
     def test_processNotification_send_to_region(self):

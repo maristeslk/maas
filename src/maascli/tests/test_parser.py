@@ -1,14 +1,14 @@
 # Copyright 2012-2015 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Tests for `maascli`."""
+
+
 import sys
 
-from maascli.parser import (
-    ArgumentParser,
-    get_deepest_subparser,
-    prepare_parser,
-)
+from maascli.parser import ArgumentParser, prepare_parser
 from maastesting.factory import factory
+from maastesting.matchers import MockCalledOnceWith
 from maastesting.testcase import MAASTestCase
 
 
@@ -54,7 +54,7 @@ class TestArgumentParser(MAASTestCase):
             parser.parse_args(argv[1:])
         except TypeError:
             pass
-        mock_print_help.assert_called_once_with(sys.stderr)
+        self.assertThat(mock_print_help, MockCalledOnceWith(sys.stderr))
 
     def test_bad_arguments_calls_sys_exit_2(self):
         argv = ["maas", factory.make_name(prefix="profile"), "nodes"]
@@ -70,33 +70,4 @@ class TestArgumentParser(MAASTestCase):
             parser.parse_args(argv[1:])
         except TypeError:
             pass
-        mock_exit.assert_called_once_with(2)
-
-
-class TestGetDeepestSubparser(MAASTestCase):
-    def test_no_argv(self):
-        parser = ArgumentParser()
-        assert get_deepest_subparser(parser, []) is parser
-
-    def test_single_subparser(self):
-        top_parser = ArgumentParser()
-        foo = top_parser.subparsers.add_parser("foo", help="foo help")
-
-        assert get_deepest_subparser(top_parser, ["foo"]) is foo
-
-    def test_nested_subparser(self):
-        top_parser = ArgumentParser()
-        foo = top_parser.subparsers.add_parser("foo", help="foo help")
-        bar = foo.subparsers.add_parser("bar", help="bar help")
-
-        assert get_deepest_subparser(top_parser, ["foo", "bar"]) is bar
-
-    def test_not_a_subparser(self):
-        top_parser = ArgumentParser()
-        foo = top_parser.subparsers.add_parser("foo", help="foo help")
-        bar = foo.subparsers.add_parser("bar", help="bar help")
-
-        assert (
-            get_deepest_subparser(top_parser, ["foo", "bar", "--help"]) is bar
-        )
-        assert get_deepest_subparser(top_parser, ["--random"]) is top_parser
+        self.assertThat(mock_exit, MockCalledOnceWith(2))

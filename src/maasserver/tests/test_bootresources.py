@@ -1,4 +1,4 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2018 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Test maasserver.bootresources."""
@@ -28,6 +28,7 @@ from fixtures import FakeLogger, Fixture
 from testtools.matchers import Contains, ContainsAll, Equals, HasLength, Not
 from twisted.application.internet import TimerService
 from twisted.internet.defer import Deferred, fail, inlineCallbacks, succeed
+from twisted.protocols.amp import UnhandledCommand
 
 from maasserver import __version__, bootresources
 from maasserver.bootresources import (
@@ -92,7 +93,7 @@ from maastesting.testcase import MAASTestCase
 from maastesting.twisted import extract_result, TwistedLoggerFixture
 from provisioningserver.auth import get_maas_user_gpghome
 from provisioningserver.import_images.product_mapping import ProductMapping
-from provisioningserver.rpc.cluster import ListBootImages
+from provisioningserver.rpc.cluster import ListBootImages, ListBootImagesV2
 from provisioningserver.utils.text import normalise_whitespace
 from provisioningserver.utils.twisted import asynchronous, DeferredValue
 
@@ -334,8 +335,8 @@ class TestSimpleStreamsHandler(MAASServerTestCase):
         )
         response = self.get_stream_client("maas:v2:download.json")
         output = json.loads(response.content.decode(settings.DEFAULT_CHARSET))
-        self.assertEqual(kflavor, output["products"][product]["kflavor"])
-        self.assertEqual(
+        self.assertEquals(kflavor, output["products"][product]["kflavor"])
+        self.assertEquals(
             bootloader_type, output["products"][product]["bootloader-type"]
         )
         self.assertTrue(output["products"][product]["rolling"])
@@ -848,11 +849,11 @@ class TestBootResourceStore(MAASServerTestCase):
         }
         store = BootResourceStore()
         resource = store.get_or_create_boot_resource(product)
-        self.assertEqual(BOOT_RESOURCE_TYPE.SYNCED, resource.rtype)
-        self.assertEqual("ubuntu-core/16-pc", resource.name)
-        self.assertEqual("amd64/generic", resource.architecture)
+        self.assertEquals(BOOT_RESOURCE_TYPE.SYNCED, resource.rtype)
+        self.assertEquals("ubuntu-core/16-pc", resource.name)
+        self.assertEquals("amd64/generic", resource.architecture)
         self.assertIsNone(resource.bootloader_type)
-        self.assertEqual("pc-kernel", resource.kflavor)
+        self.assertEquals("pc-kernel", resource.kflavor)
         self.assertDictEqual({"title": "Ubuntu Core 16 PC"}, resource.extra)
 
     def test_get_or_create_boot_resource_set_creates_resource_set(self):
@@ -934,7 +935,7 @@ class TestBootResourceStore(MAASServerTestCase):
                 rfile.save()
             for rfile in resource_set.files.all():
                 self.assertIn(rfile.filename, files)
-                self.assertEqual(rfile.filetype, product["ftype"])
+                self.assertEquals(rfile.filetype, product["ftype"])
 
     def test_get_resource_file_log_identifier_returns_valid_ident(self):
         os = factory.make_name("os")
@@ -1021,7 +1022,7 @@ class TestBootResourceStore(MAASServerTestCase):
         store.delete_content_to_finalize()
         self.assertIsNone(reload_object(rfile_one))
         self.assertIsNone(reload_object(rfile_two))
-        self.assertEqual({}, store._content_to_finalize)
+        self.assertEquals({}, store._content_to_finalize)
 
     def test_finalize_does_nothing_if_resources_to_delete_hasnt_changed(self):
         self.patch(bootresources.Event.objects, "create_region_event")
@@ -2254,7 +2255,7 @@ class TestImportResourcesProgressServiceAsync(MAASTransactionServerTestCase):
         factory.make_BootResource()
         self.assertTrue(service.are_boot_images_available_in_the_region())
 
-    def test_are_boot_images_available_in_any_rack(self):
+    def test_are_boot_images_available_in_any_rack_v2(self):
         # Import the websocket handlers now: merely defining DeviceHandler,
         # e.g., causes a database access, which will crash if it happens
         # inside the reactor thread where database access is forbidden and
@@ -2275,7 +2276,46 @@ class TestImportResourcesProgressServiceAsync(MAASTransactionServerTestCase):
         self.assertFalse(service.are_boot_images_available_in_any_rack())
 
         # Connect a rack controller to the region via RPC.
-        cluster_rpc = region_rpc.makeCluster(rack_controller, ListBootImages)
+        cluster_rpc = region_rpc.makeCluster(rack_controller, ListBootImagesV2)
+
+        # are_boot_images_available_in_the_region() returns False when none of
+        # the clusters have any images.
+        cluster_rpc.ListBootImagesV2.return_value = succeed({"images": []})
+        self.assertFalse(service.are_boot_images_available_in_any_rack())
+
+        # are_boot_images_available_in_the_region() returns True when a
+        # cluster has an imported boot image.
+        response = {"images": [make_rpc_boot_image()]}
+        cluster_rpc.ListBootImagesV2.return_value = succeed(response)
+        self.assertTrue(service.are_boot_images_available_in_any_rack())
+
+    def test_are_boot_images_available_in_any_rack_v1(self):
+        # Import the websocket handlers now: merely defining DeviceHandler,
+        # e.g., causes a database access, which will crash if it happens
+        # inside the reactor thread where database access is forbidden and
+        # prevented. My own opinion is that a class definition should not
+        # cause a database access and we ought to fix that.
+        import maasserver.websockets.handlers  # noqa
+
+        rack_controller = factory.make_RackController()
+        service = bootresources.ImportResourcesProgressService()
+
+        self.useFixture(RegionEventLoopFixture("rpc"))
+        self.useFixture(RunningEventLoopFixture())
+        region_rpc = MockLiveRegionToClusterRPCFixture()
+        self.useFixture(region_rpc)
+
+        # are_boot_images_available_in_the_region() returns False when there
+        # are no clusters connected.
+        self.assertFalse(service.are_boot_images_available_in_any_rack())
+
+        # Connect a rack controller to the region via RPC.
+        cluster_rpc = region_rpc.makeCluster(
+            rack_controller, ListBootImagesV2, ListBootImages
+        )
+
+        # All calls to ListBootImagesV2 raises a UnhandledCommand.
+        cluster_rpc.ListBootImagesV2.side_effect = UnhandledCommand
 
         # are_boot_images_available_in_the_region() returns False when none of
         # the clusters have any images.

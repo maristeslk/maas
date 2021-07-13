@@ -20,58 +20,13 @@ from provisioningserver.drivers.pod import (
     DiscoveredMachine,
     DiscoveredPod,
     DiscoveredPodHints,
-    DiscoveredPodProject,
     RequestedMachine,
     RequestedMachineBlockDevice,
     RequestedMachineInterface,
 )
 from provisioningserver.drivers.pod.registry import PodDriverRegistry
-from provisioningserver.refresh.maas_api_helper import (
-    Credentials,
-    SignalException,
-)
+from provisioningserver.refresh.maas_api_helper import SignalException
 from provisioningserver.rpc import exceptions, pods
-
-
-class TestDiscoverPodProjects(MAASTestCase):
-
-    run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
-
-    @inlineCallbacks
-    def test_unknown_pod_raises_UnknownPodType(self):
-        unknown_type = factory.make_name("unknown")
-        with ExpectedException(exceptions.UnknownPodType):
-            yield pods.discover_pod_projects(unknown_type, {})
-
-    @inlineCallbacks
-    def test_converts_exceptions(self):
-        fake_driver = MagicMock()
-        fake_driver.name = factory.make_name("pod")
-        fake_driver.discover_projects.return_value = fail(Exception("fail!"))
-        self.patch(PodDriverRegistry, "get_item").return_value = fake_driver
-        with ExpectedException(exceptions.PodActionFail):
-            yield pods.discover_pod_projects(fake_driver.name, {})
-
-    @inlineCallbacks
-    def test_return_projects(self):
-        fake_driver = MagicMock()
-        fake_driver.name = factory.make_name("pod")
-        projects = [
-            {"name": "p1", "description": "Project 1"},
-            {"name": "p2", "description": "Project 2"},
-        ]
-        fake_driver.discover_projects.return_value = succeed(projects)
-        self.patch(PodDriverRegistry, "get_item").return_value = fake_driver
-        result = yield pods.discover_pod_projects(fake_driver.name, {})
-        self.assertEqual(
-            result,
-            {
-                "projects": [
-                    DiscoveredPodProject(name="p1", description="Project 1"),
-                    DiscoveredPodProject(name="p2", description="Project 2"),
-                ]
-            },
-        )
 
 
 class TestDiscoverPod(MAASTestCase):
@@ -147,7 +102,7 @@ class TestDiscoverPod(MAASTestCase):
         fake_driver.discover.return_value = succeed(discovered_pod)
         self.patch(PodDriverRegistry, "get_item").return_value = fake_driver
         result = yield pods.discover_pod(fake_driver.name, {})
-        self.assertEqual({"pod": discovered_pod}, result)
+        self.assertEquals({"pod": discovered_pod}, result)
 
     @inlineCallbacks
     def test_handles_driver_raising_NotImplementedError(self):
@@ -319,7 +274,7 @@ class TestComposeMachine(MAASTestCase):
         result = yield pods.compose_machine(
             fake_driver.name, {}, fake_request, pod_id=pod_id, name=pod_name
         )
-        self.assertEqual({"machine": machine, "hints": hints}, result)
+        self.assertEquals({"machine": machine, "hints": hints}, result)
 
     @inlineCallbacks
     def test_handles_driver_raising_NotImplementedError(self):
@@ -410,7 +365,7 @@ class TestSendPodCommissioningResults(MAASTestCase):
 
     @inlineCallbacks
     def test_sends_results(self):
-        mock_signal = self.patch_autospec(pods, "signal")
+        mock_signal = self.patch(pods, "signal")
         consumer_key = factory.make_name("consumer_key")
         token_key = factory.make_name("token_key")
         token_secret = factory.make_name("token_secret")
@@ -441,11 +396,12 @@ class TestSendPodCommissioningResults(MAASTestCase):
             MockCallsMatch(
                 call(
                     url=metadata_url,
-                    credentials=Credentials(
-                        consumer_key=consumer_key,
-                        token_key=token_key,
-                        token_secret=token_secret,
-                    ),
+                    creds={
+                        "consumer_key": consumer_key,
+                        "token_key": token_key,
+                        "token_secret": token_secret,
+                        "consumer_secret": "",
+                    },
                     status="WORKING",
                     files={
                         filename1: json.dumps(data1, indent=4).encode(),
@@ -460,11 +416,12 @@ class TestSendPodCommissioningResults(MAASTestCase):
                 ),
                 call(
                     url=metadata_url,
-                    credentials=Credentials(
-                        consumer_key=consumer_key,
-                        token_key=token_key,
-                        token_secret=token_secret,
-                    ),
+                    creds={
+                        "consumer_key": consumer_key,
+                        "token_key": token_key,
+                        "token_secret": token_secret,
+                        "consumer_secret": "",
+                    },
                     status="WORKING",
                     files={
                         filename2: json.dumps(data2, indent=4).encode(),
@@ -482,7 +439,7 @@ class TestSendPodCommissioningResults(MAASTestCase):
 
     @inlineCallbacks
     def test_sends_results_raises_podactionfail_on_signalexception(self):
-        mock_signal = self.patch_autospec(pods, "signal")
+        mock_signal = self.patch(pods, "signal")
         err_msg = factory.make_name("error_message")
         mock_signal.side_effect = SignalException(err_msg)
         name = (factory.make_name("name"),)

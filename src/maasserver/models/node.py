@@ -1,4 +1,4 @@
-# Copyright 2012-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Node objects."""
@@ -67,14 +67,14 @@ from twisted.internet.defer import (
     Deferred,
     DeferredList,
     inlineCallbacks,
-    returnValue,
     succeed,
 )
 from twisted.internet.error import ConnectionClosed, ConnectionDone
+from twisted.internet.threads import deferToThread
 from twisted.python.failure import Failure
 from twisted.python.threadable import isInIOThread
 
-from maasserver import DefaultMeta
+from maasserver import DefaultMeta, locks
 from maasserver.clusterrpc.pods import decompose_machine
 from maasserver.clusterrpc.power import (
     power_cycle,
@@ -83,7 +83,6 @@ from maasserver.clusterrpc.power import (
     power_on_node,
     power_query,
     power_query_all,
-    set_boot_order,
 )
 from maasserver.enum import (
     ALLOCATED_NODE_STATUSES,
@@ -95,6 +94,7 @@ from maasserver.enum import (
     INTERFACE_TYPE,
     IPADDRESS_FAMILY,
     IPADDRESS_TYPE,
+    NODE_CREATION_TYPE,
     NODE_STATUS,
     NODE_STATUS_CHOICES,
     NODE_STATUS_CHOICES_DICT,
@@ -106,7 +106,6 @@ from maasserver.enum import (
 )
 from maasserver.exceptions import (
     IPAddressCheckFailed,
-    NetworkingResetProblem,
     NodeStateViolation,
     NoScriptsFound,
     PowerProblem,
@@ -120,9 +119,18 @@ from maasserver.models.cacheset import CacheSet
 from maasserver.models.cleansave import CleanSave
 from maasserver.models.config import Config
 from maasserver.models.domain import Domain
+from maasserver.models.fabric import Fabric
 from maasserver.models.filesystem import Filesystem
 from maasserver.models.filesystemgroup import FilesystemGroup
-from maasserver.models.interface import Interface, InterfaceRelationship
+from maasserver.models.interface import (
+    BondInterface,
+    BridgeInterface,
+    Interface,
+    InterfaceRelationship,
+    PhysicalInterface,
+    VLANInterface,
+)
+from maasserver.models.iscsiblockdevice import ISCSIBlockDevice
 from maasserver.models.licensekey import LicenseKey
 from maasserver.models.numa import NUMANode, NUMANodeHugepages
 from maasserver.models.ownerdata import OwnerData
@@ -158,11 +166,12 @@ from maasserver.server_address import get_maas_facing_server_addresses
 from maasserver.storage_layouts import (
     get_storage_layout_for_node,
     MIN_BOOT_PARTITION_SIZE,
+    MAX_BOOT_DISK_SIZE,
     StorageLayoutError,
     StorageLayoutMissingBootDiskError,
     VMFS6StorageLayout,
-    VMFS7StorageLayout,
 )
+from maasserver.utils import synchronised
 from maasserver.utils.dns import validate_hostname
 from maasserver.utils.mac import get_vendor_for_mac
 from maasserver.utils.orm import (
@@ -171,6 +180,7 @@ from maasserver.utils.orm import (
     post_commit,
     post_commit_do,
     transactional,
+    with_connection,
 )
 from maasserver.utils.threads import callOutToDatabase, deferToDatabase
 from maasserver.worker_user import get_worker_user
@@ -186,6 +196,7 @@ from provisioningserver.drivers.power.ipmi import IPMI_BOOT_TYPE
 from provisioningserver.drivers.power.registry import PowerDriverRegistry
 from provisioningserver.events import EVENT_DETAILS, EVENT_TYPES
 from provisioningserver.logger import get_maas_logger, LegacyLogger
+from provisioningserver.refresh import refresh
 from provisioningserver.refresh.node_info_scripts import (
     LIST_MODALIASES_OUTPUT_NAME,
     LXD_OUTPUT_NAME,
@@ -195,18 +206,30 @@ from provisioningserver.rpc.cluster import (
     CheckIPs,
     DisableAndShutoffRackd,
     IsImportBootImagesRunning,
+    RefreshRackControllerInfo,
 )
 from provisioningserver.rpc.exceptions import (
     NoConnectionsAvailable,
     PowerActionFail,
+    RefreshAlreadyInProgress,
     UnknownPowerType,
 )
-from provisioningserver.utils import znums
+from provisioningserver.utils import flatten, sorttop, znums
 from provisioningserver.utils.enum import map_enum_reverse
 from provisioningserver.utils.env import get_maas_id, set_maas_id
+from provisioningserver.utils.fs import NamedLock
 from provisioningserver.utils.ipaddr import get_mac_addresses
-from provisioningserver.utils.network import get_default_monitored_interfaces
-from provisioningserver.utils.twisted import asynchronous, callOut, undefined
+from provisioningserver.utils.network import (
+    annotate_with_default_monitored_interfaces,
+)
+from provisioningserver.utils.twisted import (
+    asynchronous,
+    callOut,
+    deferWithTimeout,
+    synchronous,
+    undefined,
+)
+from provisioningserver.utils.version import get_maas_version
 
 log = LegacyLogger()
 maaslog = get_maas_logger("node")
@@ -214,9 +237,7 @@ maaslog = get_maas_logger("node")
 
 # Holds the known `bios_boot_methods`. If `bios_boot_method` is not in this
 # list then it will fallback to `DEFAULT_BIOS_BOOT_METHOD`.
-KNOWN_BIOS_BOOT_METHODS = frozenset(
-    ["pxe", "uefi", "powernv", "powerkvm", "s390x_partition"]
-)
+KNOWN_BIOS_BOOT_METHODS = frozenset(["pxe", "uefi", "powernv", "powerkvm"])
 
 # Default `bios_boot_method`. See `KNOWN_BIOS_BOOT_METHOD` above for usage.
 DEFAULT_BIOS_BOOT_METHOD = "pxe"
@@ -228,7 +249,6 @@ PowerInfo = namedtuple(
         "can_be_started",
         "can_be_stopped",
         "can_be_queried",
-        "can_set_boot_order",
         "power_type",
         "power_parameters",
     ),
@@ -914,8 +934,6 @@ class Node(CleanSave, TimestampedModel):
         deployed with the rack controller.
     :ivar install_kvm: An optional flag to indicate if this node should be
         deployed with KVM and added to MAAS.
-    :ivar register_vmhost: An optional flag to indicate if this node should be
-        deployed with LXD and registered to MAAS as a VM host.
     :ivar enable_ssh: An optional flag to indicate if this node can have
         ssh enabled during commissioning, allowing the user to ssh into the
         machine's commissioning environment using the user's SSH key.
@@ -1104,8 +1122,11 @@ class Node(CleanSave, TimestampedModel):
 
     license_key = CharField(max_length=30, null=True, blank=True)
 
-    # Whether this is a machine in a POD that was composed on allocation
-    dynamic = BooleanField(default=False)
+    # Only used by Machine. Set to the creation type based on how the machine
+    # ended up in the Pod.
+    creation_type = IntegerField(
+        null=False, blank=False, default=NODE_CREATION_TYPE.PRE_EXISTING
+    )
 
     tags = ManyToManyField(Tag)
 
@@ -1174,11 +1195,8 @@ class Node(CleanSave, TimestampedModel):
     # Used to deploy the rack controller on a installation machine.
     install_rackd = BooleanField(default=False)
 
-    # Used to deploy KVM (via libvirt) on a machine and register it as a VM
-    # host.
+    # Used to deploy the rack controller on a installation machine.
     install_kvm = BooleanField(default=False)
-    # Used to deploy LXD on a machine and register it as a VM host.
-    register_vmhost = BooleanField(default=False)
 
     # Used to determine whether to:
     #  1. Import the SSH Key during commissioning and keep power on.
@@ -1402,15 +1420,6 @@ class Node(CleanSave, TimestampedModel):
         return {**bmc_parameters, **instance_parameters}
 
     @property
-    def instance_name(self):
-        """Return the name of the VM instance for this machine, or None."""
-        return self.instance_power_parameters.get(
-            "instance_name"
-        ) or self.instance_power_parameters.get(  # for LXD
-            "power_id"
-        )  # for virsh
-
-    @property
     def fqdn(self):
         """Fully qualified domain name for this node.
 
@@ -1454,7 +1463,6 @@ class Node(CleanSave, TimestampedModel):
             type_name,
             type_level=event_details.level,
             type_description=event_details.description,
-            user=user,
             event_action=action,
             event_description=description,
             system_id=self.system_id,
@@ -1517,10 +1525,8 @@ class Node(CleanSave, TimestampedModel):
             # layout is created with a datastore. If the user applied the VMFS
             # storage layout a datastore must be defined as one will always be
             # created.
-            if (
-                VMFS6StorageLayout(self).is_layout()
-                or VMFS7StorageLayout(self).is_layout()
-            ):
+            vmfs_layout = VMFS6StorageLayout(self)
+            if vmfs_layout.is_layout() is not None:
                 fs_groups = self.virtualblockdevice_set.filter(
                     filesystem_group__group_type=FILESYSTEM_GROUP_TYPE.VMFS6
                 )
@@ -1684,8 +1690,8 @@ class Node(CleanSave, TimestampedModel):
     def _start_deployment(self):
         """Mark a node as being deployed."""
         # Avoid circular dependencies
-        from maasserver.models.event import Event
         from metadataserver.models import ScriptSet
+        from maasserver.models.event import Event
 
         if not self.on_network():
             raise ValidationError(
@@ -1994,6 +2000,15 @@ class Node(CleanSave, TimestampedModel):
         return round(self.memory / 1024.0, 1)
 
     @property
+    def iscsiblockdevice_set(self):
+        """Return `QuerySet` for all `ISCSIBlockDevice` assigned to node.
+
+        This is need as Django doesn't add this attribute to the `Node` model,
+        it only adds blockdevice_set.
+        """
+        return ISCSIBlockDevice.objects.filter(node=self)
+
+    @property
     def physicalblockdevice_set(self):
         """Return `QuerySet` for all `PhysicalBlockDevice` assigned to node.
 
@@ -2023,7 +2038,10 @@ class Node(CleanSave, TimestampedModel):
         size = sum(
             block_device.size
             for block_device in self.blockdevice_set.all()
-            if isinstance(block_device.actual_instance, PhysicalBlockDevice)
+            if isinstance(
+                block_device.actual_instance,
+                (ISCSIBlockDevice, PhysicalBlockDevice),
+            )
         )
         return size / 1000 / 1000
 
@@ -2048,6 +2066,7 @@ class Node(CleanSave, TimestampedModel):
                         block_device.actual_instance, PhysicalBlockDevice
                     )
                     and block_device.size >= MIN_BOOT_PARTITION_SIZE
+                    and block_device.size <= MAX_BOOT_DISK_SIZE
                 ],
                 key=attrgetter("id"),
             )
@@ -2099,6 +2118,12 @@ class Node(CleanSave, TimestampedModel):
                 % (mac_address, iface.node.hostname)
             )
         return iface
+
+    def is_switch(self):
+        # Avoid circular imports.
+        from maasserver.models.switch import Switch
+
+        return Switch.objects.filter(node=self).exists()
 
     def get_metadata(self):
         """Return all Node metadata key, value pairs as a dict."""
@@ -2193,8 +2218,8 @@ class Node(CleanSave, TimestampedModel):
             time.
         """
         # Avoid circular imports.
-        from maasserver.models.event import Event
         from metadataserver.models import ScriptSet
+        from maasserver.models.event import Event
 
         # Only commission if power type is configured.
         if self.power_type == "":
@@ -2232,14 +2257,11 @@ class Node(CleanSave, TimestampedModel):
         # MAAS can log that they were skipped. This avoids user confusion when
         # BMC detection is run previously on the node but they don't want BMC
         # detection to run again.
-        if skip_bmc_config or self.split_arch()[0] == "s390x":
-            if self.split_arch()[0] == "s390x":
-                result = "INFO: BMC detection not supported on S390X".encode()
-            else:
-                result = (
-                    "INFO: User %s (%s) has choosen to skip BMC configuration "
-                    "during commissioning\n" % (user.get_username(), user.id)
-                ).encode()
+        if skip_bmc_config:
+            result = (
+                "INFO: User %s (%s) has choosen to skip BMC configuration "
+                "during commissioning\n" % (user.get_username(), user.id)
+            ).encode()
             for script_result in commis_script_set.scriptresult_set.filter(
                 script__tags__contains=["bmc-config"]
             ):
@@ -2401,8 +2423,8 @@ class Node(CleanSave, TimestampedModel):
     ):
         """Run tests on a node."""
         # Avoid circular imports.
-        from maasserver.models.event import Event
         from metadataserver.models import ScriptSet
+        from maasserver.models.event import Event
 
         if not user.has_perm(NodePermission.edit, self):
             # You can't enter test mode on a node you don't own,
@@ -2919,7 +2941,9 @@ class Node(CleanSave, TimestampedModel):
             and bmc is not None
             and bmc.bmc_type == BMC_TYPE.POD
             and Capabilities.COMPOSABLE in bmc.capabilities
+            and self.creation_type != NODE_CREATION_TYPE.PRE_EXISTING
         ):
+            # Avoid circular imports
             from maasserver.forms.pods import request_commissioning_results
 
             pod = bmc.as_pod()
@@ -2927,7 +2951,7 @@ class Node(CleanSave, TimestampedModel):
             client_idents = pod.get_client_identifiers()
 
             @transactional
-            def _save(machine_id, pod_id, result):
+            def _save(machine_id, pod_id, hints):
                 from maasserver.models.bmc import Pod
 
                 machine = Machine.objects.filter(id=machine_id).first()
@@ -2943,16 +2967,9 @@ class Node(CleanSave, TimestampedModel):
                         machine_id=machine_id
                     ).delete()
                     super(Node, machine).delete()
-
-                if isinstance(result, Failure):
-                    maaslog.warning(
-                        f"{self.hostname}: Failure decomposing machine: {result.value}"
-                    )
-                    return
-
                 pod = Pod.objects.filter(id=pod_id).first()
                 if pod is not None:
-                    pod.sync_hints(result)
+                    pod.sync_hints(hints)
 
             maaslog.info("%s: Decomposing machine", self.hostname)
 
@@ -2965,10 +2982,8 @@ class Node(CleanSave, TimestampedModel):
                 pod_id=pod.id,
                 name=pod.name,
             )
-            d.addBoth(
-                lambda result: (
-                    deferToDatabase(_save, self.id, pod.id, result)
-                )
+            d.addCallback(
+                lambda hints: (deferToDatabase(_save, self.id, pod.id, hints))
             )
             d.addCallback(lambda _: request_commissioning_results(pod))
         else:
@@ -2990,6 +3005,12 @@ class Node(CleanSave, TimestampedModel):
                 )
                 self.bmc.delete()
 
+            # XXX always delete the VM associated to the machine, if present.
+            # Ideally we should only delete VMs when the vM is decomposed.
+            # See LP:#1904758 for details
+            from maasserver.models.virtualmachine import VirtualMachine
+
+            VirtualMachine.objects.filter(machine_id=self.id).delete()
             super().delete(*args, **kwargs)
 
     def set_random_hostname(self):
@@ -3013,16 +3034,26 @@ class Node(CleanSave, TimestampedModel):
             raise UnknownPowerType("Node power type is unconfigured")
         return self.bmc.power_type
 
-    def get_effective_kernel_options(self, default_kernel_opts=None):
-        """Return a string with kernel commandline."""
-        options = list(
-            self.tags.exclude(kernel_opts="")
-            .order_by("name")
-            .values_list("kernel_opts", flat=True)
-        )
-        if default_kernel_opts:
-            options.insert(0, default_kernel_opts)
-        return " ".join(options)
+    def get_effective_kernel_options(self, default_kernel_opts=undefined):
+        """Determine any special kernel parameters for this node.
+
+        :return: (tag, kernel_options)
+            tag is a Tag object or None. If None, the kernel_options came from
+            the global setting.
+            kernel_options, a string indicating extra kernel_options that
+            should be used when booting this node. May be None if no tags match
+            and no global setting has been configured.
+        """
+        # First, see if there are any tags associated with this node that has a
+        # custom kernel parameter
+        tags = self.tags.filter(kernel_opts__isnull=False)
+        tags = tags.order_by("name")
+        for tag in tags:
+            if tag.kernel_opts != "":
+                return tag, tag.kernel_opts
+        if default_kernel_opts is undefined:
+            default_kernel_opts = Config.objects.get_config("kernel_opts")
+        return None, default_kernel_opts
 
     def get_osystem(self, default=undefined):
         """Return the operating system to install that node."""
@@ -3131,7 +3162,7 @@ class Node(CleanSave, TimestampedModel):
             power_type = self.get_effective_power_type()
         except UnknownPowerType:
             maaslog.warning("%s: Unrecognised power type.", self.hostname)
-            return PowerInfo(False, False, False, False, None, None)
+            return PowerInfo(False, False, False, None, None)
         else:
             if power_type == "manual" or self.node_type in (
                 NODE_TYPE.REGION_CONTROLLER,
@@ -3145,85 +3176,15 @@ class Node(CleanSave, TimestampedModel):
             power_driver = PowerDriverRegistry.get_item(power_type)
             if power_driver is not None:
                 can_be_queried = power_driver.queryable
-                can_set_boot_order = power_driver.can_set_boot_order
             else:
                 can_be_queried = False
-                can_set_boot_order = False
             return PowerInfo(
                 can_be_started,
                 can_be_stopped,
                 can_be_queried,
-                can_set_boot_order,
                 power_type,
                 power_params,
             )
-
-    def _get_boot_order(self, network_boot=None):
-        """Return the expected boot order of the Node."""
-        # Return the list of known physical devices. Give preference to the
-        # currently defined boot device if available. Return all devices
-        # incase the system is setup in redundency(RAID or multiple NICs
-        # can route to MAAS).
-        interfaces = sorted(
-            [iface.serialize() for iface in self.interface_set.all()],
-            key=lambda iface: (
-                iface["id"] != self.boot_interface_id,
-                iface["id"],
-            ),
-        )
-        if self.boot_disk_id:
-            boot_disk_id = self.boot_disk.actual_instance.id
-        else:
-            boot_disk_id = None
-        block_devices = sorted(
-            [
-                bd.actual_instance.serialize()
-                for bd in self.blockdevice_set.all()
-                if isinstance(bd.actual_instance, PhysicalBlockDevice)
-            ],
-            key=lambda bd: (
-                bd["id"] != boot_disk_id,
-                bd["id"],
-            ),
-        )
-
-        if network_boot is None:
-            if self.ephemeral_deployment:
-                network_boot = True
-            elif self.status == NODE_STATUS.EXITING_RESCUE_MODE:
-                network_boot = self.previous_status != NODE_STATUS.DEPLOYED
-            else:
-                network_boot = self.status != NODE_STATUS.DEPLOYED
-
-        if network_boot:
-            return interfaces + block_devices
-        else:
-            return block_devices + interfaces
-
-    def set_boot_order(self, network_boot=None):
-        """Remotely configure the Node to network or local boot.
-
-        If supported by the power driver this function will configure a
-        Node remotely to either boot from the network or boot locally.
-        This isn't done as part of self.set_netboot() as power commands
-        already use self._power_control_node() which figures out which
-        rack controller to issue power commands from.
-        """
-        power_info = self.get_effective_power_info()
-        # Only send RPC call to set boot order if power driver
-        # supports it.
-        if not power_info.can_set_boot_order:
-            return
-
-        boot_order = self._get_boot_order(network_boot)
-
-        @asynchronous
-        def configure_boot_order():
-            return self._power_control_node(
-                succeed(None), None, power_info, boot_order
-            )
-
-        configure_boot_order().wait(120)
 
     def get_effective_special_filesystems(self):
         """Return special filesystems for the node."""
@@ -3657,7 +3618,6 @@ class Node(CleanSave, TimestampedModel):
         self.current_installation_script_set = None
         self.install_rackd = False
         self.install_kvm = False
-        self.register_vmhost = False
         self.save()
 
         # Create a status message for RELEASING.
@@ -3688,7 +3648,7 @@ class Node(CleanSave, TimestampedModel):
         # Avoid circular imports.
         from maasserver.models.event import Event
 
-        if self.dynamic:
+        if self.creation_type == NODE_CREATION_TYPE.DYNAMIC:
             self.delete()
         else:
             self.release_interface_config()
@@ -3740,8 +3700,8 @@ class Node(CleanSave, TimestampedModel):
         if len(hosted_pods) > 0:
             if dry_run:
                 raise ValidationError(
-                    "The following VM hosts must be removed first:"
-                    f" {', '.join(hosted_pods)}"
+                    "The following pods must be removed first: %s"
+                    % (", ".join(hosted_pods))
                 )
             for pod in self.get_hosted_pods():
                 if isInIOThread():
@@ -3752,9 +3712,7 @@ class Node(CleanSave, TimestampedModel):
     def set_netboot(self, on=True):
         """Set netboot on or off."""
         log.info(
-            "{hostname}: Turning {status} netboot for node",
-            hostname=self.hostname,
-            status="on" if on else "off",
+            "{hostname}: Turning on netboot for node", hostname=self.hostname
         )
         self.netboot = on
         self.save()
@@ -3771,9 +3729,10 @@ class Node(CleanSave, TimestampedModel):
 
     def split_arch(self):
         """Return architecture and subarchitecture, as a tuple."""
-        if not self.architecture:
+        if self.architecture is None or self.architecture == "":
             return ("", "")
-        return tuple(self.architecture.split("/", 1))
+        arch, subarch = self.architecture.split("/")
+        return (arch, subarch)
 
     def mark_failed(
         self,
@@ -4288,15 +4247,18 @@ class Node(CleanSave, TimestampedModel):
         """Clear's the full storage configuration for this node.
 
         This will remove all related models to `PhysicalBlockDevice`'s and
-        on this node and all `VirtualBlockDevice`'s.
+        `ISCSIBlockDevice`'s' on this node and all `VirtualBlockDevice`'s.
 
         This is used before commissioning to clear the entire storage model
-        except for the `PhysicalBlockDevice`'s.
+        except for the `PhysicalBlockDevice`'s and `ISCSIBlockDevice`'s.
         Commissioning will update the `PhysicalBlockDevice` information
         on this node.
         """
         block_device_ids = list(
             self.physicalblockdevice_set.values_list("id", flat=True)
+        )
+        block_device_ids += list(
+            self.iscsiblockdevice_set.values_list("id", flat=True)
         )
         PartitionTable.objects.filter(
             block_device__id__in=block_device_ids
@@ -4379,11 +4341,9 @@ class Node(CleanSave, TimestampedModel):
                     bridge_fd=bridge_fd,
                 )
 
-    def claim_auto_ips(self, exclude_addresses=None, temp_expires_after=None):
+    def claim_auto_ips(self, temp_expires_after=None):
         """Assign IP addresses to all interface links set to AUTO."""
-        exclude_addresses = (
-            exclude_addresses.copy() if exclude_addresses else set()
-        )
+        exclude_addresses = set()
         allocated_ips = set()
         # Query for the interfaces again here; if we use the cached
         # interface_set, we could skip a newly-created bridge if it was created
@@ -4524,9 +4484,11 @@ class Node(CleanSave, TimestampedModel):
                             rack_interface = rack_interface.order_by("id")
                             rack_interface = rack_interface.first()
                             rack_interface.update_neighbour(
-                                ip_obj.ip,
-                                ip_result.get("mac_address"),
-                                time.time(),
+                                {
+                                    "ip": ip_obj.ip,
+                                    "mac": ip_result.get("mac_address"),
+                                    "time": time.time(),
+                                }
                             )
                             ip_obj.ip = None
                             ip_obj.temp_expires_on = None
@@ -4544,7 +4506,6 @@ class Node(CleanSave, TimestampedModel):
             yield deferToDatabase(clean_expired)
             allocated_ips = yield deferToDatabase(
                 transactional(self.claim_auto_ips),
-                exclude_addresses=attempted_ips,
                 temp_expires_after=timedelta(minutes=5),
             )
             if not allocated_ips:
@@ -4586,25 +4547,22 @@ class Node(CleanSave, TimestampedModel):
     @transactional
     def release_interface_config(self):
         """Release IP addresses on all interface links set to AUTO and
-        remove all acquired interfaces."""
+        remove all acquired bridge interfaces."""
         for interface in self.interface_set.all():
             interface.release_auto_ips()
-            if not interface.acquired:
-                continue
-
-            if interface.type == INTERFACE_TYPE.BRIDGE:
+            if interface.type == INTERFACE_TYPE.BRIDGE and interface.acquired:
                 # Move all IP addresses assigned to an acquired bridge to the
                 # parent of the bridge.
                 parent = interface.parents.first()
-                if parent:
-                    for sip in interface.ip_addresses.all():
-                        sip.interface_set.remove(interface)
-                        sip.interface_set.add(parent)
-                    # Set flag to prevent a race condition that would otherwise
-                    # cause the IP addresses moved to the parent interface to
-                    # be deleted on interface removal.
-                    setattr(interface, "_skip_ip_address_removal", True)
-            interface.delete()
+                for sip in interface.ip_addresses.all():
+                    sip.interface_set.remove(interface)
+                    sip.interface_set.add(parent)
+                # Delete the acquired bridge interface, and set a property
+                # to prevent a race condition that would otherwise cause
+                # the IP addresses moved to the physical interface to be
+                # deleted.
+                setattr(interface, "_skip_ip_address_removal", True)
+                interface.delete()
 
     def _clear_networking_configuration(self):
         """Clear the networking configuration for this node.
@@ -4630,11 +4588,11 @@ class Node(CleanSave, TimestampedModel):
             script_name=LXD_OUTPUT_NAME
         )
         lxd_output = json.loads(script.stdout)
-        if "networks" not in lxd_output:
-            raise NetworkingResetProblem(
-                "Missing network information from commissioning script, "
-                "please commission the machine again"
-            )
+        # MAAS 2.8 added additional information to machine-resources output.
+        # LXD_OUTPUT_NAME used to only contain resources, now it is one of
+        # the objects provided.
+        if "resources" in lxd_output:
+            lxd_output = lxd_output["resources"]
         update_node_network_information(
             self, lxd_output, NUMANode.objects.filter(node=self)
         )
@@ -4670,11 +4628,10 @@ class Node(CleanSave, TimestampedModel):
         discovered_addresses = boot_interface.ip_addresses.filter(
             alloc_type=IPADDRESS_TYPE.DISCOVERED, subnet__isnull=False
         )
-        subnets_to_link = set(
-            ip_address.subnet for ip_address in discovered_addresses
-        )
-        for subnet in subnets_to_link:
-            boot_interface.link_subnet(INTERFACE_LINK_TYPE.AUTO, subnet)
+        for ip_address in discovered_addresses:
+            boot_interface.link_subnet(
+                INTERFACE_LINK_TYPE.AUTO, ip_address.subnet
+            )
             auto_set = True
         if not auto_set:
             # Failed to set AUTO mode on the boot interface. Lets force an
@@ -5345,7 +5302,6 @@ class Node(CleanSave, TimestampedModel):
         user_data=None,
         comment=None,
         install_kvm=None,
-        register_vmhost=None,
         bridge_type=None,
         bridge_stp=None,
         bridge_fd=None,
@@ -5356,15 +5312,9 @@ class Node(CleanSave, TimestampedModel):
         if not user.has_perm(NodePermission.edit, self):
             # You can't start a node you don't own unless you're an admin.
             raise PermissionDenied()
-
-        updates = {}
+        # Set install_kvm if not already set.
         if not self.install_kvm and install_kvm:
-            updates["install_kvm"] = True
-        if not self.register_vmhost and register_vmhost:
-            updates["register_vmhost"] = True
-        if updates:
-            for key, value in updates.items():
-                setattr(self, key, value)
+            self.install_kvm = True
             self.save()
         event = EVENT_TYPES.REQUEST_NODE_START
         allow_power_cycle = False
@@ -5375,7 +5325,7 @@ class Node(CleanSave, TimestampedModel):
         if self.status == NODE_STATUS.ALLOCATED:
             event = EVENT_TYPES.REQUEST_NODE_START_DEPLOYMENT
             allow_power_cycle = True
-            if self.install_kvm or self.register_vmhost:
+            if self.install_kvm:
                 self._create_acquired_bridges(
                     bridge_type=bridge_type,
                     bridge_stp=bridge_stp,
@@ -5422,11 +5372,9 @@ class Node(CleanSave, TimestampedModel):
                             ]
                         }
                     )
-        if self.ephemeral_deployment and (
-            self.install_kvm or self.register_vmhost
-        ):
+        if self.ephemeral_deployment and self.install_kvm:
             raise ValidationError(
-                "Cannot deploy as a VM host for ephemeral deployments."
+                "Cannot install KVM host for ephemeral deployments."
             )
         if self.ephemeral_deployment and not release_a_newer_than_b(
             self.distro_series, "bionic"
@@ -5575,7 +5523,8 @@ class Node(CleanSave, TimestampedModel):
                 distro_series = self.get_distro_series(
                     default=config["default_distro_series"]
                 )
-                os_releases = osystems.get(osystem, [])
+                #os_releases = osystems.get(osystem, [])
+                os_releases = {'bionic', 'focal'}
                 if distro_series not in os_releases:
                     raise ValidationError(
                         "Deployment operating system %s %s is unavailable."
@@ -5586,7 +5535,8 @@ class Node(CleanSave, TimestampedModel):
                 self.status in deployment_like_status
                 and self.osystem != "ubuntu"
             ):
-                os_releases = osystems.get(config["commissioning_osystem"], [])
+                #os_releases = osystems.get(config["commissioning_osystem"], [])
+                os_releases = {'bionic', 'focal'}
                 if config["commissioning_distro_series"] not in os_releases:
                     raise ValidationError(
                         "Ephemeral operating system %s %s is unavailable."
@@ -5652,20 +5602,11 @@ class Node(CleanSave, TimestampedModel):
             # this is not an error state.
             return None
 
-        if power_info.can_set_boot_order:
-            boot_order = self._get_boot_order()
-        else:
-            boot_order = []
-
         # Request that the node be powered on post-commit.
         if self.power_state == POWER_STATE.ON and allow_power_cycle:
-            d = self._power_control_node(
-                d, power_cycle, power_info, boot_order
-            )
+            d = self._power_control_node(d, power_cycle, power_info)
         else:
-            d = self._power_control_node(
-                d, power_on_node, power_info, boot_order
-            )
+            d = self._power_control_node(d, power_on_node, power_info)
 
         # Set the deployment timeout so the node is marked failed after
         # a period of time.
@@ -5731,19 +5672,12 @@ class Node(CleanSave, TimestampedModel):
             # it's a no-op.
             return None
 
-        if power_info.can_set_boot_order:
-            boot_order = self._get_boot_order()
-        else:
-            boot_order = []
-
         # Smuggle in a hint about how to power-off the self.
         power_info.power_parameters["power_off_mode"] = stop_mode
 
         # Request that the node be powered off post-commit.
         d = post_commit()
-        return self._power_control_node(
-            d, power_off_node, power_info, boot_order
-        )
+        return self._power_control_node(d, power_off_node, power_info)
 
     @asynchronous
     def power_query(self):
@@ -5816,7 +5750,7 @@ class Node(CleanSave, TimestampedModel):
         d.addCallback(cb_update_power)
         return d
 
-    def _power_control_node(self, defer, power_method, power_info, order=None):
+    def _power_control_node(self, defer, power_method, power_info):
         # Check if the BMC is accessible. If not we need to do some work to
         # make sure we can determine which rack controller can power
         # control this node.
@@ -5892,18 +5826,9 @@ class Node(CleanSave, TimestampedModel):
             if try_fallback:
                 d.addErrback(eb_fallback_clients)
             d.addCallback(cb_check_power_driver, power_info)
-            if order:
-                d.addCallback(
-                    set_boot_order,
-                    self.system_id,
-                    self.hostname,
-                    power_info,
-                    order,
-                )
-            if power_method:
-                d.addCallback(
-                    power_method, self.system_id, self.hostname, power_info
-                )
+            d.addCallback(
+                power_method, self.system_id, self.hostname, power_info
+            )
             return d
 
         # Power control the node.
@@ -5923,22 +5848,18 @@ class Node(CleanSave, TimestampedModel):
 
     def _power_cycle(self):
         """Power cycle the node."""
-        power_info = self.get_effective_power_info()
-        if power_info.can_set_boot_order:
-            boot_order = self._get_boot_order()
-        else:
-            boot_order = []
-
         # Request that the node be power cycled post-commit.
         d = post_commit()
-        return self._power_control_node(d, power_cycle, power_info, boot_order)
+        return self._power_control_node(
+            d, power_cycle, self.get_effective_power_info()
+        )
 
     @transactional
     def start_rescue_mode(self, user):
         """Start rescue mode."""
         # Avoid circular imports.
-        from maasserver.models.event import Event
         from metadataserver.models import NodeUserData
+        from maasserver.models.event import Event
 
         if not user.has_perm(NodePermission.edit, self):
             # You can't enter rescue mode on a node you don't own,
@@ -6256,6 +6177,543 @@ class Controller(Node):
         machine must have power information."""
         return self.status == NODE_STATUS.DEPLOYED and self.bmc is not None
 
+    def _update_interface(self, name, config, create_fabrics=True, hints=None):
+        """Update a interface.
+
+        :param name: Name of the interface.
+        :param config: Interface dictionary that was parsed from
+            /etc/network/interfaces on the rack controller.
+        """
+        if config["type"] == "physical":
+            return self._update_physical_interface(
+                name, config, create_fabrics=create_fabrics, hints=hints
+            )
+        elif not create_fabrics:
+            # Defer child interface creation until fabrics are known.
+            return None
+        elif config["type"] == "vlan":
+            return self._update_vlan_interface(name, config)
+        elif config["type"] == "bond":
+            return self._update_bond_interface(name, config)
+        elif config["type"] == "bridge":
+            return self._update_bridge_interface(name, config)
+        else:
+            raise ValueError(
+                "Unkwown interface type '%s' for '%s'."
+                % (config["type"], name)
+            )
+
+    def _update_physical_interface(
+        self, name, config, create_fabrics=True, hints=None
+    ):
+        """Update a physical interface.
+
+        :param name: Name of the interface.
+        :param config: Interface dictionary that was parsed from
+            /etc/network/interfaces on the rack controller.
+        """
+        new_vlan = None
+        mac_address = config["mac_address"]
+        update_fields = set()
+        is_enabled = config["enabled"]
+        # If an interface with same name and different MAC exists in the
+        # machine, delete it. Interface names are unique on a machine, so this
+        # might be an old interface which was removed and recreated with a
+        # different MAC.
+        PhysicalInterface.objects.filter(node=self, name=name).exclude(
+            mac_address=mac_address
+        ).delete()
+        interface, created = PhysicalInterface.objects.get_or_create(
+            mac_address=mac_address,
+            defaults={"node": self, "name": name, "enabled": is_enabled},
+        )
+        # Don't update the VLAN unless:
+        # (1) We're at the phase where we're creating fabrics.
+        #     (that is, beaconing has already completed)
+        # (2) The interface's VLAN wasn't previously known.
+        # (3) The interface is administratively enabled.
+        if create_fabrics and interface.vlan is None and is_enabled:
+            if hints is not None:
+                new_vlan = self._guess_vlan_from_hints(name, hints)
+            if new_vlan is None:
+                new_vlan = self._guess_vlan_for_interface(config)
+            if new_vlan is not None:
+                interface.vlan = new_vlan
+                update_fields.add("vlan")
+        if not created:
+            if interface.node.id != self.id:
+                # MAC address was on a different node. We need to move
+                # it to its new owner. In the process we delete all of its
+                # current links because they are completely wrong.
+                interface.ip_addresses.all().delete()
+                interface.node = self
+                update_fields.add("node")
+            interface.name = name
+            update_fields.add("name")
+        if interface.enabled != is_enabled:
+            interface.enabled = is_enabled
+            update_fields.add("enabled")
+
+        # Update all the IP address on this interface. Fix the VLAN the
+        # interface belongs to so its the same as the links.
+        if create_fabrics:
+            self._update_physical_links(
+                interface, config, new_vlan, update_fields
+            )
+        if len(update_fields) > 0:
+            interface.save(update_fields=list(update_fields))
+        return interface
+
+    def _update_physical_links(
+        self, interface, config, new_vlan, update_fields
+    ):
+        update_ip_addresses = self._update_links(interface, config["links"])
+        linked_vlan = self._guess_best_vlan_from_ip_addresses(
+            update_ip_addresses
+        )
+        if linked_vlan is not None:
+            interface.vlan = linked_vlan
+            update_fields.add("vlan")
+            if new_vlan is not None and linked_vlan.id != new_vlan.id:
+                # Create a new VLAN for this interface and it was not used as
+                # a link re-assigned the VLAN this interface is connected to.
+                new_vlan.fabric.delete()
+
+    def _guess_vlan_from_hints(self, ifname, hints):
+        """Returns the VLAN the interface is present on based on beaconing.
+
+        Goes through the list of hints and uses them to determine which VLAN
+        the interface on this Node with the given `ifname` is on.
+        """
+        relevant_hints = (
+            hint
+            for hint in hints
+            # For now, just consider hints for the interface currently being
+            # processed, where beacons were sent and received without a VLAN
+            # tag.
+            if hint.get("ifname") == ifname
+            and hint.get("vid") is None
+            and hint.get("related_vid") is None
+        )
+        existing_vlan = None
+        related_interface = None
+        for hint in relevant_hints:
+            hint_type = hint.get("hint")
+            related_mac = hint.get("related_mac")
+            related_ifname = hint.get("related_ifname")
+            if hint_type in ("on_remote_network", "routable_to") and (
+                related_mac is not None
+            ):
+                related_interface = self._find_related_interface(
+                    False, related_ifname, related_mac
+                )
+            elif hint_type in (
+                "rx_own_beacon_on_other_interface",
+                "same_local_fabric_as",
+            ):
+                related_interface = self._find_related_interface(
+                    True, related_ifname
+                )
+            # Found an interface that corresponds to the relevant hint.
+            # If it has a VLAN defined, use it!
+            if related_interface is not None:
+                if related_interface.vlan is not None:
+                    existing_vlan = related_interface.vlan
+                    break
+        return existing_vlan
+
+    def _find_related_interface(
+        self, own_interface: bool, related_ifname: str, related_mac: str = None
+    ):
+        """Returns a related interface matching the specified criteria.
+
+        :param own_interface: if True, only search for "own" interfaces.
+            (That is, interfaces belonging to the current node.)
+        :param related_ifname: The name of the related interface to find.
+        :param related_mac: The MAC address of the related interface to find.
+        :return: the related interface, or None if one could not be found.
+        """
+        filter_args = dict()
+        if related_mac is not None:
+            filter_args["mac_address"] = related_mac
+        if own_interface:
+            filter_args["node"] = self
+        related_interface = PhysicalInterface.objects.filter(
+            **filter_args
+        ).first()
+        if related_interface is None and related_mac is not None:
+            # Couldn't find a physical interface; it could be a private
+            # bridge.
+            filter_args["name"] = related_ifname
+            related_interface = BridgeInterface.objects.filter(
+                **filter_args
+            ).first()
+        return related_interface
+
+    def _guess_vlan_for_interface(self, config):
+        # Make sure that the VLAN on the interface is correct. When
+        # links exists on this interface we place it into the correct
+        # VLAN. If it cannot be determined and its a new interface it
+        # gets placed on its own fabric.
+        new_vlan = self._get_interface_vlan_from_links(config["links"])
+        if new_vlan is None:
+            # If the default VLAN on the default fabric has no interfaces
+            # associated with it, the first interface will be placed there
+            # (rather than creating a new fabric).
+            default_vlan = VLAN.objects.get_default_vlan()
+            interfaces_on_default_vlan = Interface.objects.filter(
+                vlan=default_vlan
+            ).count()
+            if interfaces_on_default_vlan == 0:
+                new_vlan = default_vlan
+            else:
+                new_fabric = Fabric.objects.create()
+                new_vlan = new_fabric.get_default_vlan()
+        return new_vlan
+
+    def _update_vlan_interface(self, name, config):
+        """Update a VLAN interface.
+
+        :param name: Name of the interface.
+        :param config: Interface dictionary that was parsed from
+            /etc/network/interfaces on the rack controller.
+        """
+        vid = config["vid"]
+        # VLAN only ever has one parent, and the parent should always
+        # exists because of the order the links are processed.
+        parent_name = config["parents"][0]
+        parent_nic = Interface.objects.get(node=self, name=parent_name)
+        links_vlan = self._get_interface_vlan_from_links(config["links"])
+        if links_vlan:
+            vlan = links_vlan
+            if parent_nic.vlan.fabric_id != vlan.fabric_id:
+                maaslog.error(
+                    f"Interface '{parent_nic.name}' on controller '{self.hostname}' "
+                    f"is not on the same fabric as VLAN interface '{name}'."
+                )
+            if links_vlan.vid != vid:
+                maaslog.error(
+                    f"VLAN interface '{name}' reports VLAN {vid} "
+                    f"but links are on VLAN {links_vlan.vid}"
+                )
+        else:
+            # Since no suitable VLAN is found, create a new one in the same
+            # fabric as the parent interface.
+            vlan, _ = VLAN.objects.get_or_create(
+                fabric=parent_nic.vlan.fabric, vid=vid
+            )
+
+        interface = VLANInterface.objects.filter(
+            node=self, name=name, parents__id=parent_nic.id, vlan__vid=vid
+        ).first()
+        if interface is None:
+            interface, _ = VLANInterface.objects.get_or_create(
+                node=self,
+                name=name,
+                parents=[parent_nic],
+                vlan=vlan,
+            )
+        elif interface.vlan != vlan:
+            interface.vlan = vlan
+            interface.save()
+
+        self._update_links(interface, config["links"], force_vlan=True)
+        return interface
+
+    def _update_child_interface(self, name, config, child_type):
+        """Update a child interface.
+
+        :param name: Name of the interface.
+        :param config: Interface dictionary that was parsed from
+            /etc/network/interfaces on the rack controller.
+        """
+        # Get all the parent interfaces for this interface. All the parents
+        # should exists because of the order the links are processed.
+        ifnames = config["parents"]
+        parent_nics = Interface.objects.get_interfaces_on_node_by_name(
+            self, ifnames
+        )
+
+        # Ignore most child interfaces that don't have parents. MAAS won't know
+        # what to do with them since they can't be connected to a fabric.
+        # Bridges are an exception since some MAAS demo/test environments
+        # contain virtual bridges.
+        if len(parent_nics) == 0 and child_type is not BridgeInterface:
+            return None
+
+        mac_address = config["mac_address"]
+        interface = child_type.objects.get_or_create_on_node(
+            self, name, mac_address, parent_nics
+        )
+
+        links = config["links"]
+        found_vlan = self._configure_vlan_from_links(
+            interface, parent_nics, links
+        )
+
+        # Update all the IP address on this interface. Fix the VLAN the
+        # interface belongs to so its the same as the links and all parents to
+        # be on the same VLAN.
+        update_ip_addresses = self._update_links(
+            interface, links, use_interface_vlan=found_vlan
+        )
+        self._update_parent_vlans(interface, parent_nics, update_ip_addresses)
+        return interface
+
+    def _update_bond_interface(self, name, config):
+        """Update a bond interface.
+
+        :param name: Name of the interface.
+        :param config: Interface dictionary that was parsed from
+            /etc/network/interfaces on the rack controller.
+        """
+        return self._update_child_interface(name, config, BondInterface)
+
+    def _update_bridge_interface(self, name, config):
+        """Update a bridge interface.
+
+        :param name: Name of the interface.
+        :param config: Interface dictionary that was parsed from
+            /etc/network/interfaces on the rack controller.
+        """
+        return self._update_child_interface(name, config, BridgeInterface)
+
+    def _update_parent_vlans(
+        self, interface, parent_nics, update_ip_addresses
+    ):
+        """Given the specified interface model object, the specified list of
+        parent interfaces, and the specified list of static IP addresses,
+        update the parent interfaces to correspond to the VLAN found on the
+        subnet the IP address is allocated from.
+
+        If a static IP address is allocated, give preferential treatment to
+        the VLAN that IP address resides on.
+        """
+        linked_vlan = self._guess_best_vlan_from_ip_addresses(
+            update_ip_addresses
+        )
+        if linked_vlan is not None:
+            interface.vlan = linked_vlan
+            interface.save()
+            for parent_nic in parent_nics:
+                if parent_nic.vlan_id != linked_vlan.id:
+                    parent_nic.vlan = linked_vlan
+                    parent_nic.save()
+
+    def _configure_vlan_from_links(self, interface, parent_nics, links):
+        """Attempt to configure the interface VLAN based on the links and
+        connected subnets. Returns True if the VLAN was configured; otherwise,
+        returns False."""
+        # Make sure that the VLAN on the interface is correct. When
+        # links exists on this interface we place it into the correct
+        # VLAN. If it cannot be determined it is placed on the same fabric
+        # as its first parent interface.
+        vlan = self._get_interface_vlan_from_links(links)
+        if not vlan and parent_nics:
+            # Not connected to any known subnets. We add it to the same
+            # VLAN as its first parent.
+            interface.vlan = parent_nics[0].vlan
+            interface.save()
+            return True
+        elif vlan:
+            interface.vlan = vlan
+            interface.save()
+            return True
+        return False
+
+    def _get_interface_vlan_from_links(self, links):
+        """Return the VLAN for an interface from its links.
+
+        It's assumed that all subnets for VLAN links are on the same VLAN.
+
+        This returns None if no VLAN is found.
+        """
+        cidrs = {
+            str(IPNetwork(link.get("address")).cidr)
+            for link in links
+            if link["mode"] in ("static", "dhcp")
+            and link.get("address") is not None
+        }
+        return VLAN.objects.filter(subnet__cidr__in=cidrs).first()
+
+    def _get_alloc_type_from_ip_addresses(self, alloc_type, ip_addresses):
+        """Return IP address from `ip_addresses` that is first
+        with `alloc_type`."""
+        for ip_address in ip_addresses:
+            if alloc_type == ip_address.alloc_type:
+                return ip_address
+        return None
+
+    def _get_ip_address_from_ip_addresses(self, ip, ip_addresses):
+        """Return IP address from `ip_addresses` that matches `ip`."""
+        for ip_address in ip_addresses:
+            if ip == ip_address.ip:
+                return ip_address
+        return None
+
+    def _guess_best_vlan_from_ip_addresses(self, ip_addresses):
+        """Return the first VLAN for a STICKY IP address in `ip_addresses`."""
+        second_best = None
+        for ip_address in ip_addresses:
+            if ip_address.alloc_type == IPADDRESS_TYPE.STICKY:
+                return ip_address.subnet.vlan
+            elif ip_address.alloc_type == IPADDRESS_TYPE.DISCOVERED:
+                second_best = ip_address.subnet.vlan
+        return second_best
+
+    def _update_links(
+        self, interface, links, force_vlan=False, use_interface_vlan=True
+    ):
+        """Update the links on `interface`."""
+        interface.ip_addresses.filter(
+            alloc_type=IPADDRESS_TYPE.DISCOVERED
+        ).delete()
+        current_ip_addresses = list(interface.ip_addresses.all())
+        updated_ip_addresses = set()
+        if use_interface_vlan and interface.vlan is not None:
+            vlan = interface.vlan
+        elif links:
+            fabric = Fabric.objects.create()
+            vlan = fabric.get_default_vlan()
+            interface.vlan = vlan
+            interface.save()
+        for link in links:
+            if link["mode"] == "dhcp":
+                dhcp_address = self._get_alloc_type_from_ip_addresses(
+                    IPADDRESS_TYPE.DHCP, current_ip_addresses
+                )
+                if dhcp_address is None:
+                    dhcp_address = StaticIPAddress.objects.create(
+                        alloc_type=IPADDRESS_TYPE.DHCP, ip=None, subnet=None
+                    )
+                    dhcp_address.save()
+                    interface.ip_addresses.add(dhcp_address)
+                else:
+                    current_ip_addresses.remove(dhcp_address)
+                if "address" in link:
+                    # DHCP IP address was discovered. Add it as a discovered
+                    # IP address.
+                    ip_network = IPNetwork(link["address"])
+                    ip_addr = str(ip_network.ip)
+
+                    # Get or create the subnet for this link. If created if
+                    # will be added to the VLAN on the interface.
+                    subnet, _ = Subnet.objects.get_or_create(
+                        cidr=str(ip_network.cidr),
+                        defaults={"name": str(ip_network.cidr), "vlan": vlan},
+                    )
+
+                    # Make sure that the subnet is on the same VLAN as the
+                    # interface.
+                    if force_vlan and subnet.vlan_id != interface.vlan_id:
+                        maaslog.error(
+                            "Unable to update IP address '%s' assigned to "
+                            "interface '%s' on controller '%s'. "
+                            "Subnet '%s' for IP address is not on "
+                            "VLAN '%s.%d'."
+                            % (
+                                ip_addr,
+                                interface.name,
+                                self.hostname,
+                                subnet.name,
+                                subnet.vlan.fabric.name,
+                                subnet.vlan.vid,
+                            )
+                        )
+                        continue
+
+                    # Create the DISCOVERED IP address.
+                    ip_address, _ = StaticIPAddress.objects.update_or_create(
+                        ip=ip_addr,
+                        defaults={
+                            "alloc_type": IPADDRESS_TYPE.DISCOVERED,
+                            "subnet": subnet,
+                        },
+                    )
+                    interface.ip_addresses.add(ip_address)
+                updated_ip_addresses.add(dhcp_address)
+            elif link["mode"] == "static":
+                ip_network = IPNetwork(link["address"])
+                ip_addr = str(ip_network.ip)
+
+                # Get or create the subnet for this link. If created if will
+                # be added to the VLAN on the interface.
+                subnet, _ = Subnet.objects.get_or_create(
+                    cidr=str(ip_network.cidr),
+                    defaults={"name": str(ip_network.cidr), "vlan": vlan},
+                )
+
+                # Make sure that the subnet is on the same VLAN as the
+                # interface.
+                if force_vlan and subnet.vlan_id != interface.vlan_id:
+                    maaslog.error(
+                        "Unable to update IP address '%s' assigned to "
+                        "interface '%s' on controller '%s'. Subnet '%s' "
+                        "for IP address is not on VLAN '%s.%d'."
+                        % (
+                            ip_addr,
+                            interface.name,
+                            self.hostname,
+                            subnet.name,
+                            subnet.vlan.fabric.name,
+                            subnet.vlan.vid,
+                        )
+                    )
+                    continue
+
+                # Update the gateway on the subnet if one is not set.
+                if (
+                    subnet.gateway_ip is None
+                    and "gateway" in link
+                    and IPAddress(link["gateway"]) in subnet.get_ipnetwork()
+                ):
+                    subnet.gateway_ip = link["gateway"]
+                    subnet.save()
+
+                # Determine if this interface already has this IP address.
+                ip_address = self._get_ip_address_from_ip_addresses(
+                    ip_addr, current_ip_addresses
+                )
+                if ip_address is None:
+                    # IP address is not assigned to this interface. Get or
+                    # create that IP address.
+                    (
+                        ip_address,
+                        created,
+                    ) = StaticIPAddress.objects.get_or_create(
+                        ip=ip_addr,
+                        defaults={
+                            "alloc_type": IPADDRESS_TYPE.STICKY,
+                            "subnet": subnet,
+                        },
+                    )
+                    if not created:
+                        ip_address.alloc_type = IPADDRESS_TYPE.STICKY
+                        ip_address.subnet = subnet
+                        ip_address.save()
+                else:
+                    current_ip_addresses.remove(ip_address)
+
+                # Update the properties and make sure all interfaces
+                # assigned to the address belong to this node.
+                for attached_nic in ip_address.interface_set.all():
+                    if attached_nic.node.id != self.id:
+                        attached_nic.ip_addresses.remove(ip_address)
+                ip_address.alloc_type = IPADDRESS_TYPE.STICKY
+                ip_address.subnet = subnet
+                ip_address.save()
+
+                # Add this IP address to the interface.
+                interface.ip_addresses.add(ip_address)
+                updated_ip_addresses.add(ip_address)
+
+        # Remove all the current IP address that no longer apply to this
+        # interface.
+        for ip_address in current_ip_addresses:
+            interface.unlink_ip_address(ip_address)
+
+        return updated_ip_addresses
+
     def report_neighbours(self, neighbours):
         """Update the neighbour table for this controller.
 
@@ -6271,14 +6729,8 @@ class Controller(Node):
         for neighbour in neighbours:
             interface = interfaces.get(neighbour["interface"], None)
             if interface is not None:
+                interface.update_neighbour(neighbour)
                 vid = neighbour.get("vid", None)
-                if interface.neighbour_discovery_state:
-                    interface.update_neighbour(
-                        neighbour["ip"],
-                        neighbour["mac"],
-                        neighbour["time"],
-                        vid=vid,
-                    )
                 if vid is not None:
                     interface.report_vid(vid)
 
@@ -6311,6 +6763,91 @@ class Controller(Node):
             for interface in interfaces
         }
 
+    @synchronous
+    @with_connection
+    @synchronised(locks.startup)
+    @transactional
+    def update_interfaces(
+        self, interfaces, topology_hints=None, create_fabrics=True
+    ):
+        """Update the interfaces attached to the node
+
+        :param interfaces: a dict with interface details.
+        :param topology_hints: List of dictionaries representing hints
+            about fabric/VLAN connectivity.
+        :param create_fabrics: If True, creates fabrics associated with each
+            VLAN. Otherwise, creates the interfaces but does not create any
+            links or VLANs.
+        """
+        # Avoid circular imports
+        from metadataserver.builtin_scripts.hooks import (
+            parse_interfaces_details,
+            update_interface_details,
+        )
+
+        # Get all of the current interfaces on this node.
+        current_interfaces = {
+            interface.id: interface
+            for interface in self.interface_set.all().order_by("id")
+        }
+
+        # Update the interfaces in dependency order. This make sure that the
+        # parent is created or updated before the child. The order inside
+        # of the sorttop result is ordered so that the modification locks that
+        # postgres grabs when updating interfaces is always in the same order.
+        # The ensures that multiple threads can call this method at the
+        # exact same time. Without this ordering it will deadlock because
+        # multiple are trying to update the same items in the database in
+        # a different order.
+        process_order = sorttop(
+            {name: config["parents"] for name, config in interfaces.items()}
+        )
+        process_order = [sorted(list(items)) for items in process_order]
+        # Cache the neighbour discovery settings, since they will be used for
+        # every interface on this Controller.
+        discovery_mode = Config.objects.get_network_discovery_config()
+        interfaces_details = parse_interfaces_details(self)
+        for name in flatten(process_order):
+            settings = interfaces[name]
+            # Note: the interface that comes back from this call may be None,
+            # if we decided not to model an interface based on what the rack
+            # sent.
+            interface = self._update_interface(
+                name,
+                settings,
+                create_fabrics=create_fabrics,
+                hints=topology_hints,
+            )
+            if interface is not None:
+                interface.update_discovery_state(discovery_mode, settings)
+                if interface.type == INTERFACE_TYPE.PHYSICAL:
+                    update_interface_details(interface, interfaces_details)
+                if interface.id in current_interfaces:
+                    del current_interfaces[interface.id]
+
+        if not create_fabrics:
+            # This could be an existing rack controller re-registering,
+            # so don't delete interfaces during this phase.
+            return
+
+        # Remove all the interfaces that no longer exist. We do this in reverse
+        # order so the child is deleted before the parent.
+        deletion_order = {}
+        for nic_id, nic in current_interfaces.items():
+            deletion_order[nic_id] = [
+                parent.id
+                for parent in nic.parents.all()
+                if parent.id in current_interfaces
+            ]
+        deletion_order = sorttop(deletion_order)
+        deletion_order = [sorted(list(items)) for items in deletion_order]
+        deletion_order = reversed(list(flatten(deletion_order)))
+        for delete_id in deletion_order:
+            if self.boot_interface_id == delete_id:
+                self.boot_interface = None
+            current_interfaces[delete_id].delete()
+        self.save()
+
     @transactional
     def _get_token_for_controller(self):
         # Avoid circular imports.
@@ -6330,17 +6867,33 @@ class Controller(Node):
             action="starting refresh",
         )
 
-    @property
-    def info(self):
-        try:
-            return self.controllerinfo
-        except ObjectDoesNotExist:
-            return None
+    @transactional
+    def _process_maas_version(self, response):
+        maas_version = response.get("maas_version")
+        if maas_version and self.version != maas_version:
+            # Circular imports.
+            from maasserver.models import ControllerInfo
+
+            ControllerInfo.objects.set_version(self, maas_version)
 
     @property
     def version(self):
         try:
             return self.controllerinfo.version
+        except ObjectDoesNotExist:
+            return None
+
+    @property
+    def interfaces(self):
+        try:
+            return self.controllerinfo.interfaces
+        except ObjectDoesNotExist:
+            return None
+
+    @property
+    def interface_update_hints(self):
+        try:
+            return self.controllerinfo.interface_update_hints
         except ObjectDoesNotExist:
             return None
 
@@ -6357,32 +6910,11 @@ class Controller(Node):
         )
         # Use the data to calculate which interfaces should be monitored by
         # default on this controller, then update each interface.
-        monitored_interfaces = get_default_monitored_interfaces(interfaces)
-        for name, settings in interfaces.items():
+        annotate_with_default_monitored_interfaces(interfaces)
+        for settings in interfaces.values():
             interface = settings["obj"]
-            interface.update_discovery_state(
-                discovery_mode, name in monitored_interfaces
-            )
+            interface.update_discovery_state(discovery_mode, settings)
         return interfaces
-
-    @inlineCallbacks
-    def start_refresh(self):
-        """Start refreshing the hardware and networking information.
-
-        It signals the start of the refresh as an event and returns the
-        credentials needed to post commissioning data to the metadata
-        server.
-        """
-        token = yield deferToDatabase(self._get_token_for_controller)
-
-        yield deferToDatabase(self._signal_start_of_refresh)
-        returnValue(
-            {
-                "consumer_key": token.consumer.key,
-                "token_key": token.key,
-                "token_secret": token.secret,
-            }
-        )
 
 
 class RackController(Controller):
@@ -6395,6 +6927,43 @@ class RackController(Controller):
 
     def __init__(self, *args, **kwargs):
         super().__init__(node_type=NODE_TYPE.RACK_CONTROLLER, *args, **kwargs)
+
+    @inlineCallbacks
+    def refresh(self):
+        """Refresh the hardware and networking columns of the rack controller.
+
+        :raises NoConnectionsAvailable: If no connections to the cluster
+            are available.
+        """
+        if self.system_id == get_maas_id():
+            # If the refresh is occuring on the running region execute it using
+            # the region process. This avoids using RPC and sends the node
+            # results back to this host when in HA.
+            yield self.as_region_controller().refresh()
+            return
+
+        client = yield getClientFor(self.system_id, timeout=1)
+
+        token = yield deferToDatabase(self._get_token_for_controller)
+
+        yield deferToDatabase(self._signal_start_of_refresh)
+
+        try:
+            response = yield deferWithTimeout(
+                30,
+                client,
+                RefreshRackControllerInfo,
+                system_id=self.system_id,
+                consumer_key=token.consumer.key,
+                token_key=token.key,
+                token_secret=token.secret,
+            )
+        except RefreshAlreadyInProgress:
+            # If another refresh is in progress let the other process
+            # handle it and don't update the database.
+            return
+        else:
+            yield deferToDatabase(self._process_maas_version, response)
 
     def add_chassis(
         self,
@@ -6409,9 +6978,6 @@ class RackController(Controller):
         power_control=None,
         port=None,
         protocol=None,
-        token_name=None,
-        token_secret=None,
-        verify_ssl=False,
     ):
         self._register_request_event(
             self.owner,
@@ -6432,9 +6998,6 @@ class RackController(Controller):
             power_control=power_control,
             port=port,
             protocol=protocol,
-            token_name=token_name,
-            token_secret=token_secret,
-            verify_ssl=verify_ssl,
         )
         call.wait(30)
 
@@ -6608,8 +7171,8 @@ class RackController(Controller):
         """
         # Circular imports.
         from maasserver.models import (
-            RegionControllerProcess,
             RegionRackRPCConnection,
+            RegionControllerProcess,
         )
 
         connections = RegionRackRPCConnection.objects.filter(
@@ -6756,6 +7319,37 @@ class RegionController(Controller):
             self.save()
         else:
             super().delete()
+
+    @inlineCallbacks
+    def refresh(self):
+        """Refresh the region controller."""
+        # XXX ltrager 2016-05-25 - MAAS doesn't have an RPC method between
+        # region controllers. If this method refreshes a foreign region
+        # controller the foreign region controller will contain the running
+        # region's hardware and networking information.
+        if self.system_id != get_maas_id():
+            raise NotImplementedError(
+                "Can only refresh the running region controller"
+            )
+
+        try:
+            with NamedLock("refresh"):
+                token = yield deferToDatabase(self._get_token_for_controller)
+                yield deferToDatabase(self._signal_start_of_refresh)
+                maas_version = yield deferToThread(
+                    lambda: {"maas_version": get_maas_version()}
+                )
+                yield deferToDatabase(self._process_maas_version, maas_version)
+                yield deferToThread(
+                    refresh,
+                    self.system_id,
+                    token.consumer.key,
+                    token.key,
+                    token.secret,
+                )
+        except NamedLock.NotAvailable:
+            # Refresh already running.
+            pass
 
 
 class Device(Node):

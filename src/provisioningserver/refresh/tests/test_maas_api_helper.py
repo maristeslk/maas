@@ -1,6 +1,8 @@
 # Copyright 2016-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Test maas_api_helper functions."""
+
 
 from collections import OrderedDict
 from email.utils import formatdate
@@ -38,135 +40,7 @@ from maastesting.testcase import MAASTestCase
 from provisioningserver.refresh import maas_api_helper
 
 
-class TestCredentials(MAASTestCase):
-    def test_defaults(self):
-        creds = maas_api_helper.Credentials()
-        self.assertEqual(creds.consumer_key, "")
-        self.assertEqual(creds.token_key, "")
-        self.assertEqual(creds.token_secret, "")
-        self.assertEqual(creds.consumer_secret, "")
-
-    def test_with_args(self):
-        creds = maas_api_helper.Credentials(
-            token_key="token_key", consumer_secret="consumer_secret"
-        )
-        self.assertEqual(creds.consumer_key, "")
-        self.assertEqual(creds.token_key, "token_key")
-        self.assertEqual(creds.token_secret, "")
-        self.assertEqual(creds.consumer_secret, "consumer_secret")
-
-    def test_eq(self):
-        creds = maas_api_helper.Credentials(
-            token_key="token_key", consumer_secret="consumer_secret"
-        )
-        self.assertEqual(
-            creds,
-            maas_api_helper.Credentials(
-                token_key="token_key", consumer_secret="consumer_secret"
-            ),
-        )
-        self.assertNotEqual(
-            creds,
-            maas_api_helper.Credentials(
-                token_key="token_key2", consumer_key="consumer_key"
-            ),
-        )
-
-    def test_bool(self):
-        self.assertTrue(
-            maas_api_helper.Credentials(
-                token_key="token_key", consumer_key="consumer_key"
-            )
-        )
-        self.assertFalse(maas_api_helper.Credentials())
-
-    def test_from_stringempty(self):
-        self.assertEqual(
-            maas_api_helper.Credentials.from_string(""),
-            maas_api_helper.Credentials(),
-        )
-        self.assertEqual(
-            maas_api_helper.Credentials.from_string(None),
-            maas_api_helper.Credentials(),
-        )
-
-    def test_all(self):
-        creds = maas_api_helper.Credentials.from_string("ck:tk:ts:cs")
-        self.assertEqual(
-            creds,
-            maas_api_helper.Credentials(
-                consumer_key="ck",
-                token_key="tk",
-                token_secret="ts",
-                consumer_secret="cs",
-            ),
-        )
-
-    def test_no_consumer_secret(self):
-        creds = maas_api_helper.Credentials.from_string("ck:tk:ts")
-        self.assertEqual(
-            creds,
-            maas_api_helper.Credentials(
-                consumer_key="ck",
-                token_key="tk",
-                token_secret="ts",
-                consumer_secret="",
-            ),
-        )
-
-    def test_wrong_format(self):
-        self.assertRaises(
-            maas_api_helper.InvalidCredentialsFormat,
-            maas_api_helper.Credentials.from_string,
-            "wrong:format",
-        )
-
-    def test_update(self):
-        creds = maas_api_helper.Credentials()
-        consumer_key = factory.make_name("consumer_key")
-        token_key = factory.make_name("token_key")
-        token_secret = factory.make_name("token_secret")
-        consumer_secret = factory.make_name("consumer_secret")
-        creds.update(
-            {
-                "consumer_key": consumer_key,
-                "token_key": token_key,
-                "token_secret": token_secret,
-                "consumer_secret": consumer_secret,
-            }
-        )
-        self.assertEqual(creds.consumer_key, consumer_key)
-        self.assertEqual(creds.token_key, token_key)
-        self.assertEqual(creds.token_secret, token_secret)
-        self.assertEqual(creds.consumer_secret, consumer_secret)
-
-    def test_update_no_update_already_set(self):
-        creds = maas_api_helper.Credentials()
-        consumer_key = factory.make_name("consumer_key")
-        token_key = factory.make_name("token_key")
-        token_secret = factory.make_name("token_secret")
-        consumer_secret = factory.make_name("consumer_secret")
-        creds.update(
-            {
-                "consumer_key": consumer_key,
-                "token_key": token_key,
-                "token_secret": token_secret,
-                "consumer_secret": consumer_secret,
-            }
-        )
-        creds.update(
-            {
-                "consumer_key": factory.make_name(),
-                "token_key": factory.make_name(),
-                "token_secret": factory.make_name(),
-                "consumer_secret": factory.make_name(),
-            }
-        )
-        self.assertEqual(creds.consumer_key, consumer_key)
-        self.assertEqual(creds.token_key, token_key)
-        self.assertEqual(creds.token_secret, token_secret)
-        self.assertEqual(creds.consumer_secret, consumer_secret)
-
+class TestHeaders(MAASTestCase):
     def test_oauth_headers(self):
         now = time.time()
         is_about_now = MatchesAll(
@@ -178,16 +52,9 @@ class TestCredentials(MAASTestCase):
         token_key = factory.make_name("token_key")
         token_secret = factory.make_name("token_secret")
         consumer_secret = factory.make_name("consumer_secret")
-        credentials = maas_api_helper.Credentials()
-        credentials.update(
-            {
-                "consumer_key": consumer_key,
-                "token_key": token_key,
-                "token_secret": token_secret,
-                "consumer_secret": consumer_secret,
-            }
+        headers = maas_api_helper.oauth_headers(
+            url, consumer_key, token_key, token_secret, consumer_secret
         )
-        headers = credentials.oauth_headers(url)
         authorization = headers["Authorization"]
         self.assertRegex(authorization, "^OAuth .*")
         authorization = authorization.replace("OAuth ", "")
@@ -215,9 +82,28 @@ class TestCredentials(MAASTestCase):
             ),
         )
 
-    def test_oauth_headers_empty(self):
-        creds = maas_api_helper.Credentials()
-        self.assertEqual(creds.oauth_headers("http://example.com"), {})
+    def test_authenticate_headers_appends_oauth(self):
+        url = factory.make_name("url")
+        consumer_key = factory.make_name("consumer_key")
+        token_key = factory.make_name("token_key")
+        token_secret = factory.make_name("token_secret")
+        consumer_secret = factory.make_name("consumer_secret")
+        creds = {
+            "consumer_key": consumer_key,
+            "token_key": token_key,
+            "token_secret": token_secret,
+            "consumer_secret": consumer_secret,
+        }
+        headers = {}
+        maas_api_helper.authenticate_headers(url, headers, creds)
+        self.assertIn("Authorization", headers)
+
+    def test_authenticate_headers_only_appends_with_consumer_key(self):
+        headers = {}
+        maas_api_helper.authenticate_headers(
+            factory.make_name("url"), headers, {}
+        )
+        self.assertEqual({}, headers)
 
 
 class MAASMockHTTPHandler(urllib.request.HTTPHandler):
@@ -238,24 +124,6 @@ class MAASMockHTTPHandler(urllib.request.HTTPHandler):
         return resp
 
 
-class TestGetBase(MAASTestCase):
-    def test_get_base_url(self):
-        self.assertEqual(
-            maas_api_helper.get_base_url(
-                "http://example.com:1234/some/path?and=query"
-            ),
-            "http://example.com:1234",
-        )
-
-    def test_get_base_url_no_port(self):
-        self.assertEqual(
-            maas_api_helper.get_base_url(
-                "http://example.com/some/path?and=query"
-            ),
-            "http://example.com",
-        )
-
-
 class TestGetUrl(MAASTestCase):
     def setUp(self):
         super().setUp()
@@ -263,10 +131,10 @@ class TestGetUrl(MAASTestCase):
         urllib.request.install_opener(opener)
 
     def test_geturl_sends_request(self):
-        self.assertEqual(
+        self.assertEquals(
             "mock response",
             maas_api_helper.geturl(
-                "http://%s" % factory.make_hostname(),
+                "http://%s" % factory.make_hostname(), {}
             ).read(),
         )
 
@@ -277,8 +145,9 @@ class TestGetUrl(MAASTestCase):
             urllib.error.HTTPError,
             maas_api_helper.geturl,
             "http://%s-broken" % factory.make_hostname(),
+            {},
         )
-        self.assertEqual(7, sleep.call_count)
+        self.assertEquals(7, sleep.call_count)
         self.assertThat(warn, MockAnyCall("date field not in 400 headers"))
 
     def test_geturl_increments_skew(self):
@@ -288,13 +157,14 @@ class TestGetUrl(MAASTestCase):
             urllib.error.HTTPError,
             maas_api_helper.geturl,
             "http://%s-broken_with_date" % factory.make_hostname(),
+            {},
         )
-        self.assertEqual(7, sleep.call_count)
+        self.assertEquals(7, sleep.call_count)
         clock_shew_updates = [
             call[0][0].startswith("updated clock shew to")
             for call in warn.call_args_list
         ]
-        self.assertEqual(14, len(clock_shew_updates))
+        self.assertEquals(14, len(clock_shew_updates))
 
     def test_geturl_posts_data(self):
         mock_urlopen = self.patch(maas_api_helper.urllib.request.urlopen)
@@ -323,7 +193,7 @@ class TestEncode(MAASTestCase):
             headers,
         )
         self.assertIsInstance(data, bytes)
-        self.assertEqual("--%s--\r\n" % boundary, data.decode("utf-8"))
+        self.assertEquals("--%s--\r\n" % boundary, data.decode("utf-8"))
 
     def test_encode_data(self):
         key = factory.make_name("key")
@@ -340,7 +210,7 @@ class TestEncode(MAASTestCase):
             headers,
         )
         self.assertIsInstance(data, bytes)
-        self.assertEqual(
+        self.assertEquals(
             '--%s\r\nContent-Disposition: form-data; name="%s"'
             "\r\n\r\n%s\r\n--%s--\r\n" % (boundary, key, value, boundary),
             data.decode("utf-8"),
@@ -361,7 +231,7 @@ class TestEncode(MAASTestCase):
             headers,
         )
         self.assertIsInstance(data, bytes)
-        self.assertEqual(
+        self.assertEquals(
             '--%s\r\nContent-Disposition: form-data; name="%s"; filename="%s"'
             "\r\nContent-Type: application/octet-stream\r\n\r\n%s\r\n--%s--"
             "\r\n" % (boundary, file, file, content, boundary),
@@ -825,7 +695,7 @@ class TestCaptureScriptOutput(MAASTestCase):
         self.isatty = self.patch(maas_api_helper.sys.stdout, "isatty")
         self.isatty.return_value = False
 
-    def capture(self, proc, timeout=None, console_output=None):
+    def capture(self, proc, timeout=None):
         scripts_dir = Path(self.useFixture(TempDirectory()).path)
         combined_path = scripts_dir.joinpath("combined")
         stdout_path = scripts_dir.joinpath("stdout")
@@ -836,8 +706,7 @@ class TestCaptureScriptOutput(MAASTestCase):
             str(combined_path),
             str(stdout_path),
             str(stderr_path),
-            timeout_seconds=timeout,
-            console_output=console_output,
+            timeout,
         )
 
         return (
@@ -888,38 +757,6 @@ class TestCaptureScriptOutput(MAASTestCase):
         self.assertThat(stdout_flush, MockCalledOnce())
         self.assertThat(stderr_flush, MockCalledOnce())
 
-    def test_no_forwards_to_console_with_false(self):
-        stdout = self.patch(maas_api_helper.sys.stdout, "write")
-        stderr = self.patch(maas_api_helper.sys.stderr, "write")
-        self.patch(maas_api_helper.sys.stdout, "flush")
-        self.patch(maas_api_helper.sys.stderr, "flush")
-        self.isatty.return_value = True
-        proc = Popen(
-            'echo "stdout"; echo "stderr" 1>&2',
-            stdout=PIPE,
-            stderr=PIPE,
-            shell=True,
-        )
-        self.capture(proc, console_output=False)
-        stdout.assert_not_called()
-        stderr.assert_not_called()
-
-    def test_forwards_to_console_with_true_no_tty(self):
-        stdout = self.patch(maas_api_helper.sys.stdout, "write")
-        stderr = self.patch(maas_api_helper.sys.stderr, "write")
-        self.patch(maas_api_helper.sys.stdout, "flush")
-        self.patch(maas_api_helper.sys.stderr, "flush")
-        self.isatty.return_value = False
-        proc = Popen(
-            'echo "stdout"; echo "stderr" 1>&2',
-            stdout=PIPE,
-            stderr=PIPE,
-            shell=True,
-        )
-        self.capture(proc, console_output=True)
-        stdout.assert_called_once_with("stdout\n")
-        stderr.assert_called_once_with("stderr\n")
-
     def test_does_not_wait_for_forked_process(self):
         start_time = time.time()
         proc = Popen("sleep 6 &", stdout=PIPE, stderr=PIPE, shell=True)
@@ -940,7 +777,7 @@ class TestCaptureScriptOutput(MAASTestCase):
             shell=True,
         )
         # Wait for it to finish before capturing.
-        self.assertEqual(0, proc.wait())
+        self.assertEquals(0, proc.wait())
         # Capturing now still gets foo and bar.
         self.assertThat(
             self.capture(proc),

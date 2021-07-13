@@ -10,11 +10,11 @@ from django.db.models import (
     CharField,
     ForeignKey,
     Model,
+    Sum,
 )
 
 from maasserver import DefaultMeta
 from maasserver.models.cleansave import CleanSave
-from maasserver.utils.orm import NotNullSum
 
 
 class PodStoragePool(CleanSave, Model):
@@ -43,10 +43,12 @@ class PodStoragePool(CleanSave, Model):
 
     def get_used_storage(self):
         """Calculate the used storage for this pod."""
-        from maasserver.models.virtualmachine import VirtualMachineDisk
+        # Circular import.
+        from maasserver.models.physicalblockdevice import PhysicalBlockDevice
 
-        count = VirtualMachineDisk.objects.filter(
-            vm__project=self.pod.tracked_project,
-            backing_pool=self,
-        ).aggregate(used=NotNullSum("size"))
-        return count["used"]
+        query = PhysicalBlockDevice.objects.filter(storage_pool=self)
+        query = query.aggregate(size=Sum("size"))
+        size = query["size"]
+        if size is None:
+            size = 0
+        return size

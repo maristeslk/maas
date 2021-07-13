@@ -16,7 +16,7 @@ from testtools.matchers import MatchesStructure
 from twisted.internet import reactor
 from twisted.internet.defer import inlineCallbacks, succeed
 
-from maasserver import ipc, workers
+from maasserver import workers
 from maasserver.enum import SERVICE_STATUS
 from maasserver.ipc import (
     get_ipc_socket_path,
@@ -43,7 +43,6 @@ from maastesting.matchers import MockCalledOnceWith
 from maastesting.runtest import MAASCrochetRunTest
 from maastesting.testcase import MAASTestCase
 from metadataserver.builtin_scripts import load_builtin_scripts
-from provisioningserver.utils import ipaddr
 from provisioningserver.utils.twisted import callOut, DeferredValue
 
 wait_for_reactor = wait_for(30)  # 30 seconds.
@@ -55,18 +54,18 @@ class TestGetIPCSocketPath(MAASTestCase):
         self.useFixture(
             EnvironmentVariableFixture("MAAS_IPC_SOCKET_PATH", path)
         )
-        self.assertEqual(path, get_ipc_socket_path())
+        self.assertEquals(path, get_ipc_socket_path())
 
     def test_returns_ipc_from_maas_data(self):
         path = factory.make_name("path")
         self.useFixture(EnvironmentVariableFixture("MAAS_DATA", path))
-        self.assertEqual(
+        self.assertEquals(
             os.path.join(path, "maas-regiond.sock"), get_ipc_socket_path()
         )
 
     def test_returns_ipc_at_default_location(self):
         self.useFixture(EnvironmentVariableFixture("MAAS_DATA", None))
-        self.assertEqual(
+        self.assertEquals(
             "/var/lib/maas/maas-regiond.sock", get_ipc_socket_path()
         )
 
@@ -80,9 +79,6 @@ class TestIPCCommunication(MAASTransactionServerTestCase):
         self.ipc_path = os.path.join(
             self.useFixture(TempDirectory()).path, "maas-regiond.sock"
         )
-        self.patch(ipaddr, "get_ip_addr").return_value = {}
-        self.patch(ipc, "get_all_interface_addresses")
-        self.patch(ipc, "get_all_interface_source_addresses")
 
     def make_IPCMasterService(self, workers=None, run_loop=False):
         master = IPCMasterService(
@@ -146,15 +142,15 @@ class TestIPCCommunication(MAASTransactionServerTestCase):
             return RegionControllerProcess.objects.get(region=region, pid=pid)
 
         process = yield deferToDatabase(getProcessFromDB)
-        self.assertEqual(process.id, master.connections[pid]["process_id"])
+        self.assertEquals(process.id, master.connections[pid]["process_id"])
 
         worker_procId = yield worker.processId.get(timeout=2)
-        self.assertEqual(process.id, worker_procId)
+        self.assertEquals(process.id, worker_procId)
 
         yield worker.stopService()
 
         yield disconnected.get(timeout=2)
-        self.assertEqual({}, master.connections)
+        self.assertEquals({}, master.connections)
 
         process = yield deferToDatabase(reload_object, process)
         self.assertIsNone(process)
@@ -221,7 +217,7 @@ class TestIPCCommunication(MAASTransactionServerTestCase):
             )
 
         endpoints = yield deferToDatabase(getEndpoints)
-        self.assertEqual(
+        self.assertEquals(
             master._getListenAddresses(master.connections[pid]["rpc"]["port"]),
             endpoints,
         )
@@ -298,7 +294,7 @@ class TestIPCCommunication(MAASTransactionServerTestCase):
 
         connection = yield deferToDatabase(getConnection)
         self.assertIsNotNone(connection)
-        self.assertEqual(
+        self.assertEquals(
             {connid: (rackd.system_id, address, port)},
             master.connections[pid]["rpc"]["connections"],
         )
@@ -335,7 +331,7 @@ class TestIPCCommunication(MAASTransactionServerTestCase):
             process = yield deferToDatabase(
                 RegionControllerProcess.objects.get, id=data["process_id"]
             )
-            self.assertEqual(pid, process.pid)
+            self.assertEquals(pid, process.pid)
 
         yield master.stopService()
 
@@ -408,7 +404,7 @@ class TestIPCCommunication(MAASTransactionServerTestCase):
         yield master.update()
 
         region_process = yield deferToDatabase(reload_object, region_process)
-        self.assertEqual(current_time, region_process.updated)
+        self.assertEquals(current_time, region_process.updated)
 
         yield master.stopService()
 

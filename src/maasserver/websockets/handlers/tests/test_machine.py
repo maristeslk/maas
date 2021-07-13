@@ -1,5 +1,7 @@
-# Copyright 2016-2020 Canonical Ltd.  This software is licensed under the
+# Copyright 2016-2019 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
+
+"""Tests for `maasserver.websockets.handlers.node`"""
 
 
 from functools import partial
@@ -14,7 +16,6 @@ from django.core.exceptions import ValidationError
 from django.http import HttpRequest
 from lxml import etree
 from testtools import ExpectedException
-from testtools.content import text_content
 from testtools.matchers import (
     ContainsDict,
     Equals,
@@ -60,7 +61,6 @@ from maasserver.models.nodeprobeddetails import (
     get_single_probed_details,
     script_output_nsmap,
 )
-from maasserver.models.ownerdata import OwnerData
 from maasserver.models.partition import Partition, PARTITION_ALIGNMENT_SIZE
 import maasserver.node_action as node_action_module
 from maasserver.node_action import compile_node_actions
@@ -125,9 +125,6 @@ wait_for_reactor = wait_for(30)  # 30 seconds.
 
 
 class TestMachineHandler(MAASServerTestCase):
-
-    maxDiff = None
-
     def get_blockdevice_status(self, handler, blockdevice):
         blockdevice_script_results = [
             script_result
@@ -173,29 +170,8 @@ class TestMachineHandler(MAASServerTestCase):
         commissioning_scripts = commissioning_scripts.exclude(
             status=SCRIPT_STATUS.ABORTED
         )
-        commissioning_start_time = None
-        for script_result in commissioning_scripts:
-            if commissioning_start_time is None or (
-                script_result.started
-                and script_result.started < commissioning_start_time
-            ):
-                commissioning_start_time = script_result.started
         testing_scripts = node.get_latest_testing_script_results
         testing_scripts = testing_scripts.exclude(status=SCRIPT_STATUS.ABORTED)
-        testing_start_time = None
-        for script_result in testing_scripts:
-            if testing_start_time is None or (
-                script_result.started
-                and script_result.started < testing_start_time
-            ):
-                testing_start_time = script_result.started
-        installation_script_result = (
-            node.get_latest_installation_script_results.first()
-        )
-        if installation_script_result:
-            installation_start_time = installation_script_result.started
-        else:
-            installation_start_time = None
         log_results = set()
         for script_result in commissioning_scripts:
             if (
@@ -222,12 +198,8 @@ class TestMachineHandler(MAASServerTestCase):
             "current_commissioning_script_set": (
                 node.current_commissioning_script_set_id
             ),
-            "commissioning_start_time": dehydrate_datetime(
-                commissioning_start_time
-            ),
             "current_testing_script_set": node.current_testing_script_set_id,
             "testing_status": handler.dehydrate_test_statuses(testing_scripts),
-            "testing_start_time": dehydrate_datetime(testing_start_time),
             "current_installation_script_set": (
                 node.current_installation_script_set_id
             ),
@@ -235,9 +207,6 @@ class TestMachineHandler(MAASServerTestCase):
                 handler.dehydrate_script_set_status(
                     node.current_installation_script_set
                 )
-            ),
-            "installation_start_time": dehydrate_datetime(
-                installation_start_time
             ),
             "has_logs": (
                 log_results.difference(script_output_nsmap.keys()) == set()
@@ -352,7 +321,6 @@ class TestMachineHandler(MAASServerTestCase):
             "zone": handler.dehydrate_zone(node.zone),
             "pool": handler.dehydrate_pool(node.pool),
             "default_user": node.default_user,
-            "workload_annotations": OwnerData.objects.get_owner_data(node),
         }
         if "module" in driver and "comment" in driver:
             data["third_party_driver"] = {
@@ -375,7 +343,6 @@ class TestMachineHandler(MAASServerTestCase):
                 "actions",
                 "architecture",
                 "commissioning_script_count",
-                "commissioning_start_time",
                 "commissioning_status",
                 "dhcp_on",
                 "distro_series",
@@ -384,7 +351,6 @@ class TestMachineHandler(MAASServerTestCase):
                 "fabrics",
                 "fqdn",
                 "has_logs",
-                "installation_start_time",
                 "ip_addresses",
                 "link_type",
                 "metadata",
@@ -406,10 +372,8 @@ class TestMachineHandler(MAASServerTestCase):
                 "subnets",
                 "tags",
                 "testing_script_count",
-                "testing_start_time",
                 "testing_status",
                 "vlan",
-                "workload_annotations",
             ]
             for key in list(data):
                 if key not in allowed_fields:
@@ -537,7 +501,7 @@ class TestMachineHandler(MAASServerTestCase):
         handler._script_results[cached_node.id] = cached_content
         handler._cache_pks([node])
 
-        self.assertEqual(
+        self.assertEquals(
             script_result.id,
             handler._script_results[node.id][
                 script_result.script.hardware_type
@@ -551,7 +515,7 @@ class TestMachineHandler(MAASServerTestCase):
                 for result in results
             ],
         )
-        self.assertEqual(
+        self.assertEquals(
             cached_content, handler._script_results[cached_node.id]
         )
 
@@ -613,15 +577,14 @@ class TestMachineHandler(MAASServerTestCase):
         # It is important to keep this number as low as possible. A larger
         # number means regiond has to do more work slowing down its process
         # and slowing down the client waiting for the response.
-        expected_query_count = 23
         self.assertEqual(
             queries_one,
-            expected_query_count,
+            23,
             "Number of queries has changed; make sure this is expected.",
         )
         self.assertEqual(
             queries_total,
-            expected_query_count,
+            23,
             "Number of queries has changed; make sure this is expected.",
         )
 
@@ -741,8 +704,8 @@ class TestMachineHandler(MAASServerTestCase):
         _, _, ret = handler.on_listen_for_active_pk(
             "update", node.system_id, node
         )
-        self.assertEqual(ret["commissioning_status"]["passed"], 10)
-        self.assertEqual(ret["testing_status"]["passed"], 10)
+        self.assertEquals(ret["commissioning_status"]["passed"], 10)
+        self.assertEquals(ret["testing_status"]["passed"], 10)
 
     def test_cache_clears_on_reload(self):
         owner = factory.make_User()
@@ -836,11 +799,11 @@ class TestMachineHandler(MAASServerTestCase):
             if disk["id"] == node.boot_disk.id:
                 for partition in disk["partitions"]:
                     if partition["name"].endswith("-part3"):
-                        self.assertEqual(
+                        self.assertEquals(
                             "VMFS extent for datastore1", partition["used_for"]
                         )
                     else:
-                        self.assertEqual(
+                        self.assertEquals(
                             "VMware ESXi OS partition", partition["used_for"]
                         )
                         self.assertDictEqual(
@@ -1731,7 +1694,7 @@ class TestMachineHandler(MAASServerTestCase):
         node = factory.make_Node(owner=owner)
         handler = MachineHandler(owner, {}, None)
         observed = handler.get_summary_xml({"system_id": node.system_id})
-        self.assertEqual("", observed)
+        self.assertEquals("", observed)
 
     def test_dehydrate_summary_xml_returns_data(self):
         owner = factory.make_User()
@@ -1745,7 +1708,7 @@ class TestMachineHandler(MAASServerTestCase):
         script_result.store_result(exit_status=0, stdout=lldp_data)
         observed = handler.get_summary_xml({"system_id": node.system_id})
         probed_details = merge_details_cleanly(get_single_probed_details(node))
-        self.assertEqual(
+        self.assertEquals(
             etree.tostring(probed_details, encoding=str, pretty_print=True),
             observed,
         )
@@ -1755,7 +1718,7 @@ class TestMachineHandler(MAASServerTestCase):
         node = factory.make_Node(owner=owner)
         handler = MachineHandler(owner, {}, None)
         observed = handler.get_summary_yaml({"system_id": node.system_id})
-        self.assertEqual("", observed)
+        self.assertEquals("", observed)
 
     def test_dehydrate_summary_yaml_returns_data(self):
         owner = factory.make_User()
@@ -2014,14 +1977,13 @@ class TestMachineHandler(MAASServerTestCase):
         handler = MachineHandler(user, {}, None)
         node = factory.make_Node()
         factory.make_PhysicalBlockDevice(node)
-        factory.make_VirtualBlockDevice(node=node)
+        factory.make_ISCSIBlockDevice(node=node)
         result = handler.get({"system_id": node.system_id})
         for disk in result["disks"]:
             if disk["type"] == "physical":
                 self.assertEqual(disk["numa_node"], 0)
             else:
-                # None for LVM VGs, doesn't exist for other virtual devices
-                self.assertIsNone(disk.get("numa_node"))
+                self.assertIsNone(disk["numa_node"])
 
     def test_get_includes_not_acquired_special_filesystems(self):
         owner = factory.make_User()
@@ -2119,29 +2081,20 @@ class TestMachineHandler(MAASServerTestCase):
         self.assertEqual(
             result["numa_nodes"],
             [
+                {"index": 0, "memory": 0, "cores": [], "hugepages_set": []},
                 {
-                    "id": numa_node.id - 3,
-                    "index": 0,
-                    "memory": 0,
-                    "cores": [],
-                    "hugepages_set": [],
-                },
-                {
-                    "id": numa_node.id - 2,
                     "index": 1,
                     "memory": 512,
                     "cores": [0, 1],
                     "hugepages_set": [{"page_size": 1024, "total": 1024}],
                 },
                 {
-                    "id": numa_node.id - 1,
                     "index": 2,
                     "memory": 1024,
                     "cores": [2, 3],
                     "hugepages_set": [{"page_size": 1024, "total": 2048}],
                 },
                 {
-                    "id": numa_node.id,
                     "index": 3,
                     "memory": 2048,
                     "cores": [4, 5],
@@ -3503,16 +3456,14 @@ class TestMachineHandler(MAASServerTestCase):
         handler = MachineHandler(user, {}, None)
         node = factory.make_Node(with_boot_disk=False)
         node.boot_disk = factory.make_PhysicalBlockDevice(
-            node=node, size=40 * 1024 ** 3
+            node=node, size=10 * 1024 ** 3
         )
-        factory.make_PhysicalBlockDevice(node=node, size=20 * 1024 ** 3)
-        storage_layout = factory.pick_choice(
-            get_storage_layout_choices(), but_not=("blank",)
-        )
-        self.addDetail("storage_layout", text_content(storage_layout))
+        factory.make_PhysicalBlockDevice(node=node, size=10 * 2024 ** 3)
         params = {
             "system_id": node.system_id,
-            "storage_layout": storage_layout,
+            "storage_layout": factory.pick_choice(
+                get_storage_layout_choices(), but_not="blank"
+            ),
         }
         handler.apply_storage_layout(params)
         self.assertTrue(node.boot_disk.partitiontable_set.exists())
@@ -4239,9 +4190,10 @@ class TestMachineHandler(MAASServerTestCase):
         rotary = factory.make_PhysicalBlockDevice(
             node, tags=["rotary"], size=size
         )
+        iscsi = factory.make_PhysicalBlockDevice(node, tags=["iscsi"])
         handler = MachineHandler(user, {}, None)
         self.assertThat(
-            handler.get_grouped_storages([ssd, hdd, rotary]),
+            handler.get_grouped_storages([ssd, hdd, rotary, iscsi]),
             MatchesListwise(
                 [
                     MatchesDict(
@@ -4258,6 +4210,13 @@ class TestMachineHandler(MAASServerTestCase):
                             "disk_type": Equals("hdd"),
                         }
                     ),
+                    MatchesDict(
+                        {
+                            "count": Equals(1),
+                            "size": Equals(iscsi.size),
+                            "disk_type": Equals("iscsi"),
+                        }
+                    ),
                 ]
             ),
         )
@@ -4266,10 +4225,7 @@ class TestMachineHandler(MAASServerTestCase):
         user = factory.make_User()
         handler = MachineHandler(user, {}, None)
         node = factory.make_Node(with_boot_disk=False)
-        bds = [
-            factory.make_PhysicalBlockDevice(node=node, bootable=True)
-            for _ in range(2)
-        ]
+        bds = [factory.make_PhysicalBlockDevice(node=node) for _ in range(2)]
         ifaces = [factory.make_Interface(node=node) for _ in range(2)]
         testing_script_set = factory.make_ScriptSet(
             node=node, result_type=RESULT_TYPE.TESTING
@@ -4370,7 +4326,7 @@ class TestMachineHandlerCheckPower(MAASTransactionServerTestCase):
         power_state = yield machine_handler.check_power(
             {"system_id": node.system_id}
         )
-        self.assertEqual(power_state, POWER_STATE.UNKNOWN)
+        self.assertEquals(power_state, POWER_STATE.UNKNOWN)
 
     @wait_for_reactor
     @inlineCallbacks
@@ -4383,7 +4339,7 @@ class TestMachineHandlerCheckPower(MAASTransactionServerTestCase):
         power_state = yield machine_handler.check_power(
             {"system_id": node.system_id}
         )
-        self.assertEqual(power_state, POWER_STATE.UNKNOWN)
+        self.assertEquals(power_state, POWER_STATE.UNKNOWN)
 
     @wait_for_reactor
     @inlineCallbacks
@@ -4397,7 +4353,7 @@ class TestMachineHandlerCheckPower(MAASTransactionServerTestCase):
         power_state = yield machine_handler.check_power(
             {"system_id": node.system_id}
         )
-        self.assertEqual(power_state, POWER_STATE.ERROR)
+        self.assertEquals(power_state, POWER_STATE.ERROR)
         self.assertThat(
             mock_log_err,
             MockCalledOnceWith(
@@ -5314,109 +5270,4 @@ class TestMachineHandlerUpdateFilesystem(MAASServerTestCase):
             queries_total,
             4,
             "Number of queries has changed; make sure this is expected.",
-        )
-
-
-class TestMachineHandlerWorkloadAnnotations(MAASServerTestCase):
-    def test_set_workload_annotations(self):
-        user = factory.make_User()
-        node = factory.make_Node(owner=user)
-        handler = MachineHandler(user, {}, None)
-        workload_annotations = {"data1": "value 1"}
-        self.assertEqual(
-            workload_annotations,
-            handler.set_workload_annotations(
-                {
-                    "system_id": node.system_id,
-                    "workload_annotations": workload_annotations,
-                }
-            ),
-        )
-
-    def test_set_workload_annotations_invalid_char(self):
-        user = factory.make_User()
-        node = factory.make_Node(owner=user)
-        handler = MachineHandler(user, {}, None)
-        workload_annotations = {"data 1": "value 1"}
-        error = self.assertRaises(
-            HandlerValidationError,
-            handler.set_workload_annotations,
-            {
-                "system_id": node.system_id,
-                "workload_annotations": workload_annotations,
-            },
-        )
-        self.assertEqual(error.message, "Invalid character in key name")
-
-    def test_set_workload_annotations_overwrite(self):
-        user = factory.make_User()
-        node = factory.make_Node(owner=user)
-        handler = MachineHandler(user, {}, None)
-        workload_annotations = {"data1": "value 1"}
-        self.assertEqual(
-            workload_annotations,
-            handler.set_workload_annotations(
-                {
-                    "system_id": node.system_id,
-                    "workload_annotations": workload_annotations,
-                }
-            ),
-        )
-        workload_annotations = {"data1": "value 2"}
-        self.assertEqual(
-            workload_annotations,
-            handler.set_workload_annotations(
-                {
-                    "system_id": node.system_id,
-                    "workload_annotations": workload_annotations,
-                }
-            ),
-        )
-
-    def test_set_workload_annotations_empty(self):
-        user = factory.make_User()
-        node = factory.make_Node(owner=user)
-        handler = MachineHandler(user, {}, None)
-        workload_annotations = {"data1": "value 1"}
-        self.assertEqual(
-            workload_annotations,
-            handler.set_workload_annotations(
-                {
-                    "system_id": node.system_id,
-                    "workload_annotations": workload_annotations,
-                }
-            ),
-        )
-        workload_annotations = {"data1": ""}
-        self.assertEqual(
-            {},
-            handler.set_workload_annotations(
-                {
-                    "system_id": node.system_id,
-                    "workload_annotations": workload_annotations,
-                }
-            ),
-        )
-
-    def test_get_workload_annotations(self):
-        user = factory.make_User()
-        node = factory.make_Node(owner=user)
-        handler = MachineHandler(user, {}, None)
-        workload_annotations = {"data1": "value 1"}
-        self.assertEqual(
-            workload_annotations,
-            handler.set_workload_annotations(
-                {
-                    "system_id": node.system_id,
-                    "workload_annotations": workload_annotations,
-                }
-            ),
-        )
-        self.assertEqual(
-            workload_annotations,
-            handler.get_workload_annotations(
-                {
-                    "system_id": node.system_id,
-                }
-            ),
         )

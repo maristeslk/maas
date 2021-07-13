@@ -5,9 +5,12 @@
 
 
 from crochet import wait_for
+from fixtures import FakeLogger
+from testtools.matchers import Contains, Equals, HasLength, IsInstance
 from twisted.internet import reactor
-from twisted.internet.defer import Deferred, inlineCallbacks, returnValue
+from twisted.internet.defer import inlineCallbacks, succeed
 
+from maasserver.models.interface import PhysicalInterface
 from maasserver.regiondservices.networks_monitoring import (
     RegionNetworksMonitoringService,
 )
@@ -15,31 +18,58 @@ from maasserver.testing.factory import factory
 from maasserver.testing.testcase import MAASTransactionServerTestCase
 from maasserver.utils.threads import deferToDatabase
 from maastesting.twisted import TwistedLoggerFixture
-from provisioningserver.utils import services
 from provisioningserver.utils.testing import MAASIDFixture
 
 
 class TestRegionNetworksMonitoringService(MAASTransactionServerTestCase):
     """Tests for `RegionNetworksMonitoringService`."""
 
-    def setUp(self):
-        super().setUp()
-        self.mock_refresh = self.patch(services, "refresh")
+    @wait_for(30)
+    @inlineCallbacks
+    def test_updates_interfaces_in_database(self):
+        region = yield deferToDatabase(factory.make_RegionController)
+        region.owner = yield deferToDatabase(factory.make_admin)
+        yield deferToDatabase(region.save)
+        # Declare this region controller as the one running here.
+        self.useFixture(MAASIDFixture(region.system_id))
 
-    def wrap_deferred(self, obj, call_name):
-        deferred = Deferred()
+        interfaces = {
+            factory.make_name("eth"): {
+                "type": "physical",
+                "mac_address": factory.make_mac_address(),
+                "parents": [],
+                "links": [],
+                "enabled": True,
+            }
+        }
 
-        orig_call = getattr(obj, call_name)
+        service = RegionNetworksMonitoringService(
+            reactor, enable_beaconing=False
+        )
+        service.getInterfaces = lambda: succeed(interfaces)
 
-        @inlineCallbacks
-        def wrapped_call():
-            result = yield orig_call()
-            if not deferred.called:
-                deferred.callback(None)
-            returnValue(result)
+        with FakeLogger("maas") as logger:
+            service.startService()
+            yield service.stopService()
 
-        setattr(obj, call_name, wrapped_call)
-        return deferred
+        # Nothing was logged.
+        self.assertIn(
+            "Networks monitoring service: Process ID ", logger.output
+        )
+
+        def get_interfaces():
+            return list(region.interface_set.all())
+
+        interfaces_observed = yield deferToDatabase(get_interfaces)
+        self.assertThat(interfaces_observed, HasLength(1))
+        interface_observed = interfaces_observed[0]
+        self.assertThat(interface_observed, IsInstance(PhysicalInterface))
+        self.assertThat(interfaces, Contains(interface_observed.name))
+        interface_expected = interfaces[interface_observed.name]
+        self.assertThat(
+            interface_observed.mac_address.raw,
+            Equals(interface_expected["mac_address"]),
+        )
 
     @wait_for(30)
     @inlineCallbacks
@@ -47,7 +77,6 @@ class TestRegionNetworksMonitoringService(MAASTransactionServerTestCase):
         service = RegionNetworksMonitoringService(
             reactor, enable_beaconing=False
         )
-        self.patch(service, "getInterfaces").return_value = {}
 
         with TwistedLoggerFixture() as logger:
             service.startService()
@@ -58,29 +87,3 @@ class TestRegionNetworksMonitoringService(MAASTransactionServerTestCase):
             "RegionController matching query does not exist",
             logger.output,
         )
-
-    @wait_for(30)
-    @inlineCallbacks
-    def test_get_refresh_details_running(self):
-        region = yield deferToDatabase(factory.make_RegionController)
-        region.owner = yield deferToDatabase(factory.make_admin)
-        yield deferToDatabase(region.save)
-        # Declare this region controller as the one running here.
-        self.useFixture(MAASIDFixture(region.system_id))
-
-        service = RegionNetworksMonitoringService(
-            reactor,
-            enable_beaconing=False,
-        )
-
-        deferred = self.wrap_deferred(service, "do_action")
-        yield service.startService()
-        yield deferred
-        details = yield service.getRefreshDetails()
-        region_token = yield deferToDatabase(region._get_token_for_controller)
-        region_credentials = {
-            "consumer_key": region_token.consumer.key,
-            "token_key": region_token.key,
-            "token_secret": region_token.secret,
-        }
-        self.assertEqual((None, region.system_id, region_credentials), details)

@@ -1,7 +1,7 @@
 import datetime
 
 from maasserver import release_notifications
-from maasserver.models import ControllerInfo, Notification
+from maasserver.models import Notification
 from maasserver.testing.factory import factory
 from maasserver.testing.testcase import (
     MAASServerTestCase,
@@ -11,25 +11,31 @@ from maasserver.testing.testcase import (
 
 class TestVersionCheck(MAASServerTestCase):
     def test_new_release_available(self):
-        ControllerInfo.objects.set_version(
-            factory.make_RackController(),
-            "2.8.1",
+        current_version = "2.8.1"
+        notification_maas_version = "2.9.0"
+        self.assertTrue(
+            release_notifications.notification_available(
+                notification_maas_version, current_version
+            )
         )
-        self.assertTrue(release_notifications.notification_available("2.9.0"))
 
     def test_already_on_latest_version(self):
-        ControllerInfo.objects.set_version(
-            factory.make_RackController(),
-            "2.9.0",
+        current_version = "2.9.0"
+        notification_maas_version = "2.9.0"
+        self.assertFalse(
+            release_notifications.notification_available(
+                notification_maas_version, current_version
+            )
         )
-        self.assertFalse(release_notifications.notification_available("2.9.0"))
 
     def test_notification_is_old(self):
-        ControllerInfo.objects.set_version(
-            factory.make_RackController(),
-            "2.9.0",
+        current_version = "2.9.0"
+        notification_maas_version = "2.8.0"
+        self.assertFalse(
+            release_notifications.notification_available(
+                notification_maas_version, current_version
+            )
         )
-        self.assertFalse(release_notifications.notification_available("2.8.0"))
 
 
 class TestReleaseNotification(MAASTransactionServerTestCase):

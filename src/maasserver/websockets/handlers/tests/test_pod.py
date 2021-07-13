@@ -1,6 +1,8 @@
 # Copyright 2017-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Tests for `maasserver.websockets.handlers.pod`"""
+
 
 import random
 from unittest.mock import MagicMock
@@ -12,20 +14,17 @@ from twisted.internet.defer import inlineCallbacks, succeed
 from maasserver.enum import INTERFACE_TYPE
 from maasserver.forms import pods
 from maasserver.forms.pods import PodForm
-from maasserver.models import Pod, PodStoragePool
 from maasserver.models.virtualmachine import MB, VirtualMachineInterface
 from maasserver.testing.factory import factory
 from maasserver.testing.testcase import MAASTransactionServerTestCase
 from maasserver.utils.orm import reload_object
 from maasserver.utils.threads import deferToDatabase
-from maasserver.websockets.handlers import pod
 from maasserver.websockets.handlers.pod import ComposeMachineForm, PodHandler
 from maastesting.matchers import MockCalledOnceWith
 from provisioningserver.drivers.pod import (
     Capabilities,
     DiscoveredPod,
     DiscoveredPodHints,
-    DiscoveredPodProject,
     InterfaceAttachType,
 )
 
@@ -90,6 +89,8 @@ class TestPodHandler(MAASTransactionServerTestCase):
         pod = factory.make_Pod(
             architectures=architectures,
             capabilities=[
+                Capabilities.FIXED_LOCAL_STORAGE,
+                Capabilities.ISCSI_STORAGE,
                 Capabilities.COMPOSABLE,
                 Capabilities.STORAGE_POOLS,
             ],
@@ -104,23 +105,6 @@ class TestPodHandler(MAASTransactionServerTestCase):
         pod.default_storage_pool = pool
         pod.save()
         return pod
-
-    def test_allowed_methods(self):
-        handler = PodHandler(factory.make_admin(), {}, None)
-        self.assertCountEqual(
-            handler.Meta.allowed_methods,
-            [
-                "list",
-                "get",
-                "create",
-                "update",
-                "delete",
-                "set_active",
-                "refresh",
-                "compose",
-                "get_projects",
-            ],
-        )
 
     def test_get(self):
         admin = factory.make_admin()
@@ -143,6 +127,8 @@ class TestPodHandler(MAASTransactionServerTestCase):
         self.assertThat(
             result["storage_pools"], Equals(expected_data["storage_pools"])
         )
+        self.assertThat(result["owners_count"], Equals(2))
+        self.assertEqual(result["numa_pinning"], [])
 
     def test_get_with_pod_host(self):
         admin = factory.make_admin()
@@ -159,23 +145,17 @@ class TestPodHandler(MAASTransactionServerTestCase):
         numa_node0.save()
         factory.make_NUMANode(node=node, cores=[1, 4], memory=1024)
         factory.make_NUMANode(node=node, cores=[2, 5], memory=2048)
-        project = factory.make_string()
         pod = self.make_pod_with_hints(
-            pod_type="lxd",
-            parameters={"project": project},
-            host=node,
-            ip_address=ip,
+            pod_type="lxd", host=node, ip_address=ip
         )
-        vm0 = factory.make_VirtualMachine(
-            project=project,
+        factory.make_VirtualMachine(
             memory=1024,
             pinned_cores=[0],
             hugepages_backed=False,
             bmc=pod,
             machine=factory.make_Node(system_id="vm0"),
         )
-        vm1 = factory.make_VirtualMachine(
-            project=project,
+        factory.make_VirtualMachine(
             memory=1024,
             pinned_cores=[2, 5],
             hugepages_backed=False,
@@ -183,130 +163,68 @@ class TestPodHandler(MAASTransactionServerTestCase):
             machine=factory.make_Node(system_id="vm1"),
         )
 
-        expected_numa_details = [
-            {
-                "cores": {"allocated": [0], "free": [3]},
-                "interfaces": [node.boot_interface.id],
-                "memory": {
-                    "general": {"allocated": 1024 * MB, "free": 3072 * MB},
-                    "hugepages": [],
-                },
-                "node_id": 0,
-                "vms": [vm0.id],
-            },
-            {
-                "cores": {"allocated": [], "free": [1, 4]},
-                "interfaces": [],
-                "memory": {
-                    "general": {"allocated": 0, "free": 1024 * MB},
-                    "hugepages": [],
-                },
-                "node_id": 1,
-                "vms": [],
-            },
-            {
-                "cores": {"allocated": [2, 5], "free": []},
-                "interfaces": [],
-                "memory": {
-                    "general": {"allocated": 1024 * MB, "free": 1024 * MB},
-                    "hugepages": [],
-                },
-                "node_id": 2,
-                "vms": [vm1.id],
-            },
-        ]
+        expected_data = handler.full_dehydrate(pod)
         result = handler.get({"id": pod.id})
+        self.assertItemsEqual(expected_data.keys(), result.keys())
+        for key in expected_data:
+            self.assertEqual(expected_data[key], result[key], key)
+        self.assertThat(result, Equals(expected_data))
         self.assertThat(result["host"], Equals(node.system_id))
         self.assertThat(result["attached_vlans"], Equals([subnet.vlan_id]))
         self.assertThat(result["boot_vlans"], Equals([subnet.vlan_id]))
-        resources = result["resources"]
         self.assertEqual(
-            resources["cores"],
-            {"allocated_other": 0, "allocated_tracked": 3, "free": 3},
-        )
-        self.assertEqual(
-            resources["interfaces"],
+            result["numa_pinning"],
             [
                 {
-                    "id": node.boot_interface.id,
-                    "name": node.boot_interface.name,
-                    "numa_index": 0,
-                    "virtual_functions": {
-                        "allocated_other": 0,
-                        "allocated_tracked": 0,
-                        "free": 0,
+                    "cores": {"allocated": [0], "free": [3]},
+                    "interfaces": [
+                        {
+                            "id": node.boot_interface.id,
+                            "name": node.boot_interface.name,
+                            "virtual_functions": {"allocated": 0, "free": 0},
+                        },
+                    ],
+                    "memory": {
+                        "general": {"allocated": 1024 * MB, "free": 3072 * MB},
+                        "hugepages": [],
                     },
-                }
-            ],
-        )
-        self.assertEqual(
-            resources["memory"],
-            {
-                "general": {
-                    "allocated_other": 0,
-                    "allocated_tracked": 2147483648,
-                    "free": 5368709120,
-                },
-                "hugepages": {
-                    "allocated_other": 0,
-                    "allocated_tracked": 0,
-                    "free": 0,
-                },
-            },
-        )
-        self.assertEqual(resources["numa"], expected_numa_details)
-        self.assertEqual(resources["vm_count"], {"other": 0, "tracked": 2})
-        self.assertCountEqual(
-            resources["vms"],
-            [
-                {
-                    "id": vm0.id,
-                    "system_id": "vm0",
-                    "memory": 1024 * MB,
-                    "hugepages_backed": False,
-                    "pinned_cores": [0],
-                    "unpinned_cores": 0,
+                    "node_id": 0,
+                    "vms": [
+                        {
+                            "pinned_cores": [0],
+                            "system_id": "vm0",
+                            "networks": [],
+                        },
+                    ],
                 },
                 {
-                    "id": vm1.id,
-                    "system_id": "vm1",
-                    "memory": 1024 * MB,
-                    "hugepages_backed": False,
-                    "pinned_cores": [2, 5],
-                    "unpinned_cores": 0,
+                    "cores": {"allocated": [], "free": [1, 4]},
+                    "interfaces": [],
+                    "memory": {
+                        "general": {"allocated": 0, "free": 1024 * MB},
+                        "hugepages": [],
+                    },
+                    "node_id": 1,
+                    "vms": [],
+                },
+                {
+                    "cores": {"allocated": [2, 5], "free": []},
+                    "interfaces": [],
+                    "memory": {
+                        "general": {"allocated": 1024 * MB, "free": 1024 * MB},
+                        "hugepages": [],
+                    },
+                    "node_id": 2,
+                    "vms": [
+                        {
+                            "pinned_cores": [2, 5],
+                            "system_id": "vm1",
+                            "networks": [],
+                        },
+                    ],
                 },
             ],
         )
-
-    def test_get_with_pod_host_no_storage_pools(self):
-        admin = factory.make_admin()
-        handler = PodHandler(admin, {}, None)
-        node = factory.make_Node()
-        pod = self.make_pod_with_hints(
-            pod_type="lxd",
-            host=node,
-        )
-        pod.default_storage_pool = None
-        pod.save()
-        PodStoragePool.objects.all().delete()
-        result = handler.get({"id": pod.id})
-        self.assertIsNone(result["default_storage_pool"])
-        self.assertEqual(result["storage_pools"], [])
-
-    def test_get_with_pod_host_no_vlan(self):
-        admin = factory.make_admin()
-        handler = PodHandler(admin, {}, None)
-        node = factory.make_Node()
-        pod = self.make_pod_with_hints(
-            pod_type="lxd",
-            host=node,
-        )
-        # attach an unconnected interface to the node
-        interface = factory.make_Interface(node=node)
-        interface.vlan = None
-        interface.save()
-        result = handler.get({"id": pod.id})
-        self.assertEqual(result["attached_vlans"], [])
 
     def test_get_host_interfaces_no_sriov(self):
         admin = factory.make_admin()
@@ -372,45 +290,59 @@ class TestPodHandler(MAASTransactionServerTestCase):
         )
 
         result = handler.get({"id": pod.id})
-        numa1, numa2 = result["resources"]["numa"]
-        self.assertCountEqual(numa1["interfaces"], [iface1.id, br1.id])
-        self.assertCountEqual(numa1["vms"], [vm0.id, vm1.id])
-        self.assertCountEqual(numa2["interfaces"], [iface2.id])
-        self.assertCountEqual(numa2["vms"], [vm1.id])
-        self.assertCountEqual(
-            result["resources"]["interfaces"],
+        numa1, numa2 = result["numa_pinning"]
+        self.assertEqual(
             [
                 {
                     "id": iface1.id,
                     "name": "eth0",
-                    "numa_index": 0,
-                    "virtual_functions": {
-                        "allocated_tracked": 0,
-                        "allocated_other": 0,
-                        "free": 0,
-                    },
+                    "virtual_functions": {"allocated": 0, "free": 0},
                 },
                 {
                     "id": br1.id,
                     "name": "br0",
-                    "numa_index": 0,
-                    "virtual_functions": {
-                        "allocated_tracked": 0,
-                        "allocated_other": 0,
-                        "free": 0,
-                    },
+                    "virtual_functions": {"allocated": 0, "free": 0},
                 },
+            ],
+            numa1["interfaces"],
+        )
+        self.assertEqual(
+            [
+                [
+                    {
+                        "guest_nic_id": None,
+                        "host_nic_id": br1.id,
+                    },
+                ],
+                [
+                    {
+                        "guest_nic_id": None,
+                        "host_nic_id": br1.id,
+                    },
+                ],
+            ],
+            [vm["networks"] for vm in numa1["vms"]],
+        )
+        self.assertEqual(
+            [
                 {
                     "id": iface2.id,
                     "name": "eth1",
-                    "numa_index": 1,
-                    "virtual_functions": {
-                        "allocated_tracked": 0,
-                        "allocated_other": 0,
-                        "free": 0,
-                    },
-                },
+                    "virtual_functions": {"allocated": 0, "free": 0},
+                }
             ],
+            numa2["interfaces"],
+        )
+        self.assertEqual(
+            [
+                [
+                    {
+                        "guest_nic_id": None,
+                        "host_nic_id": iface2.id,
+                    },
+                ],
+            ],
+            [vm["networks"] for vm in numa2["vms"]],
         )
 
     def test_get_host_interfaces_sriov(self):
@@ -477,33 +409,26 @@ class TestPodHandler(MAASTransactionServerTestCase):
         )
 
         result = handler.get({"id": pod.id})
-        numa1, numa2 = result["resources"]["numa"]
-        self.assertCountEqual(numa1["interfaces"], [iface1.id])
-        self.assertCountEqual(numa2["interfaces"], [iface2.id])
-        self.assertCountEqual(
-            result["resources"]["interfaces"],
+        numa1, numa2 = result["numa_pinning"]
+        self.assertEqual(
             [
                 {
                     "id": iface1.id,
                     "name": "eth0",
-                    "numa_index": 0,
-                    "virtual_functions": {
-                        "allocated_tracked": 2,
-                        "allocated_other": 0,
-                        "free": 6,
-                    },
+                    "virtual_functions": {"allocated": 2, "free": 6},
                 },
+            ],
+            numa1["interfaces"],
+        )
+        self.assertEqual(
+            [
                 {
                     "id": iface2.id,
                     "name": "eth1",
-                    "numa_index": 1,
-                    "virtual_functions": {
-                        "allocated_tracked": 1,
-                        "allocated_other": 0,
-                        "free": 15,
-                    },
+                    "virtual_functions": {"allocated": 1, "free": 15},
                 },
             ],
+            numa2["interfaces"],
         )
 
     def test_get_with_pod_host_determines_vlan_boot_status(self):
@@ -550,73 +475,6 @@ class TestPodHandler(MAASTransactionServerTestCase):
         result = handler.list({"id": pod.id})
         self.assertThat(result, Equals(expected_data))
 
-    def test_full_dehydrate_for_list_no_details(self):
-        admin = factory.make_admin()
-        handler = PodHandler(admin, {}, None)
-        vlan = factory.make_VLAN(dhcp_on=True)
-        subnet = factory.make_Subnet(vlan=vlan)
-        node = factory.make_Node_with_Interface_on_Subnet(subnet=subnet)
-        ip = factory.make_StaticIPAddress(
-            interface=node.boot_interface, subnet=subnet
-        )
-        numa_node0 = node.default_numanode
-        numa_node0.cores = [0, 3]
-        numa_node0.memory = 4096
-        numa_node0.save()
-        factory.make_NUMANode(node=node, cores=[1, 4], memory=1024)
-        factory.make_NUMANode(node=node, cores=[2, 5], memory=2048)
-        project = factory.make_string()
-        pod = self.make_pod_with_hints(
-            pod_type="lxd",
-            parameters={"project": project},
-            host=node,
-            ip_address=ip,
-        )
-        factory.make_VirtualMachine(bmc=pod, project=project)
-        result = handler.full_dehydrate(pod, for_list=True)
-        self.assertEqual(result["resources"]["numa"], [])
-        self.assertEqual(result["resources"]["vms"], [])
-
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_get_projects(self):
-        user = yield deferToDatabase(factory.make_admin)
-        handler = PodHandler(user, {}, None)
-        params = {
-            "type": "lxd",
-            "power_address": "1.2.3.4",
-            "project": "p1",
-            "password": "secret",
-        }
-        mock_discover_pod_projects = self.patch(pod, "discover_pod_projects")
-        mock_discover_pod_projects.return_value = succeed(None)
-        mock_get_best_discovered_result = self.patch(
-            pod, "get_best_discovered_result"
-        )
-        mock_get_best_discovered_result.return_value = succeed(
-            [
-                DiscoveredPodProject(name="foo", description="Project foo"),
-                DiscoveredPodProject(name="bar", description="Project bar"),
-            ]
-        )
-        projects = yield handler.get_projects(params)
-        self.assertEqual(
-            projects,
-            [
-                {"name": "foo", "description": "Project foo"},
-                {"name": "bar", "description": "Project bar"},
-            ],
-        )
-        mock_discover_pod_projects.assert_called_once_with(
-            "lxd",
-            {
-                "power_address": "1.2.3.4",
-                "project": "p1",
-                "password": "secret",
-            },
-        )
-        mock_get_best_discovered_result.assert_called_once()
-
     @wait_for_reactor
     @inlineCallbacks
     def test_refresh(self):
@@ -646,17 +504,6 @@ class TestPodHandler(MAASTransactionServerTestCase):
         yield handler.delete({"id": pod.id})
         expected_pod = yield deferToDatabase(reload_object, pod)
         self.assertIsNone(expected_pod)
-
-    @wait_for_reactor
-    @inlineCallbacks
-    def test_delete_decompose(self):
-        user = yield deferToDatabase(factory.make_admin)
-        handler = PodHandler(user, {}, None)
-        pod = yield deferToDatabase(self.make_pod_with_hints)
-        mock_async_delete = self.patch(Pod, "async_delete")
-        yield deferToDatabase(factory.make_Machine, bmc=pod)
-        yield handler.delete({"id": pod.id, "decompose": True})
-        mock_async_delete.assert_called_once_with(decompose=True)
 
     @wait_for_reactor
     @inlineCallbacks

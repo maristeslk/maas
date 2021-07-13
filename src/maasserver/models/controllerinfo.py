@@ -1,130 +1,220 @@
 # Copyright 2017 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""ControllerInfo objects."""
 
-from collections import Counter
-from datetime import datetime
-from enum import Enum
-import re
-from typing import List, NamedTuple, Optional
 
-from django.db.models import (
-    CASCADE,
-    CharField,
-    Count,
-    DateTimeField,
-    Manager,
-    OneToOneField,
-    Q,
-)
+from collections import namedtuple
+
+from django.db.models import CASCADE, CharField, Manager, OneToOneField
 
 from maasserver import DefaultMeta
+from maasserver.enum import NODE_TYPE
+from maasserver.fields import JSONObjectField
 from maasserver.models.cleansave import CleanSave
 from maasserver.models.node import Node
-from maasserver.models.notification import Notification
 from maasserver.models.timestampedmodel import TimestampedModel
-from provisioningserver.enum import (
-    CONTROLLER_INSTALL_TYPE,
-    CONTROLLER_INSTALL_TYPE_CHOICES,
+from provisioningserver.logger import get_maas_logger
+from provisioningserver.utils.version import get_version_tuple
+
+maaslog = get_maas_logger("controllerinfo")
+
+
+_ControllerVersionInfo = namedtuple(
+    "ControllerVersionInfo",
+    ("hostname", "system_id", "version", "maasversion"),
 )
-from provisioningserver.utils.snap import SnapChannel
-from provisioningserver.utils.version import MAASVersion
-
-PPA_URL_RE = re.compile(
-    r"http://ppa.launchpad.net/(?P<ppa>\w+/[\w\.]+)/ubuntu/ (?P<release>\w+)/main$"
-)
 
 
-class TargetVersion(NamedTuple):
-    """The target version for the MAAS deployment."""
+class ControllerVersionInfo(_ControllerVersionInfo):
+    @property
+    def comparable_version(self):
+        return self.maasversion[0:6]
 
-    version: MAASVersion
-    snap_channel: SnapChannel
-    snap_cohort: str = ""
-    first_reported: Optional[datetime] = None
+    def difference(self, other):
+        v1 = self.comparable_version
+        v2 = other.comparable_version
+        # No difference in the numeric versions. For reference, here's a
+        # breakdown of the indexes:
+        # 0: Major (2)
+        # 1: Minor (2.2)
+        # 2: Point (2.2.2)
+        # 3: Qualifier (2.2.2~beta)
+        # 4: Qualifier revision (2.2.2~beta2)
+        # 5: Revision number (2.2.2~beta2-6000)
+        if v1 == v2:
+            return None, None
+        # Indexes 0 through 5 will indicate the major, minor, patch, and
+        # qualifier (such as alpha or beta qualifier), which is enough to know
+        # we should display the full string instead of the short version.
+        # (Since we already know they're not identical)
+        elif v1[0:5] == v2[0:5]:
+            return self.full_string, other.full_string
+        else:
+            # Only difference is the revision number, so just display the
+            # full string.
+            return (
+                self.maasversion.short_version,
+                other.maasversion.short_version,
+            )
 
-
-class VERSION_ISSUES(Enum):
-    """Possible issues with a controller version with regards to target version."""
-
-    DIFFERENT_CHANNEL = "different-channel"
-    DIFFERENT_COHORT = "different-cohort"
+    @property
+    def full_string(self):
+        pretty_version = self.maasversion.short_version
+        if len(self.maasversion.extended_info) > 0:
+            pretty_version = "%s (%s)" % (
+                pretty_version,
+                self.maasversion.extended_info,
+            )
+        return pretty_version
 
 
 class ControllerInfoManager(Manager):
     def set_version(self, controller, version):
-        self.update_or_create(defaults={"version": version}, node=controller)
+        self.update_or_create(defaults=dict(version=version), node=controller)
 
-    def set_versions_info(self, controller, versions):
-        details = {
-            "install_type": versions.install_type,
-            "version": versions.current.version,
-            # initialize other fields as null in case the controller is
-            # upgraded from one install type to another
-            "update_version": "",
-            "update_origin": "",
-            "snap_cohort": "",
-            "snap_revision": "",
-            "snap_update_revision": "",
-            "update_first_reported": None,
-        }
-        if versions.install_type == CONTROLLER_INSTALL_TYPE.SNAP:
-            details.update(
-                {
-                    "snap_revision": versions.current.revision,
-                    "snap_cohort": versions.cohort,
-                    "update_origin": str(versions.channel)
-                    if versions.channel
-                    else "",
-                }
+    def set_interface_update_info(self, controller, interfaces, hints):
+        self.update_or_create(
+            defaults=dict(interfaces=interfaces, interface_update_hints=hints),
+            node=controller,
+        )
+
+    def get_controller_version_info(self):
+        versions = list(
+            self.select_related("node")
+            .filter(
+                node__node_type__in=(
+                    NODE_TYPE.RACK_CONTROLLER,
+                    NODE_TYPE.REGION_CONTROLLER,
+                    NODE_TYPE.REGION_AND_RACK_CONTROLLER,
+                ),
+                version__isnull=False,
             )
-        elif versions.install_type == CONTROLLER_INSTALL_TYPE.DEB:
-            details["update_origin"] = self._parse_deb_origin(
-                versions.current.origin
+            .values_list("node__hostname", "node__system_id", "version")
+        )
+        for i in range(len(versions)):
+            version_info = list(versions[i])
+            version_info.append(get_version_tuple(version_info[-1]))
+            versions[i] = ControllerVersionInfo(*version_info)
+        return sorted(versions, key=lambda version: version[-1], reverse=True)
+
+
+VERSION_NOTIFICATION_IDENT = "controller_out_of_date_"
+
+
+def create_or_update_version_notification(system_id, message, context):
+    # Circular imports.
+    from maasserver.models import Notification
+
+    ident = VERSION_NOTIFICATION_IDENT + system_id
+    existing_notification = Notification.objects.filter(ident=ident).first()
+    if existing_notification is not None:
+        existing_notification.message = message
+        existing_notification.context = context
+        existing_notification.save()
+    else:
+        Notification.objects.create_warning_for_admins(
+            message, context=context, ident=ident
+        )
+
+
+KNOWN_VERSION_MISMATCH_NOTIFICATION = (
+    "Controller <a href='l/controller/{system_id}'>{hostname}</a> is "
+    "running an older version of MAAS ({v1})."
+)
+
+UNKNOWN_VERSION_MISMATCH_NOTIFICATION = (
+    "Controller <a href='l/controller/{system_id}'>{hostname}</a> "
+    "is running an older version of MAAS (less than 2.3.0)."
+)
+
+
+def update_version_notifications():
+    notifications = {}
+    # Circular imports.
+    from maasserver.models import Controller, Notification
+
+    controller_system_ids = set(
+        Controller.objects.all().values_list("system_id", flat=True)
+    )
+    controller_version_info = (
+        ControllerInfo.objects.get_controller_version_info()
+    )
+    now_possibly_irrelevant_notifications = set(
+        Notification.objects.filter(
+            ident__startswith=VERSION_NOTIFICATION_IDENT
+        ).values_list("ident", flat=True)
+    )
+    just_one_controller = len(controller_system_ids) == 1
+    if len(controller_version_info) == 0 or just_one_controller:
+        # No information means no notifications should be presented, and
+        # any existing notifications should be removed.
+        Notification.objects.filter(
+            ident__in=now_possibly_irrelevant_notifications
+        ).delete()
+        return
+    # The list is sorted with the first element being the controller
+    # with the highest version. So we can use that to compare with
+    # the remaining controllers.
+    latest_controller_version_info = controller_version_info[0]
+    latest_version = latest_controller_version_info.comparable_version
+    for controller in controller_version_info:
+        if controller.comparable_version < latest_version:
+            v1, v2 = controller.difference(latest_controller_version_info)
+            context = dict(
+                message=KNOWN_VERSION_MISMATCH_NOTIFICATION,
+                hostname=controller.hostname,
+                v1=v1,
+                v2=v2,
+                system_id=controller.system_id,
             )
-
-        if versions.update:
-            details.update(
-                {
-                    "update_version": versions.update.version,
-                    "update_first_reported": datetime.now(),
-                }
+            notifications[controller.system_id] = context
+            now_possibly_irrelevant_notifications.discard(
+                VERSION_NOTIFICATION_IDENT + controller.system_id
             )
-            if versions.install_type == CONTROLLER_INSTALL_TYPE.DEB:
-                # override the update origin as it might be different from the
-                # installed one
-                details["update_origin"] = self._parse_deb_origin(
-                    versions.update.origin
-                )
-            elif versions.install_type == CONTROLLER_INSTALL_TYPE.SNAP:
-                details["snap_update_revision"] = versions.update.revision
-
-        info, created = self.get_or_create(defaults=details, node=controller)
-        if created:
-            return
-
-        if versions.update:
-            if (
-                versions.update.version == info.update_version
-                and versions.install_type == info.install_type
-            ):
-                # if the version is the same but the install type has changed,
-                # still update the first reported time
-                del details["update_first_reported"]
-
-        for key, value in details.items():
-            setattr(info, key, value)
-        info.save()
-
-    def _parse_deb_origin(self, origin):
-        match = PPA_URL_RE.match(origin)
-        if match:
-            return f"ppa:{match['ppa']}"
-        return origin
+        else:
+            # This will indicate that a notification isn't required, or
+            # any existing notification should be deleted.
+            notifications[controller.system_id] = None
+            controller_system_ids.discard(controller.system_id)
+    for system_id, context in notifications.items():
+        ident = VERSION_NOTIFICATION_IDENT + system_id
+        if context is None:
+            Notification.objects.filter(ident=ident).delete()
+            continue
+        message = context.pop("message")
+        create_or_update_version_notification(system_id, message, context)
+        controller_system_ids.discard(system_id)
+    # The remaining items in the controller_system_ids set will be
+    # controllers old enough that we don't know their version.
+    for system_id in controller_system_ids:
+        controller = Controller.objects.filter(system_id=system_id).first()
+        message = UNKNOWN_VERSION_MISMATCH_NOTIFICATION
+        context = dict(
+            hostname=controller.hostname,
+            system_id=controller.system_id,
+            latest_version=(
+                latest_controller_version_info.maasversion.short_version
+            ),
+        )
+        create_or_update_version_notification(system_id, message, context)
+    # Delete any remaining notifications. These might be for controllers
+    # that no longer exist. Any current notifications will have been
+    # discarded from the set of existing notifications.
+    Notification.objects.filter(
+        ident__in=now_possibly_irrelevant_notifications
+    ).delete()
 
 
 class ControllerInfo(CleanSave, TimestampedModel):
-    """Metadata about a node that is a controller."""
+    """A `ControllerInfo` represents metadata about nodes that are Controllers.
+
+    :ivar node: `Node` this `ControllerInfo` represents metadata for.
+    :ivar version: The last known version of the controller.
+    :ivar interfaces: Interfaces JSON last sent by the controller.
+    :ivar interface_udpate_hints: Topology hints last sent by the controller
+        during a call to update_interfaces().
+    """
 
     class Meta(DefaultMeta):
         verbose_name = "ControllerInfo"
@@ -135,267 +225,13 @@ class ControllerInfo(CleanSave, TimestampedModel):
         Node, null=False, blank=False, on_delete=CASCADE, primary_key=True
     )
 
-    version = CharField(max_length=255, blank=True, default="")
-    update_version = CharField(max_length=255, blank=True, default="")
-    # the snap channel or deb repo for the update
-    update_origin = CharField(max_length=255, blank=True, default="")
-    update_first_reported = DateTimeField(blank=True, null=True)
-    install_type = CharField(
-        max_length=255,
-        blank=True,
-        choices=CONTROLLER_INSTALL_TYPE_CHOICES,
-        default=CONTROLLER_INSTALL_TYPE.UNKNOWN,
+    version = CharField(max_length=255, null=True, blank=True)
+
+    interfaces = JSONObjectField(max_length=(2 ** 15), blank=True, default="")
+
+    interface_update_hints = JSONObjectField(
+        max_length=(2 ** 15), blank=True, default=""
     )
-    snap_cohort = CharField(max_length=255, blank=True, default="")
-    snap_revision = CharField(max_length=255, blank=True, default="")
-    snap_update_revision = CharField(max_length=255, blank=True, default="")
 
     def __str__(self):
         return "%s (%s)" % (self.__class__.__name__, self.node.hostname)
-
-    def is_up_to_date(self, target_version: TargetVersion) -> bool:
-        """Return whether the controller is up-to-date with the target version."""
-        return (
-            not self.update_version
-            and MAASVersion.from_string(self.version) == target_version.version
-        )
-
-    def get_version_issues(self, target: TargetVersion) -> List[str]:
-        """Return a list of version-related issues compared to the target version."""
-        issues = []
-        if self.install_type == CONTROLLER_INSTALL_TYPE.SNAP:
-            if (
-                SnapChannel.from_string(self.update_origin)
-                != target.snap_channel
-            ):
-                issues.append(VERSION_ISSUES.DIFFERENT_CHANNEL.value)
-            if self.snap_cohort != target.snap_cohort:
-                issues.append(VERSION_ISSUES.DIFFERENT_COHORT.value)
-        return issues
-
-
-def get_maas_version() -> Optional[MAASVersion]:
-    """Return the version for the deployment.
-
-    The returned version is the short version (up to the qualifier, if any)
-    used by the most controllers.
-
-    """
-    version_data = (
-        ControllerInfo.objects.exclude(version="")
-        .values_list("version")
-        .annotate(count=Count("node_id"))
-    )
-    versions = Counter()
-    for version, count in version_data:
-        versions[MAASVersion.from_string(version).main_version] += count
-    # sort versions by the highest count first, and highest version in case of
-    # equal count
-    versions = sorted(
-        ((count, version) for version, count in versions.items()), reverse=True
-    )
-    if not versions:
-        return None
-    return versions[0][1]
-
-
-def get_target_version() -> Optional[TargetVersion]:
-    """Get the target version for the deployment."""
-    highest_version = None
-    highest_update = None
-    update_first_reported = None
-    for info in ControllerInfo.objects.exclude(version=""):
-        version = MAASVersion.from_string(info.version)
-        highest_version = (
-            max((highest_version, version)) if highest_version else version
-        )
-
-        if not info.update_version:
-            continue
-
-        update = MAASVersion.from_string(info.update_version)
-        if not highest_update:
-            highest_update = update
-            update_first_reported = info.update_first_reported
-        elif update < highest_update:
-            continue
-        elif update > highest_update:
-            highest_update = update
-            update_first_reported = info.update_first_reported
-        else:  # same version
-            update_first_reported = min(
-                (update_first_reported, info.update_first_reported)
-            )
-
-    if highest_update and highest_update > highest_version:
-        version = highest_update
-    else:
-        # don't report any update
-        version = highest_version
-        update_first_reported = None
-
-    if version is None:
-        return None
-
-    def field_for_snap_controllers(field, version):
-        version = str(version)
-        return list(
-            ControllerInfo.objects.filter(
-                Q(version=version) | Q(update_version=version),
-                install_type=CONTROLLER_INSTALL_TYPE.SNAP,
-            )
-            .exclude(**{field: ""})
-            .values_list(field, flat=True)
-            .distinct()
-        )
-
-    channels = field_for_snap_controllers("update_origin", version)
-    snap_channel = None
-    if channels:
-        # report the minimum (with lowest risk) channel that sees the target
-        # version
-        for channel in channels:
-            channel = SnapChannel.from_string(channel)
-            if not channel.is_release_branch():
-                # only point to a branch if it's a release one, as other branches
-                # are in general intended as a temporary change for testing
-                channel.branch = ""
-            snap_channel = (
-                min(channel, snap_channel) if snap_channel else channel
-            )
-    else:
-        # compose the channel from the target version
-        risk_map = {"alpha": "edge", "beta": "beta", "rc": "candidate"}
-        risk = risk_map.get(version.qualifier_type, "stable")
-        snap_channel = SnapChannel(
-            track=f"{version.major}.{version.minor}",
-            risk=risk,
-        )
-
-    # report a cohort only if all controllers with the target version are on
-    # the same cohort (or have no cohort)
-    cohorts = field_for_snap_controllers("snap_cohort", version)
-    snap_cohort = cohorts[0] if len(cohorts) == 1 else ""
-
-    return TargetVersion(
-        version,
-        snap_channel,
-        snap_cohort=snap_cohort,
-        first_reported=update_first_reported,
-    )
-
-
-UPGRADE_ISSUE_NOTIFICATION_IDENT = "upgrade_version_issue"
-UPGRADE_STATUS_NOTIFICATION_IDENT = "upgrade_status"
-
-
-def update_version_notifications():
-    _process_udpate_issues_notification()
-    _process_update_status_notification()
-
-
-def _process_udpate_issues_notification():
-    info = ControllerInfo.objects
-    multiple_install_types = info.values("install_type").distinct().count() > 1
-    multiple_origins = info.values("update_origin").distinct().count() > 1
-    multiple_cohorts = info.values("snap_cohort").distinct().count() > 1
-    # note that `version` and `update_version` are compared here as strings
-    # from the database. It's possible the same effective version is reported
-    # as different strings because of deb epoch, but it doesn't really matter
-    # in this case as other discrepancies would trigger the "different
-    # installation sources" notification before
-    multiple_versions = info.values("version").distinct().count() > 1
-    multiple_upgrade_versions = (
-        info.exclude(update_version="")
-        .values("update_version")
-        .distinct()
-        .count()
-        > 1
-    )
-
-    def set_warning(reason, message):
-        defaults = {
-            "category": "warning",
-            "admins": True,
-            "message": f"{message}. <a href='/MAAS/l/controllers'>Review controllers.</a>",
-            "context": {"reason": reason},
-        }
-        notification, created = Notification.objects.get_or_create(
-            ident=UPGRADE_ISSUE_NOTIFICATION_IDENT,
-            defaults=defaults,
-        )
-        if not created and notification.context["reason"] != reason:
-            # create a new notification so that it shows even if users have
-            # dismissed the previous one
-            notification.delete()
-            Notification.objects.create(
-                ident=UPGRADE_ISSUE_NOTIFICATION_IDENT, **defaults
-            )
-
-    if any((multiple_install_types, multiple_origins, multiple_cohorts)):
-        set_warning(
-            "install_source", "Controllers have different installation sources"
-        )
-    elif multiple_upgrade_versions:
-        set_warning(
-            "upgrade_versions", "Controllers report different upgrade versions"
-        )
-    elif multiple_versions:
-        set_warning("versions", "Controllers have different versions")
-    else:
-        Notification.objects.filter(
-            ident=UPGRADE_ISSUE_NOTIFICATION_IDENT
-        ).delete()
-
-
-def _process_update_status_notification():
-    def set_update_notification(version, completed):
-        context = {"version": str(version)}
-        if completed:
-            message = "MAAS has been updated to version {version}."
-            context["status"] = "completed"
-        else:
-            message = (
-                "MAAS {version} is available, controllers will upgrade soon."
-            )
-            context["status"] = "inprogress"
-
-        defaults = {
-            "category": "success" if completed else "info",
-            "admins": True,
-            "message": message,
-            "context": context,
-        }
-        return Notification.objects.get_or_create(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-            defaults=defaults,
-        )
-
-    target_version = get_target_version()
-    state_notification = Notification.objects.filter(
-        ident=UPGRADE_STATUS_NOTIFICATION_IDENT
-    ).first()
-    if target_version and target_version.first_reported:
-        # an update is available
-        update_version = target_version.version.main_version
-        if state_notification:
-            notification_version = MAASVersion.from_string(
-                state_notification.context["version"]
-            )
-            if notification_version < update_version:
-                # replace old notification with the new one
-                state_notification.delete()
-        set_update_notification(update_version, completed=False)
-    elif state_notification:
-        # no update but there's a previous notification
-        current_version = get_maas_version().main_version
-        notification_version = MAASVersion.from_string(
-            state_notification.context["version"]
-        )
-        if (
-            state_notification.context["status"] == "completed"
-            and notification_version == current_version
-        ):
-            return
-        state_notification.delete()
-        set_update_notification(current_version, completed=True)

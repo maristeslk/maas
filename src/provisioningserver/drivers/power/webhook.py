@@ -25,7 +25,7 @@ from provisioningserver.drivers import (
 from provisioningserver.drivers.power import PowerActionError, PowerDriver
 from provisioningserver.drivers.power.utils import WebClientContextFactory
 from provisioningserver.utils.twisted import asynchronous
-from provisioningserver.utils.version import get_running_version
+from provisioningserver.utils.version import get_maas_version
 
 SSL_INSECURE_YES = "y"
 SSL_INSECURE_NO = "n"
@@ -38,7 +38,6 @@ class WebhookPowerDriver(PowerDriver):
     name = "webhook"
     chassis = False
     can_probe = False
-    can_set_boot_order = False
     description = "Webhook"
     settings = [
         make_setting_field(
@@ -99,7 +98,7 @@ class WebhookPowerDriver(PowerDriver):
         # Don't include a Content-Type here, some services will reject the
         # request unless content is expected.
         headers = {
-            b"User-Agent": [f"MAAS {get_running_version()}".encode()],
+            b"User-Agent": [f"MAAS {get_maas_version()}".encode()],
             b"Accept": [b"application/json"],
             b"System_Id": [system_id.encode()],
             **extra_headers,
@@ -181,7 +180,7 @@ class WebhookPowerDriver(PowerDriver):
             b"POST",
             context["power_on_uri"].encode(),
             self._make_auth_headers(system_id, context),
-            context.get("power_verify_ssl") == SSL_INSECURE_YES,
+            context.get("power_verify_ssl") is True,
         )
 
     @asynchronous
@@ -192,7 +191,7 @@ class WebhookPowerDriver(PowerDriver):
             b"POST",
             context["power_off_uri"].encode(),
             self._make_auth_headers(system_id, context),
-            context.get("power_verify_ssl") == SSL_INSECURE_YES,
+            context.get("power_verify_ssl") is True,
         )
 
     @asynchronous
@@ -206,7 +205,7 @@ class WebhookPowerDriver(PowerDriver):
             b"GET",
             context["power_query_uri"].encode(),
             self._make_auth_headers(system_id, context),
-            context.get("power_verify_ssl") == SSL_INSECURE_YES,
+            context.get("power_verify_ssl") is True,
         )
         node_data = node_data.decode()
         if power_on_regex and re.search(power_on_regex, node_data) is not None:

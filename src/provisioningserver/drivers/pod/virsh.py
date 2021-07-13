@@ -1,15 +1,15 @@
-# Copyright 2017-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2017-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Virsh pod driver."""
 
 
+from collections import namedtuple
 from math import floor
 import os
 import string
 from tempfile import NamedTemporaryFile
 from textwrap import dedent
-from typing import NamedTuple
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -239,21 +239,12 @@ DOM_TEMPLATE_S390X = dedent(
     """
 )
 
-
-class InterfaceInfo(NamedTuple):
-    type: str
-    source: str
-    model: str
-    mac: str
-
+InterfaceInfo = namedtuple("InterfaceInfo", ("type", "source", "model", "mac"))
 
 REQUIRED_PACKAGES = [
     ["virsh", "libvirt-clients"],
     ["virt-login-shell", "libvirt-clients"],
 ]
-
-
-SUPPORTED_STORAGE_TYPES = ("dir", "logical", "zfs")
 
 
 class VirshVMState:
@@ -319,19 +310,15 @@ class VirshSSH(pexpect.spawn):
 
     def _execute(self, poweraddr):
         """Spawns the pexpect command."""
-        self._spawn(f"virsh --connect {poweraddr}")
-
-    def get_server_version(self):
-        output = self.run(["version", "--daemon"])
-        for line in output.splitlines():
-            if line.startswith("Running against daemon"):
-                return line.split()[-1]
+        cmd = "virsh --connect %s" % poweraddr
+        self._spawn(cmd)
 
     def get_network_xml(self, network):
-        try:
-            return self.run(["net-dumpxml", network])
-        except VirshError:
+        output = self.run(["net-dumpxml", network]).strip()
+        if output.startswith("error:"):
+            maaslog.error("%s: Failed to get XML for network", network)
             return None
+        return output
 
     def get_machine_xml(self, machine):
         # Check if we have a cached version of the XML.
@@ -341,9 +328,9 @@ class VirshSSH(pexpect.spawn):
             return self.xml[machine]
 
         # Grab the XML from virsh if we don't have it already.
-        try:
-            output = self.run(["dumpxml", machine])
-        except VirshError:
+        output = self.run(["dumpxml", machine]).strip()
+        if output.startswith("error:"):
+            maaslog.error("%s: Failed to get XML for machine", machine)
             return None
 
         # Cache the XML, since we'll need it later to reconfigure the VM.
@@ -402,31 +389,35 @@ class VirshSSH(pexpect.spawn):
             return False
         return True
 
-    def run(self, args, raise_error=True):
+    def run(self, args):
         cmd = " ".join(args)
         self.sendline(cmd)
         self.prompt()
-        output = self.before.decode("utf-8").strip()
-        # remove the first line since it containes the issued command
-        output = "\n".join(output.splitlines()[1:])
-        if output.startswith("error:"):
-            message = f"Virsh command {args} failed: {output[7:]}"
-            maaslog.error(message)
-            if raise_error:
-                raise VirshError(message)
-            return ""  # return empty output if something failed
-        return output
+        result = self.before.decode("utf-8").splitlines()
+        return "\n".join(result[1:])
 
-    def _get_column_values(self, data, keys):
+    def get_column_values(self, data, keys):
         """Return tuple of column value tuples based off keys."""
-        entries = [row.split() for row in data.strip().splitlines()]
-        columns = entries[0]
-        indexes = [columns.index(key) for key in keys]
-        # skip header lines
-        entries = entries[2:]
-        return tuple(
-            tuple(entry[index] for index in indexes) for entry in entries
-        )
+        data = data.strip().splitlines()
+        cols = data[0].split()
+        indexes = []
+        # Look for column headers matching keys.
+        for k in keys:
+            try:
+                indexes.append(cols.index(k))
+            except Exception:
+                # key was not found, continue searching.
+                continue
+        col_values = []
+        if len(indexes) > 0:
+            # Iterate over data and return column key values.
+            # Skip first two header lines.
+            for line in data[2:]:
+                line_values = []
+                for index in indexes:
+                    line_values.append(line.split()[index])
+                col_values.append(tuple(line_values))
+        return tuple(col_values)
 
     def get_key_value(self, data, key):
         """Return value based off of key."""
@@ -457,51 +448,57 @@ class VirshSSH(pexpect.spawn):
             ["pool-autostart", "maas"],
         ]
         for command in commands:
-            try:
-                self.run(command)
-            except VirshError:
+            output = self.run(command)
+            if output.startswith("error:"):
+                maaslog.error("Failed to create Pod storage pool: %s", output)
                 return None
 
     def list_machines(self):
         """Lists all VMs by name."""
-        machines = self.run(["list", "--all", "--name"]).splitlines()
+        machines = self.run(["list", "--all", "--name"])
+        machines = machines.strip().splitlines()
         return [m for m in machines if m.startswith(self.dom_prefix)]
 
     def list_pools(self):
-        """Lists supported pools in the host."""
-        output = self.run(
-            ["pool-list", "--type", ",".join(SUPPORTED_STORAGE_TYPES)]
-        )
-        pools = self._get_column_values(output, ["Name"])
+        """Lists all pools in the pod."""
+        keys = ["Name"]
+        output = self.run(["pool-list"])
+        pools = self.get_column_values(output, keys)
         return [p[0] for p in pools]
 
     def list_machine_block_devices(self, machine):
         """Lists all devices for VM."""
+        keys = ["Device", "Target", "Source"]
         output = self.run(["domblklist", machine, "--details"])
-        devices = self._get_column_values(
-            output, ["Device", "Target", "Source"]
-        )
+        devices = self.get_column_values(output, keys)
         return [(d[1], d[2]) for d in devices if d[0] == "disk"]
 
     def get_machine_state(self, machine):
         """Gets the VM state."""
-        try:
-            return self.run(["domstate", machine])
-        except VirshError:
+        state = self.run(["domstate", machine]).strip()
+        if state.startswith("error:"):
             return None
+        return state
 
     def get_machine_interface_info(self, machine):
         """Gets list of mac addressess assigned to the VM."""
-        try:
-            output = self.run(["domiflist", machine])
-        except VirshError:
+        output = self.run(["domiflist", machine]).strip()
+        if output.startswith("error:"):
+            maaslog.error("%s: Failed to get node MAC addresses", machine)
             return None
-        return [
-            InterfaceInfo(*entry)
-            for entry in self._get_column_values(
-                output, ["Type", "Source", "Model", "MAC"]
-            )
-        ]
+        # Parse the `virsh domiflist <machine>` output, which will look
+        # something like the following:
+        #
+        # Interface  Type       Source     Model       MAC
+        # -------------------------------------------------------
+        # -          network    default    virtio      52:54:00:5b:86:86
+        # -          bridge     br0        virtio      52:54:00:8f:39:13
+        # -          bridge     br1        virtio      52:54:00:72:f9:82
+        #
+        # That is, skip the two lines of header, and then extract the type,
+        # source, model, and MAC.
+        output = output.splitlines()[2:]
+        return [InterfaceInfo(*line.split()[1:5]) for line in output]
 
     def get_pod_cpu_count(self, nodeinfo):
         """Gets number of CPUs in the pod."""
@@ -513,7 +510,7 @@ class VirshSSH(pexpect.spawn):
 
     def get_machine_cpu_count(self, machine):
         """Gets the VM CPU count."""
-        output = self.run(["dominfo", machine])
+        output = self.run(["dominfo", machine]).strip()
         cpu_count = self.get_key_value(output, "CPU(s)")
         if cpu_count is None:
             maaslog.error("%s: Failed to get machine CPU count", machine)
@@ -539,7 +536,7 @@ class VirshSSH(pexpect.spawn):
 
     def get_machine_memory(self, machine):
         """Gets the VM memory."""
-        output = self.run(["dominfo", machine])
+        output = self.run(["dominfo", machine]).strip()
         KiB = self.get_key_value_unitless(output, "Max memory")
         if KiB is None:
             maaslog.error("%s: Failed to get machine memory", machine)
@@ -551,8 +548,8 @@ class VirshSSH(pexpect.spawn):
         """Get the storage pools information."""
         pools = []
         for pool in self.list_pools():
-            output = self.run(["pool-dumpxml", pool])
-            if not output:
+            output = self.run(["pool-dumpxml", pool]).strip()
+            if output is None:
                 # Skip if cannot get more information.
                 continue
 
@@ -600,8 +597,8 @@ class VirshSSH(pexpect.spawn):
 
     def get_machine_local_storage(self, machine, device):
         """Gets the VM local storage for device."""
-        output = self.run(["domblkinfo", machine, device])
-        if not output:
+        output = self.run(["domblkinfo", machine, device]).strip()
+        if output is None:
             maaslog.error("Failed to get available pod local storage")
             return None
         try:
@@ -611,7 +608,7 @@ class VirshSSH(pexpect.spawn):
 
     def get_pod_nodeinfo(self):
         """Gets the general information of the node via 'nodeinfo'"""
-        return self.run(["nodeinfo"])
+        return self.run(["nodeinfo"]).strip()
 
     def get_pod_arch(self, nodeinfo):
         """Gets architecture of the pod."""
@@ -671,7 +668,6 @@ class VirshSSH(pexpect.spawn):
         discovered_pod.local_storage = sum(
             pool.storage for pool in discovered_pod.storage_pools
         )
-        discovered_pod.version = self.get_server_version()
         return discovered_pod
 
     def get_pod_hints(self):
@@ -781,22 +777,21 @@ class VirshSSH(pexpect.spawn):
         If no error is reported, destroy the domain to put it back into a
         'shut off' state.
         """
-        try:
-            self.run(["start", "--paused", machine])
-        except VirshError as e:
+        output = self.run(["start", "--paused", machine]).strip()
+        if output.startswith("error:"):
             # Delete the domain.
             self.delete_domain(machine)
             # Raise the error.
-            raise VirshError(f"Unable to compose {machine}: {e}")
+            raise VirshError("Unable to compose %s: %s" % (machine, output))
         else:
             # No errors, so set machine back to 'shut off' state.
             self.run(["destroy", machine])
 
     def set_machine_autostart(self, machine):
         """Set machine to autostart."""
-        try:
-            self.run(["autostart", machine])
-        except VirshError:
+        output = self.run(["autostart", machine]).strip()
+        if output.startswith("error:"):
+            maaslog.error("%s: Failed to set autostart", machine)
             return False
         return True
 
@@ -836,25 +831,24 @@ class VirshSSH(pexpect.spawn):
             f.write(etree.tostring(doc))
             f.write(b"\n")
             f.flush()
-            try:
-                self.run(["define", f.name])
-            except VirshError:
+            output = self.run(["define", f.name])
+            if output.startswith("error:"):
+                maaslog.error("%s: Failed to set network boot order", machine)
                 return False
+            maaslog.info("%s: Successfully set network boot order", machine)
             return True
 
     def poweron(self, machine):
         """Poweron a VM."""
-        try:
-            self.run(["start", machine])
-        except VirshError:
+        output = self.run(["start", machine]).strip()
+        if output.startswith("error:"):
             return False
         return True
 
     def poweroff(self, machine):
         """Poweroff a VM."""
-        try:
-            self.run(["destroy", machine])
-        except VirshError:
+        output = self.run(["destroy", machine]).strip()
+        if output.startswith("error:"):
             return False
         return True
 
@@ -897,7 +891,7 @@ class VirshSSH(pexpect.spawn):
             % (", ".join([pool.name for pool in pools]))
         )
 
-    def _create_local_volume(self, disk, default_pool=None):
+    def create_local_volume(self, disk, default_pool=None):
         """Create a local volume with `disk.size`."""
         usable_pool_type, usable_pool = self.get_usable_pool(
             disk, default_pool
@@ -905,35 +899,47 @@ class VirshSSH(pexpect.spawn):
         if usable_pool is None:
             return None
         volume = str(uuid4())
-
-        disk_size = disk.size
-        extra_args = []
-        if usable_pool_type == "dir":
-            extra_args = [
-                "--allocation",
-                "0",
-                "--format",
-                "raw",
-            ]
+        if usable_pool_type == "logical":
+            self.run(
+                [
+                    "vol-create-as",
+                    usable_pool,
+                    volume,
+                    str(disk.size),
+                    "--format",
+                    "raw",
+                ]
+            )
         elif usable_pool_type == "zfs":
             # LP: #1858201
             # Round down to the nearest MiB for zfs.
             # See bug comments for more details.
-            disk_size = int(floor(disk.size / 2 ** 20)) * 2 ** 20
-            extra_args = [
-                "--allocation",
-                "0",
-            ]
-
-        self.run(
-            [
-                "vol-create-as",
-                usable_pool,
-                volume,
-                str(disk_size),
-            ]
-            + extra_args,
-        )
+            size = int(floor(disk.size / 2 ** 20)) * 2 ** 20
+            self.run(
+                [
+                    "vol-create-as",
+                    usable_pool,
+                    volume,
+                    str(size),
+                    "--allocation",
+                    "0",
+                    "--format",
+                    "raw",
+                ]
+            )
+        else:
+            self.run(
+                [
+                    "vol-create-as",
+                    usable_pool,
+                    volume,
+                    str(disk.size),
+                    "--allocation",
+                    "0",
+                    "--format",
+                    "raw",
+                ]
+            )
         return usable_pool, volume
 
     def delete_local_volume(self, pool, volume):
@@ -942,7 +948,8 @@ class VirshSSH(pexpect.spawn):
 
     def get_volume_path(self, pool, volume):
         """Return the path to the file from `pool` and `volume`."""
-        return self.run(["vol-path", volume, "--pool", pool])
+        output = self.run(["vol-path", volume, "--pool", pool])
+        return output.strip()
 
     def attach_local_volume(self, domain, pool, volume, device):
         """Attach `volume` in `pool` to `domain` as `device`."""
@@ -966,7 +973,8 @@ class VirshSSH(pexpect.spawn):
 
     def get_network_list(self):
         """Return the list of available networks."""
-        return self.run(["net-list", "--name"]).splitlines()
+        output = self.run(["net-list", "--name"])
+        return output.strip().splitlines()
 
     def check_network_maas_dhcp_enabled(self, network, host_interfaces):
         xml = self.get_network_xml(network)
@@ -1104,10 +1112,17 @@ class VirshSSH(pexpect.spawn):
             f.write(device_xml.encode("utf-8"))
             f.write(b"\n")
             f.flush()
-            try:
-                self.run(["attach-device", domain, f.name, "--config"])
-            except VirshError:
+            output = self.run(["attach-device", domain, f.name, "--config"])
+            if output.startswith("error:"):
+                maaslog.error(
+                    "%s: Failed to attach network device %s"
+                    % (domain, interface.attach_name)
+                )
                 return False
+            maaslog.info(
+                "%s: Successfully attached network device %s"
+                % (domain, interface.attach_name)
+            )
             return True
 
     def get_domain_capabilities(self):
@@ -1116,13 +1131,23 @@ class VirshSSH(pexpect.spawn):
         Determines the type and emulator of the domain to use.
         """
         # Test for KVM support first.
-        emulator_type = "kvm"
-        try:
-            xml = self.run(["domcapabilities", "--virttype", emulator_type])
-        except VirshError:
+        xml = self.run(["domcapabilities", "--virttype", "kvm"])
+        if xml.startswith("error"):
             # Fallback to qemu support. Fail if qemu not supported.
+            xml = self.run(["domcapabilities", "--virttype", "qemu"])
             emulator_type = "qemu"
-            xml = self.run(["domcapabilities", "--virttype", emulator_type])
+        else:
+            emulator_type = "kvm"
+
+        # XXX newell 2017-05-18 bug=1690781
+        # Check to see if the XML output was an error.
+        # See bug for details about why and how this can occur.
+        if xml.startswith("error"):
+            raise VirshError(
+                "`virsh domcapabilities --virttype %s` errored.  Please "
+                "verify that package qemu-kvm is installed and restart "
+                "libvirt-bin service." % emulator_type
+            )
 
         doc = etree.XML(xml)
         evaluator = etree.XPathEvaluator(doc)
@@ -1168,7 +1193,7 @@ class VirshSSH(pexpect.spawn):
         created_disks = []
         for idx, disk in enumerate(request.block_devices):
             try:
-                disk_info = self._create_local_volume(disk, default_pool)
+                disk_info = self.create_local_volume(disk, default_pool)
             except Exception:
                 self.cleanup_disks(created_disks)
                 raise
@@ -1245,9 +1270,8 @@ class VirshSSH(pexpect.spawn):
 
     def delete_domain(self, domain):
         """Delete `domain` and its volumes."""
-        # Ensure that its destroyed first. We ignore errors here not to fail
-        # the process, and since there isn't much we can do anyway.
-        self.run(["destroy", domain], raise_error=False)
+        # Ensure that its destroyed first.
+        self.run(["destroy", domain])
         # Undefine the domains and remove all storage and snapshots.
         # XXX newell 2018-02-25 bug=1741165
         # Removed the --delete-snapshots flag to workaround the volumes not
@@ -1259,8 +1283,7 @@ class VirshSSH(pexpect.spawn):
                 "--remove-all-storage",
                 "--managed-save",
                 "--nvram",
-            ],
-            raise_error=False,
+            ]
         )
 
 
@@ -1269,7 +1292,6 @@ class VirshPodDriver(PodDriver):
     name = "virsh"
     description = "Virsh (virtual systems)"
     can_probe = True
-    can_set_boot_order = False
     settings = [
         make_setting_field("power_address", "Address", required=True),
         make_setting_field(

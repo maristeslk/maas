@@ -12,9 +12,8 @@ from piston3.utils import rc
 from maasserver.api.support import admin_method, operation, OperationsHandler
 from maasserver.api.utils import get_mandatory_param
 from maasserver.exceptions import MAASAPIValidationError
-from maasserver.forms.pods import ComposeMachineForm, DeletePodForm, PodForm
+from maasserver.forms.pods import ComposeMachineForm, PodForm
 from maasserver.models.bmc import Pod
-from maasserver.models.virtualmachine import get_vm_host_used_resources
 from maasserver.permissions import PodPermission
 from provisioningserver.drivers.pod import Capabilities
 
@@ -36,18 +35,17 @@ DISPLAYED_POD_FIELDS = (
     "pool",
     "host",
     "default_macvlan_mode",
-    "version",
 )
 
 
-class VmHostHandler(OperationsHandler):
+class PodHandler(OperationsHandler):
     """
-    Manage an individual VM host.
+    Manage an individual pod.
 
-    A VM host is identified by its id.
+    A pod is identified by its id.
     """
 
-    api_doc_section_name = "Virtual machine host"
+    api_doc_section_name = "Pod"
 
     create = None
     model = Pod
@@ -59,20 +57,29 @@ class VmHostHandler(OperationsHandler):
 
     @classmethod
     def total(cls, pod):
-        return {
+        result = {
             "cores": pod.cores,
             "memory": pod.memory,
             "local_storage": pod.local_storage,
         }
+        if Capabilities.FIXED_LOCAL_STORAGE in pod.capabilities:
+            result["local_disks"] = pod.local_disks
+        if Capabilities.ISCSI_STORAGE in pod.capabilities:
+            result["iscsi_storage"] = pod.iscsi_storage
+        return result
 
     @classmethod
     def used(cls, pod):
-        used_resources = get_vm_host_used_resources(pod)
-        return {
-            "cores": used_resources.cores,
-            "memory": used_resources.total_memory,
-            "local_storage": used_resources.storage,
+        result = {
+            "cores": pod.get_used_cores(),
+            "memory": pod.get_used_memory(),
+            "local_storage": pod.get_used_local_storage(),
         }
+        if Capabilities.FIXED_LOCAL_STORAGE in pod.capabilities:
+            result["local_disks"] = pod.get_used_local_disks()
+        if Capabilities.ISCSI_STORAGE in pod.capabilities:
+            result["iscsi_storage"] = pod.get_used_iscsi_storage()
+        return result
 
     @classmethod
     def available(cls, pod):
@@ -113,43 +120,42 @@ class VmHostHandler(OperationsHandler):
 
     @admin_method
     def update(self, request, id):
-        """@description-title Update a specific VM host
-        @description Update a specific VM host by ID.
+        """@description-title Update a specific pod
+        @description Update a specific pod by ID.
 
-        Note: A VM host's 'type' cannot be updated. The VM host must be deleted
-        and re-added to change the type.
+        Note: A pod's 'type' cannot be updated. The pod must be deleted and
+        re-added to change the type.
 
-        @param (url-string) "{id}" [required=true] The VM host's ID.
-        @param (string) "name" [required=false] The VM host's name.
+        @param (url-string) "{id}" [required=true] The pod's ID.
+        @param (string) "name" [required=false] The pod's name.
         @param (string) "pool" [required=false] The name of the resource pool
-        associated with this VM host -- composed machines will be assigned to this
+        associated with this pod -- composed machines will be assigned to this
         resource pool by default.
         @param (int) "cpu_over_commit_ratio" [required=false] CPU overcommit
         ratio (0-10)
         @param (int) "memory_over_commit_ratio" [required=false] CPU overcommit
         ratio (0-10)
         @param (string) "default_storage_pool" [required=false] Default KVM
-        storage pool to use when the VM host has storage pools.
+        storage pool to use when the pod has storage pools.
         @param (string) "power_address" [required=false] Address for power
-        control of the VM host.
+        control of the pod.
         @param-example "power_address"
         ``Virsh: qemu+ssh://172.16.99.2/system``
         @param (string) "power_pass" [required=false] Password for access to
-        power control of the VM host.
-        @param (string) "zone" [required=false] The VM host's zone.
+        power control of the pod.
+        @param (string) "zone" [required=false] The pod's zone.
         @param (string) "default_macvlan_mode" [required=false] Default macvlan
-        mode for VM hosts that use it: bridge, passthru, private, vepa.
+        mode for pods that use it: bridge, passthru, private, vepa.
         @param (string) "tags" [required=false] Tag or tags (command separated)
-        associated with the VM host.
+        associated with the pod.
 
         @success (http-status-code) "200" 200
-        @success (json) "success-json" A JSON VM host object.
-        @success-example "success-json" [exkey=update-vmhost] placeholder text
+        @success (json) "success-json" A JSON pod object.
+        @success-example "success-json" [exkey=update-pod] placeholder text
 
-        @error (http-status-code) "404" 404 -- The VM host's ID was not found.
+        @error (http-status-code) "404" 404 -- The pod's ID was not found.
         @error (http-status-code) "403" 403 -- The current user does not have
-        permission to update the VM host.
-
+        permission to update the pod.
         """
         pod = Pod.objects.get_pod_or_404(id, request.user, PodPermission.edit)
         form = PodForm(data=request.data, instance=pod, request=request)
@@ -160,55 +166,48 @@ class VmHostHandler(OperationsHandler):
 
     @admin_method
     def delete(self, request, id):
-        """@description-title Deletes a VM host
-        @description Deletes a VM host with the given ID.
+        """@description-title Deletes a pod
+        @description Deletes a pod with the given pod ID.
 
-        @param (int) "{id}" [required=true] The VM host's ID.
-        @param (boolean) "decompose" [required=false] Whether to also also
-        decompose all machines in the VM host on removal. If not provided, machines
-        will not be removed.
+        @param (int) "{id}" [required=true] The pod's ID.
 
         @success (http-status-code) "204" 204
 
         @error (http-status-code) "404" 404
-        @error (content) "not-found" No VM host with that ID can be found.
+        @error (content) "not-found" No pod with that ID can be found.
         @error-example "not-found"
             Not Found
 
         @error (http-status-code) "403" 403
         @error (content) "no-perms" The user does not have the permissions
-        to delete the VM host.
+        to delete the pod.
         @error-example (content) "no-perms"
             This method is reserved for admin users.
-
         """
         pod = Pod.objects.get_pod_or_404(id, request.user, PodPermission.edit)
-        form = DeletePodForm(data=request.GET)
-        if not form.is_valid():
-            raise MAASAPIValidationError(form.errors)
-        pod.delete_and_wait(decompose=form.cleaned_data["decompose"])
+        pod.delete_and_wait()
         return rc.DELETED
 
     @admin_method
     @operation(idempotent=False)
     def refresh(self, request, id):
-        """@description-title Refresh a VM host
-        @description Performs VM host discovery and updates all discovered
+        """@description-title Refresh a pod
+        @description Performs pod discovery and updates all discovered
         information and discovered machines.
 
-        @param (int) "{id}" [required=false] The VM host's ID.
+        @param (int) "{id}" [required=false] The pod's ID.
 
-        @success (json) "success-json" A VM host JSON object.
-        @success-example "success-json" [exkey=refresh-vmhost] placeholder text
+        @success (json) "success-json" A pod JSON object.
+        @success-example "success-json" [exkey=refresh-pod] placeholder text
 
         @error (http-status-code) "404" 404
-        @error (content) "not-found" No VM host with that ID can be found.
+        @error (content) "not-found" No pod with that ID can be found.
         @error-example "not-found"
             Not Found
 
         @error (http-status-code) "403" 403
         @error (content) "no-perms" The user does not have the permissions
-        to delete the VM host.
+        to delete the pod.
         @error-example (content) "no-perms"
             This method is reserved for admin users.
         """
@@ -220,28 +219,28 @@ class VmHostHandler(OperationsHandler):
     @admin_method
     @operation(idempotent=True)
     def parameters(self, request, id):
-        """@description-title Obtain VM host parameters
-        @description This returns a VM host's configuration parameters. For some
-        types of VM host, this will include private information such as passwords
+        """@description-title Obtain pod parameters
+        @description This returns a pod's configuration parameters. For some
+        types of pod, this will include private information such as passwords
         and secret keys.
 
         Note: This method is reserved for admin users.
 
-        @param (int) "{id}" [required=true] The VM host's ID.
+        @param (int) "{id}" [required=true] The pod's ID.
 
         @success (http-status-code) "200" 200
-        @success (json) "success_json" A JSON object containing the VM host's
+        @success (json) "success_json" A JSON object containing the pod's
         configuration parameters.
         @success-example "success_json" [exkey=parameters] placeholder text
 
         @error (http-status-code) "404" 404
-        @error (content) "not-found" No VM host with that ID can be found.
+        @error (content) "not-found" No pod with that ID can be found.
         @error-example "not-found"
             Not Found
 
         @error (http-status-code) "403" 403
         @error (content) "no-perms" The user does not have the permissions
-        to delete the VM host.
+        to delete the pod.
         @error-example (content) "no-perms"
             This method is reserved for admin users.
         """
@@ -251,8 +250,8 @@ class VmHostHandler(OperationsHandler):
     @admin_method
     @operation(idempotent=False)
     def compose(self, request, id):
-        """@description-title Compose a virtual machine on the host.
-        @description Compose a new machine from a VM host.
+        """@description-title Compose a pod machine
+        @description Compose a new machine from a pod.
 
         @param (int) "cores" [required=false] The minimum number of CPU cores.
         @param (int) "memory" [required=false] The minimum amount of memory,
@@ -264,12 +263,12 @@ class VmHostHandler(OperationsHandler):
         @param (int) "cpu_speed" [required=false] The minimum CPU speed,
         specified in MHz.
         @param (string) "architecture" [required=false] The architecture of
-        the new machine (e.g. amd64). This must be an architecture the VM host
+        the new machine (e.g. amd64). This must be an architecture the pod
         supports.
         @param (string) "storage" [required=false] A list of storage
         constraint identifiers in the form ``label:size(tag,tag,...),
         label:size(tag,tag,...)``. For more information please see the CLI
-        VM host management page of the official MAAS documentation.
+        pod management page of the official MAAS documentation.
         @param (string) "interfaces" [required=false,formatting=true] A
         labeled constraint map associating constraint labels with desired
         interface properties. MAAS will assign interfaces that match the
@@ -317,23 +316,22 @@ class VmHostHandler(OperationsHandler):
         text
 
         @error (http-status-code) "404" 404
-        @error (content) "not-found" No VM host with that ID can be found.
+        @error (content) "not-found" No pod with that ID can be found.
         @error-example "not-found"
             Not Found
 
         @error (http-status-code) "403" 403
         @error (content) "no-perms" The user does not have the permissions
-        to delete the VM host.
+        to delete the pod.
         @error-example (content) "no-perms"
             This method is reserved for admin users.
+
         """
         pod = Pod.objects.get_pod_or_404(
             id, request.user, PodPermission.compose
         )
         if Capabilities.COMPOSABLE not in pod.capabilities:
-            raise MAASAPIValidationError(
-                "VM host does not support composability."
-            )
+            raise MAASAPIValidationError("Pod does not support composability.")
         form = ComposeMachineForm(data=request.data, pod=pod, request=request)
         if form.is_valid():
             machine = form.compose()
@@ -349,10 +347,10 @@ class VmHostHandler(OperationsHandler):
     @admin_method
     @operation(idempotent=False)
     def add_tag(self, request, id):
-        """@description-title Add a tag to a VM host
-        @description Adds a tag to a given VM host.
+        """@description-title Add a tag to a pod
+        @description Adds a tag to a given pod.
 
-        @param (int) "{id}" [required=true] The VM host's ID.
+        @param (int) "{id}" [required=true] The pod's ID.
         @param (string) "tag" [required=true] The tag to add.
 
         @success (http-status-code) "200" 200
@@ -361,13 +359,13 @@ class VmHostHandler(OperationsHandler):
         text
 
         @error (http-status-code) "404" 404
-        @error (content) "not-found" No VM host with that ID can be found.
+        @error (content) "not-found" No pod with that ID can be found.
         @error-example "not-found"
             Not Found
 
         @error (http-status-code) "403" 403
         @error (content) "no-perms" The user does not have the permissions
-        to delete the VM host.
+        to delete the pod.
         @error-example (content) "no-perms"
             This method is reserved for admin users.
         """
@@ -384,10 +382,10 @@ class VmHostHandler(OperationsHandler):
     @admin_method
     @operation(idempotent=False)
     def remove_tag(self, request, id):
-        """@description-title Remove a tag from a VM host
-        @description Removes a given tag from a VM host.
+        """@description-title Remove a tag from a pod
+        @description Removes a given tag from a pod.
 
-        @param (int) "{id}" [required=true] The VM host's ID.
+        @param (int) "{id}" [required=true] The pod's ID.
         @param (string) "tag" [required=true] The tag to add.
 
         @success (http-status-code) "200" 200
@@ -396,13 +394,13 @@ class VmHostHandler(OperationsHandler):
         text
 
         @error (http-status-code) "404" 404
-        @error (content) "not-found" No VM host with that ID can be found.
+        @error (content) "not-found" No pod with that ID can be found.
         @error-example "not-found"
             Not Found
 
         @error (http-status-code) "403" 403
         @error (content) "no-perms" The user does not have the permissions
-        to delete the VM host.
+        to delete the pod.
         @error-example (content) "no-perms"
             This method is reserved for admin users.
         """
@@ -415,48 +413,47 @@ class VmHostHandler(OperationsHandler):
 
     @classmethod
     def resource_uri(cls, pod=None):
-        pod_id = pod.id if pod else "id"
-        return ("vm_host_handler", (pod_id,))
-
-
-# Pods are being renamed to VM hosts. Keep the old name on the API as well for
-# backwards-compatibility.
-class PodHandler(VmHostHandler):
-    """
-    Manage an individual Pod.
-
-    The /pod/ API endpoint is deprecated. Please use the /vm-host/ one instead.
-
-    """
-
-    api_doc_section_name = "Pod"
-
-    @classmethod
-    def resource_uri(cls, pod=None):
-        pod_id = pod.id if pod else "id"
+        # This method is called by piston in two different contexts:
+        # - when generating an uri template to be used in the documentation
+        # (in this case, it is called with node=None).
+        # - when populating the 'resource_uri' field of an object
+        # returned by the API (in this case, node is a node object).
+        pod_id = "id"
+        if pod is not None:
+            pod_id = pod.id
         return ("pod_handler", (pod_id,))
 
 
-class VmHostsHandler(OperationsHandler):
+# Pods are being renamed vm-hosts. For now just expose the new name on the
+# API.
+class VmHostHandler(PodHandler):
     """
-    Manage the collection of all the VM hosts in MAAS.
+    Manage an individual vm-host.
+
+    A vm-host is identified by its id.
     """
 
-    api_doc_section_name = "Virtual machine hosts"
+    api_doc_section_name = "VmHost"
+
+
+class PodsHandler(OperationsHandler):
+    """Manage the collection of all the pod in the MAAS."""
+
+    api_doc_section_name = "Pods"
     update = delete = None
 
     @classmethod
     def resource_uri(cls, *args, **kwargs):
-        return ("vm_hosts_handler", [])
+        return ("pods_handler", [])
 
     def read(self, request):
-        """@description-title List VM hosts
-        @description Get a listing of all VM hosts.
+        """@description-title List pods
+        @description Get a listing of all pods.
 
         @success (http-status-code) "200" 200
         @success (json) "success-json" A JSON object containing a list of
-        VM host objects.
-        @success-example (json) "success-json" [exkey=read-vmhosts]
+        pod objects.
+        @success-example (json) "success-json" [exkey=read-pods]
         placeholder text
         """
         return Pod.objects.get_pods(request.user, PodPermission.view).order_by(
@@ -465,55 +462,48 @@ class VmHostsHandler(OperationsHandler):
 
     @admin_method
     def create(self, request):
-        """@description-title Create a VM host
-        @description Create or discover a new VM host.
+        """@description-title Create a pod
+        @description Create or discover a new pod.
 
-        @param (string) "type" [required=true] The type of VM host to create:
-        ``lxd`` or ``virsh``.
+        @param (string) "type" [required=true] The type of pod to create:
+        ``rsd`` or ``virsh``.
         @param (string) "power_address" [required=true] Address that gives
-        MAAS access to the VM host power control. For example, for virsh
-        ``qemu+ssh://172.16.99.2/system``
-        For ``lxd``, this is just the address of the host.
+        MAAS access to the pod's power control. For example:
+        ``qemu+ssh://172.16.99.2/system``.
         @param (string) "power_user" [required=true] Username to use for
-        power control of the VM host. Required for ``virsh``
-        VM hosts that do not have SSH set up for public-key authentication.
+        power control of the pod. Required for ``rsd`` pods or ``virsh``
+        pods that do not have SSH set up for public-key authentication.
         @param (string) "power_pass" [required=true] Password to use for
-        power control of the VM host. Required ``virsh`` VM hosts that do
-        not have SSH set up for public-key authentication and for ``lxd``
-        if the MAAS certificate is not registered already in the LXD server.
-        @param (string) "name" [required=false] The new VM host's name.
-        @param (string) "zone" [required=false] The new VM host's zone.
+        power control of the pod. Required for ``rsd`` pods or ``virsh``
+        pods that do not have SSH set up for public-key authentication.
+        @param (string) "name" [required=false] The new pod's name.
+        @param (string) "zone" [required=false] The new pod's zone.
         @param (string) "pool" [required=false] The name of the resource
-        pool the new VM host will belong to. Machines composed from this VM host
+        pool the new pod will belong to. Machines composed from this pod
         will be assigned to this resource pool by default.
         @param (string) "tags" [required=false] A tag or list of tags (
-        comma delimited) to assign to the new VM host.
-        @param (string) "project" [required=false] For ``lxd`` VM hosts, the
-        project that MAAS will manage. If not provided, the ``default`` project
-        will be used. If a nonexistent name is given, a new project with that
-        name will be created.
+        comma delimited) to assign to the new pod.
 
         @success (http-status-code) "200" 200
-        @success (json) "success-json" A JSON object containing a VM host object.
+        @success (json) "success-json" A JSON object containing a pod object.
         @success-example (json) "success-json" [exkey=create] placeholder text
 
         @error (http-status-code) "404" 404
-        @error (content) "not-found" No VM host with that ID can be found.
+        @error (content) "not-found" No pod with that ID can be found.
         @error-example "not-found"
             Not Found
 
         @error (http-status-code) "403" 403
         @error (content) "no-perms" The user does not have the permissions
-        to delete the VM host.
+        to delete the pod.
         @error-example (content) "no-perms"
             This method is reserved for admin users.
 
         @error (http-status-code) "503" 503
-        @error (content) "failed-login" MAAS could not find or could not
-            authenticate with the VM host.
+        @error (content) "failed-login" MAAS could not find the RSD
+        pod or could not log into the virsh console.
         @error-example (content) "failed-login"
-            Failed talking to VM host: Failed to authenticate to the VM host.
-
+            Failed talking to pod: Failed to login to virsh console.
         """
         if not request.user.has_perm(PodPermission.create):
             raise PermissionDenied()
@@ -524,19 +514,9 @@ class VmHostsHandler(OperationsHandler):
             raise MAASAPIValidationError(form.errors)
 
 
-# Pods are being renamed to VM hosts. Keep the old name on the API as well for
-# backwards-compatibility.
-class PodsHandler(VmHostsHandler):
-    """
-    Manage the collection of all the pods in the MAAS.
+# Pods are being renamed vm-hosts. For now just expose the new name on the
+# API.
+class VmHostsHandler(PodsHandler):
+    """Manage the collection of all the vm-hosts in the MAAS."""
 
-    The /pods/ API endpoint is deprecated. Please use the /vm-hosts/ one
-    instead.
-
-    """
-
-    api_doc_section_name = "Pods"
-
-    @classmethod
-    def resource_uri(cls, *args, **kwargs):
-        return ("pods_handler", [])
+    api_doc_section_name = "VmHosts"

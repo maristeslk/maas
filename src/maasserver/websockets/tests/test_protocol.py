@@ -106,19 +106,19 @@ class TestWebSocketProtocol(MAASTransactionServerTestCase):
         protocol.authenticate.return_value = defer.succeed(sentinel.user)
         protocol.connectionMade()
         self.addCleanup(protocol.connectionLost, "")
-        self.assertEqual(protocol.user, protocol.request.user)
-        self.assertEqual(
+        self.assertEquals(protocol.user, protocol.request.user)
+        self.assertEquals(
             protocol.request.META["HTTP_USER_AGENT"],
             protocol.transport.user_agent,
         )
-        self.assertEqual(
+        self.assertEquals(
             protocol.request.META["REMOTE_ADDR"], protocol.transport.ip_address
         )
-        self.assertEqual(
+        self.assertEquals(
             protocol.request.META["SERVER_NAME"],
             splithost(protocol.transport.host)[0],
         )
-        self.assertEqual(
+        self.assertEquals(
             protocol.request.META["SERVER_PORT"],
             splithost(protocol.transport.host)[1],
         )
@@ -132,8 +132,8 @@ class TestWebSocketProtocol(MAASTransactionServerTestCase):
         protocol.authenticate.return_value = defer.succeed(sentinel.user)
         protocol.connectionMade()
         self.addCleanup(protocol.connectionLost, "")
-        self.assertEqual(protocol.request.META["SERVER_NAME"], "localhost")
-        self.assertEqual(protocol.request.META["SERVER_PORT"], 5248)
+        self.assertEquals(protocol.request.META["SERVER_NAME"], "localhost")
+        self.assertEquals(protocol.request.META["SERVER_PORT"], 5248)
 
     def test_connectionMade_sets_user_and_processes_messages(self):
         protocol, factory = self.make_protocol(patch_authenticate=False)
@@ -737,7 +737,9 @@ class TestWebSocketProtocol(MAASTransactionServerTestCase):
             "data": data,
         }
         protocol.sendNotify(name, action, data)
-        self.assertEqual(message, self.get_written_transport_message(protocol))
+        self.assertEquals(
+            message, self.get_written_transport_message(protocol)
+        )
 
 
 class MakeProtocolFactoryMixin:
@@ -775,7 +777,6 @@ ALL_NOTIFIERS = (
     "fabric",
     "iprange",
     "machine",
-    "nodedevice",
     "notification",
     "notificationdismissal",
     "packagerepository",
@@ -789,6 +790,7 @@ ALL_NOTIFIERS = (
     "sslkey",
     "staticroute",
     "subnet",
+    "switch",
     "tag",
     "token",
     "user",
@@ -809,7 +811,6 @@ ALL_HANDLERS = (
     "general",
     "iprange",
     "machine",
-    "nodedevice",
     "noderesult",
     "notification",
     "packagerepository",
@@ -822,6 +823,7 @@ ALL_HANDLERS = (
     "sslkey",
     "staticroute",
     "subnet",
+    "switch",
     "tag",
     "token",
     "user",

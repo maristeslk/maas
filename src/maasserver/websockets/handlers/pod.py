@@ -7,14 +7,9 @@
 import dataclasses
 from functools import partial
 
-import attr
 from django.http import HttpRequest
-from twisted.internet.defer import inlineCallbacks, returnValue
 
-from maasserver.clusterrpc.pods import (
-    discover_pod_projects,
-    get_best_discovered_result,
-)
+from maasserver.enum import NODE_TYPE
 from maasserver.exceptions import PodProblem
 from maasserver.forms.pods import ComposeMachineForm, PodForm
 from maasserver.models.bmc import Pod
@@ -54,12 +49,13 @@ class PodHandler(TimestampedModelHandler):
             "set_active",
             "refresh",
             "compose",
-            "get_projects",
         ]
         exclude = [
             "bmc_type",
             "cores",
+            "local_disks",
             "local_storage",
+            "iscsi_storage",
             "memory",
             "power_type",
             "power_parameters",
@@ -101,28 +97,37 @@ class PodHandler(TimestampedModelHandler):
         """Add extra fields to `data`."""
         if self.user.is_superuser:
             data.update(obj.power_parameters)
-        data.update(
-            {
-                "type": obj.power_type,
-                "storage_pools": [
-                    self.dehydrate_storage_pool(pool)
-                    for pool in obj.storage_pools.all()
-                ],
-                "default_storage_pool": (
-                    obj.default_storage_pool.pool_id
-                    if obj.default_storage_pool
-                    else None
-                ),
-                "host": obj.host.system_id if obj.host else None,
-                "resources": self.dehydrate_resources(obj, for_list=for_list),
-            }
+        data["type"] = obj.power_type
+        data["total"] = self.dehydrate_total(obj)
+        data["used"] = self.dehydrate_used(obj)
+        data["available"] = self.dehydrate_available(obj)
+        data["composed_machines_count"] = obj.node_set.filter(
+            node_type=NODE_TYPE.MACHINE
+        ).count()
+        data["owners_count"] = (
+            obj.node_set.exclude(owner=None)
+            .values_list("owner")
+            .distinct()
+            .count()
         )
+        data["hints"] = self.dehydrate_hints(obj.hints)
+        storage_pools = obj.storage_pools.all()
+        if len(storage_pools) > 0:
+            pools_data = []
+            for pool in storage_pools:
+                pools_data.append(self.dehydrate_storage_pool(pool))
+            data["storage_pools"] = pools_data
+            data["default_storage_pool"] = obj.default_storage_pool.pool_id
+        if obj.host is not None:
+            data["host"] = obj.host.system_id
+        else:
+            data["host"] = None
         if not for_list:
-            if obj.host:
+            if obj.host is not None:
                 data["attached_vlans"] = list(
-                    obj.host.interface_set.filter(
-                        vlan_id__isnull=False
-                    ).values_list("vlan_id", flat=True)
+                    obj.host.interface_set.all().values_list(
+                        "vlan_id", flat=True
+                    )
                 )
                 boot_vlans = []
                 query = obj.host.interface_set.all().prefetch_related(
@@ -136,10 +141,89 @@ class PodHandler(TimestampedModelHandler):
                 data["attached_vlans"] = []
                 data["boot_vlans"] = []
 
+        data["numa_pinning"] = self.dehydrate_numa_pinning(obj)
+
         if self.user.has_perm(PodPermission.compose, obj):
             data["permissions"].append("compose")
 
         return data
+
+    def dehydrate_total(self, obj):
+        """Dehydrate total Pod resources."""
+        result = {
+            "cores": obj.cores,
+            "memory": obj.memory,
+            "memory_gb": "%.1f" % (obj.memory / 1024.0),
+            "local_storage": obj.local_storage,
+            "local_storage_gb": "%.1f" % (obj.local_storage / (1024 ** 3)),
+        }
+        if Capabilities.FIXED_LOCAL_STORAGE in obj.capabilities:
+            result["local_disks"] = obj.local_disks
+        if Capabilities.ISCSI_STORAGE in obj.capabilities:
+            result["iscsi_storage"] = obj.iscsi_storage
+            result["iscsi_storage_gb"] = "%.1f" % (
+                obj.iscsi_storage / (1024 ** 3)
+            )
+        return result
+
+    def dehydrate_used(self, obj):
+        """Dehydrate used Pod resources."""
+        used_memory = obj.get_used_memory()
+        used_local_storage = obj.get_used_local_storage()
+        result = {
+            "cores": obj.get_used_cores(),
+            "memory": used_memory,
+            "memory_gb": "%.1f" % (used_memory / 1024.0),
+            "local_storage": used_local_storage,
+            "local_storage_gb": "%.1f" % (used_local_storage / (1024 ** 3)),
+        }
+        if Capabilities.FIXED_LOCAL_STORAGE in obj.capabilities:
+            result["local_disks"] = obj.get_used_local_disks()
+        if Capabilities.ISCSI_STORAGE in obj.capabilities:
+            used_iscsi_storage = obj.get_used_iscsi_storage()
+            result["iscsi_storage"] = used_iscsi_storage
+            result["iscsi_storage_gb"] = "%.1f" % (
+                used_iscsi_storage / (1024 ** 3)
+            )
+        return result
+
+    def dehydrate_available(self, obj):
+        """Dehydrate available Pod resources."""
+        used_memory = obj.get_used_memory()
+        used_local_storage = obj.get_used_local_storage()
+        result = {
+            "cores": obj.cores - obj.get_used_cores(),
+            "memory": obj.memory - used_memory,
+            "memory_gb": "%.1f" % ((obj.memory - used_memory) / 1024.0),
+            "local_storage": obj.local_storage - used_local_storage,
+            "local_storage_gb": "%.1f"
+            % ((obj.local_storage - used_local_storage) / (1024 ** 3)),
+        }
+        if Capabilities.FIXED_LOCAL_STORAGE in obj.capabilities:
+            result["local_disks"] = (
+                obj.local_disks - obj.get_used_local_disks()
+            )
+        if Capabilities.ISCSI_STORAGE in obj.capabilities:
+            used_iscsi_storage = obj.get_used_iscsi_storage()
+            result["iscsi_storage"] = obj.iscsi_storage - used_iscsi_storage
+            result["iscsi_storage_gb"] = "%.1f" % (
+                (obj.iscsi_storage - used_iscsi_storage) / (1024 ** 3)
+            )
+        return result
+
+    def dehydrate_hints(self, hints):
+        """Dehydrate Pod hints."""
+        return {
+            "cores": hints.cores,
+            "cpu_speed": hints.cpu_speed,
+            "memory": hints.memory,
+            "memory_gb": "%.1f" % (hints.memory / 1024.0),
+            "local_storage": hints.local_storage,
+            "local_storage_gb": "%.1f" % (hints.local_storage / (1024 ** 3)),
+            "local_disks": hints.local_disks,
+            "iscsi_storage": hints.iscsi_storage,
+            "iscsi_storage_gb": "%.1f" % (hints.iscsi_storage / (1024 ** 3)),
+        }
 
     def dehydrate_storage_pool(self, pool):
         """Dehydrate PodStoragePool."""
@@ -154,20 +238,16 @@ class PodHandler(TimestampedModelHandler):
             "available": pool.storage - used,
         }
 
-    def dehydrate_resources(self, obj, for_list=False):
-        """Dehydrate resources info."""
-        return dataclasses.asdict(
-            get_vm_host_resources(obj, detailed=not for_list)
-        )
+    def dehydrate_numa_pinning(self, obj):
+        """Dehydrate NUMA pinning info."""
+        if obj.host is None:
+            return []
 
-    @asynchronous
-    @inlineCallbacks
-    def get_projects(self, params):
-        """Return projects from the specified pod."""
-        pod_type = params.pop("type")
-        results = yield discover_pod_projects(pod_type, params)
-        projects = yield get_best_discovered_result(results)
-        returnValue([attr.asdict(project) for project in projects])
+        resources = [
+            dataclasses.asdict(entry) for entry in get_vm_host_resources(obj)
+        ]
+
+        return resources
 
     @asynchronous
     def create(self, params):
@@ -249,9 +329,8 @@ class PodHandler(TimestampedModelHandler):
                 raise HandlerPermissionError()
             return obj
 
-        decompose = params.get("decompose", False)
         d = deferToDatabase(get_object, params)
-        d.addCallback(lambda pod: pod.async_delete(decompose=decompose))
+        d.addCallback(lambda pod: pod.async_delete())
         return d
 
     @asynchronous

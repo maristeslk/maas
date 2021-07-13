@@ -174,4 +174,4 @@ class TestUsedFor(MAASServerTestCase):
     def test_vmfs(self):
         vmfs = factory.make_VMFS()
         part = vmfs.filesystems.first().partition
-        self.assertEqual("VMFS extent for %s" % vmfs.name, used_for(part))
+        self.assertEquals("VMFS extent for %s" % vmfs.name, used_for(part))

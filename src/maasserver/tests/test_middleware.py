@@ -13,8 +13,9 @@ from unittest.mock import Mock
 from crochet import TimeoutError
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
+from django.contrib.messages import constants
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.http import HttpResponse
+from django.http import Http404, HttpResponse
 from fixtures import FakeLogger
 from testtools.matchers import Contains, Equals, Not
 
@@ -118,6 +119,11 @@ class ExceptionMiddlewareTest(MAASServerTestCase):
         self.assertRaises(
             type(exception), self.process_exception, request, exception
         )
+
+    def test_Http404_returns_302(self):
+        request = self.make_fake_request()
+        response = self.process_exception(request, Http404())
+        self.assertEqual(http.client.FOUND, response.status_code)
 
     def test_unknown_exception_generates_internal_server_error(self):
         # An unknown exception generates an internal server error with the
@@ -355,6 +361,11 @@ class RPCErrorsMiddlewareTest(MAASServerTestCase):
 
         # The response is a redirect.
         self.assertEqual(request.path, extract_redirect(response))
+        # An error message has been published.
+        self.assertEqual(
+            [(constants.ERROR, "Error: %s" % error_message, "")],
+            request._messages.messages,
+        )
 
     def test_handles_NoConnectionsAvailable(self):
         request = factory.make_fake_request(factory.make_string(), "POST")
@@ -367,6 +378,11 @@ class RPCErrorsMiddlewareTest(MAASServerTestCase):
 
         # The response is a redirect.
         self.assertEqual(request.path, extract_redirect(response))
+        # An error message has been published.
+        self.assertEqual(
+            [(constants.ERROR, "Error: " + error_message, "")],
+            request._messages.messages,
+        )
 
     def test_handles_TimeoutError(self):
         request = factory.make_fake_request(factory.make_string(), "POST")
@@ -376,6 +392,11 @@ class RPCErrorsMiddlewareTest(MAASServerTestCase):
 
         # The response is a redirect.
         self.assertEqual(request.path, extract_redirect(response))
+        # An error message has been published.
+        self.assertEqual(
+            [(constants.ERROR, "Error: " + error_message, "")],
+            request._messages.messages,
+        )
 
     def test_ignores_non_rpc_errors(self):
         request = factory.make_fake_request(factory.make_string(), "POST")
@@ -408,6 +429,16 @@ class RPCErrorsMiddlewareTest(MAASServerTestCase):
             factory.make_name("msg"), uuid=rack_controller.system_id
         )
         self.process_request(request, error)
+
+        expected_error_message = (
+            "Error: Unable to connect to rack controller '%s' (%s); no "
+            "connections available."
+            % (rack_controller.hostname, rack_controller.system_id)
+        )
+        self.assertEqual(
+            [(constants.ERROR, expected_error_message, "")],
+            request._messages.messages,
+        )
 
 
 class APIRPCErrorsMiddlewareTest(MAASServerTestCase):

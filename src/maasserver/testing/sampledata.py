@@ -25,7 +25,6 @@ from maasserver.models import (
     User,
     VersionedTextFile,
 )
-from maasserver.models.virtualmachine import get_vm_host_used_resources
 from maasserver.storage_layouts import STORAGE_LAYOUTS
 from maasserver.testing.factory import factory
 from maasserver.tests.test_storage_layouts import LARGE_BLOCK_DEVICE
@@ -774,6 +773,32 @@ def populate_main():
         pod.default_storage_pool = pool
         pod.save()
         pods.append(pod)
+    for _ in range(3):
+        subnet = random.choice(ipv4_subnets)
+        ip = factory.pick_ip_in_Subnet(subnet)
+        ip_address = factory.make_StaticIPAddress(
+            alloc_type=IPADDRESS_TYPE.STICKY, ip=ip, subnet=subnet
+        )
+        power_address = "%s" % ip
+        pod = factory.make_Pod(
+            pod_type="rsd",
+            parameters={
+                "power_address": power_address,
+                "power_user": "user",
+                "power_pass": "pass",
+            },
+            ip_address=ip_address,
+            capabilities=[
+                Capabilities.DYNAMIC_LOCAL_STORAGE,
+                Capabilities.COMPOSABLE,
+            ],
+        )
+        for _ in range(3):
+            pool = factory.make_PodStoragePool(pod)
+            pod_storage_pools[pod].append(pool)
+        pod.default_storage_pool = pool
+        pod.save()
+        pods.append(pod)
     for machine in machines:
         # Add the machine to the pod if its lucky day!
         pod = random.choice(pods)
@@ -783,27 +808,17 @@ def populate_main():
             machine.save()
             machines_in_pods[pod].append(machine)
 
-            vm = factory.make_VirtualMachine(
-                identifier=machine.hostname,
-                bmc=pod,
-                machine=machine,
-                unpinned_cores=machine.cpu_count,
-            )
-
             # Assign the block devices on the machine to a storage pool.
             for block_device in machine.physicalblockdevice_set.all():
-                factory.make_VirtualMachineDisk(
-                    vm=vm,
-                    name=block_device.name,
-                    size=block_device.size,
-                    backing_pool=random.choice(pod_storage_pools[pod]),
+                block_device.storage_pool = random.choice(
+                    pod_storage_pools[pod]
                 )
+                block_device.save()
 
     # Update the pod attributes so that it has more available then used.
     for pod in pods[1:]:
-        used_resources = get_vm_host_used_resources(pod)
-        pod.cores = used_resources.cores + random.randint(4, 8)
-        pod.memory = used_resources.total_memory + random.choice(
+        pod.cores = pod.get_used_cores() + random.randint(4, 8)
+        pod.memory = pod.get_used_memory() + random.choice(
             [1024, 2048, 4096, 4096 * 4, 4096 * 8]
         )
         pod.local_storage = sum(

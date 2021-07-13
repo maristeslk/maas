@@ -1,4 +1,4 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """IPMI Power Driver."""
@@ -237,7 +237,6 @@ class IPMIPowerDriver(PowerDriver):
     name = "ipmi"
     chassis = False
     can_probe = False
-    can_set_boot_order = False
     description = "IPMI"
     settings = [
         make_setting_field(
@@ -283,8 +282,8 @@ class IPMIPowerDriver(PowerDriver):
         ),
     ]
     ip_extractor = make_ip_extractor("power_address")
-    wait_time = (4, 8, 16, 32)
-
+    #wait_time = (4, 8, 16, 32)
+    wait_time = (64, 128, 256, 512)
     def detect_missing_packages(self):
         if not shell.has_command_available("ipmipower"):
             return ["freeipmi-tools"]

@@ -227,7 +227,7 @@ def make_command_ref(box):
     )
 
 
-class RPCProtocol(amp.AMP):
+class RPCProtocol(amp.AMP, object):
     """A specialisation of `amp.AMP`.
 
     It's hard to track exactly when an `amp.AMP` protocol is connected to its

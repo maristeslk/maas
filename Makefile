@@ -8,7 +8,7 @@ VENV := .ve
 # This uses an explicit empty check (rather than ?=) since Jenkins defines
 # variables for parameters even when not passed.
 ifeq ($(MAAS_PPA),)
-	MAAS_PPA = ppa:maas-committers/latest-deps
+	MAAS_PPA = ppa:maas/2.9
 endif
 
 # pkg_resources makes some incredible noise about version numbers. They
@@ -28,28 +28,58 @@ endif
 # which those commands appear.
 dbrun := bin/database --preserve run --
 
-# Default PostgreSQL tools to use the maas database
+export GOPATH := $(shell go env GOPATH)
+export PATH := $(GOPATH)/bin:$(PATH)
+
+# For anything we start, we want to hint as to its root and data directories.
+export MAAS_ROOT := $(CURDIR)/.run
+export MAAS_DATA := $(CURDIR)/.run/maas
+# For things that care, postgresfixture for example, we always want to
+# use the "maas" databases.
 export PGDATABASE := maas
+
+# Check if a command is found on PATH. Raise an error if not, citing
+# the package to install. Return the command otherwise.
+# Usage: $(call available,<command>,<package>)
+define available
+  $(if $(shell which $(1)),$(1),$(error $(1) not found; \
+    install it with 'sudo apt install $(2)'))
+endef
 
 .DEFAULT_GOAL := build
 
 define BIN_SCRIPTS
+bin/black \
+bin/coverage \
+bin/flake8 \
+bin/isort \
 bin/maas \
 bin/maas-common \
-bin/maas-power \
 bin/maas-rack \
 bin/maas-region \
+bin/maas-power \
 bin/postgresfixture \
-bin/pytest \
 bin/rackd \
 bin/regiond \
 bin/subunit-1to2 \
 bin/subunit2junitxml \
 bin/subunit2pyunit \
+bin/test.cli \
 bin/test.parallel \
 bin/test.rack \
 bin/test.region \
-bin/test.region.legacy
+bin/test.region.legacy \
+bin/test.testing
+endef
+
+define PY_SOURCES
+src/apiclient \
+src/maascli \
+src/maasserver \
+src/maastesting \
+src/metadataserver \
+src/provisioningserver \
+utilities/release-upload
 endef
 
 UI_BUILD := src/maasui/build
@@ -61,7 +91,8 @@ build: \
   $(VENV) \
   $(BIN_SCRIPTS) \
   bin/shellcheck \
-  bin/py
+  bin/py \
+  pycharm
 .PHONY: build
 
 all: build ui machine-resources doc
@@ -85,6 +116,11 @@ install-dependencies:
 		$(foreach deps,$(FORBIDDEN_DEPS_FILES),$(call list_required,$(deps)))
 	if [ -x /usr/bin/snap ]; then cat required-packages/snaps | xargs -L1 sudo snap install; fi
 .PHONY: install-dependencies
+
+sudoers:
+	utilities/install-sudoers
+	utilities/grant-nmap-permissions
+.PHONY: sudoers
 
 $(VENV): requirements-dev.txt
 	python3 -m venv --system-site-packages --clear $@
@@ -123,16 +159,26 @@ machine-resources: machine-resources-vendor
 	$(MAKE) -C src/machine-resources build
 .PHONY: machine-resources
 
-test: test-missing-migrations test-py
+define test-scripts
+  bin/test.cli
+  bin/test.rack
+  bin/test.region
+  bin/test.region.legacy
+  bin/test.testing
+endef
+
+test: test-py
 .PHONY: test
 
-test-missing-migrations: bin/database bin/maas-region
-	$(dbrun) bin/maas-region makemigrations --check --dry-run
-.PHONY: test-missing-migrations
-
-test-py: bin/test.parallel bin/subunit-1to2 bin/subunit2junitxml bin/subunit2pyunit bin/pytest
-	@utilities/run-py-tests-ci
+test-py: bin/test.parallel bin/coverage bin/subunit-1to2 bin/subunit2junitxml bin/subunit2pyunit
+	@$(RM) .coverage .coverage.* junit.xml
+	@bash -o pipefail -c 'bin/test.parallel --with-coverage --subprocess-per-core --emit-subunit | bin/subunit-1to2 | bin/subunit2junitxml --no-passthrough -f -o junit.xml | bin/subunit2pyunit --no-passthrough'
+	@bin/coverage combine
 .PHONY: test-py
+
+clean-failed:
+	$(RM) .noseids
+.PHONY: clean-failed
 
 src/maasserver/testing/initial.maas_test.sql: bin/maas-region bin/database
     # Run migrations without any triggers created.
@@ -142,13 +188,35 @@ src/maasserver/testing/initial.maas_test.sql: bin/maas-region bin/database
 	$(dbrun) bin/maas-region shell -c "from maasserver.models.notification import Notification; Notification.objects.all().delete()"
 	$(dbrun) pg_dump maas --no-owner --no-privileges --format=plain > $@
 
+coverage-report: coverage/index.html
+	sensible-browser $< > /dev/null 2>&1 &
+.PHONY: coverage-report
+
+coverage.xml: bin/coverage .coverage
+	bin/coverage xml -o $@
+
+coverage/index.html: revno = $(or $(shell git rev-parse HEAD 2>/dev/null),???)
+coverage/index.html: bin/coverage .coverage
+	@$(RM) -r $(@D)
+	bin/coverage html \
+	    --title "Coverage for MAAS rev $(revno)" \
+	    --directory $(@D)
+
+.coverage:
+	@$(error Use `$(MAKE) test` to generate coverage)
+
 lint: lint-py lint-py-imports lint-py-linefeeds lint-go lint-shell
 .PHONY: lint
 
-lint-py:
-	@tox -e lint
+lint-py: sources = $(wildcard *.py contrib/*.py) $(PY_SOURCES) utilities etc
+lint-py: bin/flake8 bin/black bin/isort
+	@bin/isort --check-only --diff --recursive $(sources)
+	@bin/black $(sources) --check
+	@bin/flake8 $(sources)
 .PHONY: lint-py
 
+# Statically check imports against policy.
+lint-py-imports: sources = setup.py $(PY_SOURCES)
 lint-py-imports:
 	@utilities/check-imports
 .PHONY: lint-py-imports
@@ -173,20 +241,8 @@ lint-shell: bin/shellcheck
 		snap/hooks/* \
 		snap/local/tree/bin/* \
 		snap/local/tree/sbin/* \
-		src/metadataserver/builtin_scripts/commissioning_scripts/50-maas-01-commissioning \
-		src/metadataserver/builtin_scripts/commissioning_scripts/maas-get-fruid-api-data \
-		src/metadataserver/builtin_scripts/commissioning_scripts/maas-kernel-cmdline \
-		src/provisioningserver/refresh/maas-list-modaliases \
-		src/provisioningserver/refresh/maas-lshw \
-		src/provisioningserver/refresh/maas-serial-ports \
-		src/provisioningserver/refresh/maas-support-info \
-		utilities/connect-snap-interfaces \
-		utilities/gen-db-schema-svg \
-		utilities/ldap-setup \
-		utilities/package-version \
-		utilities/release-* \
-		utilities/run-performanced \
-		utilities/run-py-tests-ci
+		snap/local/tree/helpers/* \
+		utilities/release-*
 .PHONY: lint-shell
 
 format.parallel:
@@ -197,12 +253,14 @@ format.parallel:
 format: format-py format-go
 .PHONY: format
 
-format-py:
-	@tox -e format
+format-py: sources = $(wildcard *.py contrib/*.py) $(PY_SOURCES) utilities etc
+format-py: bin/black bin/isort
+	@bin/isort --recursive $(sources)
+	@bin/black -q $(sources)
 .PHONY: format-py
 
 format-go:
-	@$(MAKE) -C src/machine-resources format
+	@find src/machine-resources/src/ -name vendor -prune -o -name '*.go' -execdir go fmt {} +
 .PHONY: format-go
 
 check: clean test
@@ -211,7 +269,7 @@ check: clean test
 api-docs.rst: bin/maas-region src/maasserver/api/doc_handler.py syncdb
 	bin/maas-region generate_api_doc > $@
 
-sampledata: bin/maas-region bin/database syncdb machine-resources
+sampledata: bin/maas-region bin/database syncdb
 	$(dbrun) bin/maas-region generate_sample_data
 .PHONY: sampledata
 
@@ -220,6 +278,12 @@ doc: api-docs.rst
 
 .run: run-skel
 	@cp --archive --verbose $^ $@
+
+.idea: contrib/pycharm
+	@cp --archive --verbose $^ $@
+
+pycharm: .idea
+.PHONY: pycharm
 
 clean-ui:
 	$(MAKE) -C src/maasui clean
@@ -233,26 +297,28 @@ clean-machine-resources:
 	$(MAKE) -C src/machine-resources clean
 .PHONY: clean-machine-resources
 
-clean: clean-ui clean-machine-resources
+clean: stop clean-failed clean-ui clean-machine-resources
 	find . -type f -name '*.py[co]' -print0 | xargs -r0 $(RM)
 	find . -type d -name '__pycache__' -print0 | xargs -r0 $(RM) -r
 	find . -type f -name '*~' -print0 | xargs -r0 $(RM)
 	$(RM) src/maasserver/data/templates.py
 	$(RM) *.log
 	$(RM) api-docs.rst
+	$(RM) .coverage .coverage.* coverage.xml
+	$(RM) -r coverage
 	$(RM) -r .hypothesis
 	$(RM) -r bin include lib local
 	$(RM) -r eggs develop-eggs
 	$(RM) -r build dist logs/* parts
 	$(RM) tags TAGS .installed.cfg
 	$(RM) -r *.egg *.egg-info src/*.egg-info
+	$(RM) -r services/*/supervise
 	$(RM) -r .run
-	$(RM) junit*.xml
+	$(RM) -r .idea
+	$(RM) junit.xml
 	$(RM) xunit.*.xml
-	$(RM) .noseids
 	$(RM) .failed
 	$(RM) -r $(VENV)
-	$(RM) -r .tox
 .PHONY: clean
 
 clean+db: clean
@@ -274,6 +340,99 @@ syncdb: bin/maas-region bin/database
 .PHONY: syncdb
 
 #
+# Development services.
+#
+
+service_names_region := database dns regiond reloader
+service_names_rack := http rackd reloader
+service_names_all := $(service_names_region) $(service_names_rack)
+
+# The following template is intended to be used with `call`, and it
+# accepts a single argument: a target name. The target name must
+# correspond to a service action (see "Pseudo-magic targets" below). A
+# region- and rack-specific variant of the target will be created, in
+# addition to the target itself. These can be used to apply the service
+# action to the region services, the rack services, or all services, at
+# the same time.
+define service_template
+$(1)-region: $(patsubst %,services/%/@$(1),$(service_names_region))
+$(1)-rack: $(patsubst %,services/%/@$(1),$(service_names_rack))
+$(1): $(1)-region $(1)-rack
+endef
+
+# Expand out aggregate service targets using `service_template`.
+$(eval $(call service_template,pause))
+$(eval $(call service_template,restart))
+$(eval $(call service_template,start))
+$(eval $(call service_template,status))
+$(eval $(call service_template,stop))
+$(eval $(call service_template,supervise))
+
+# The `run` targets do not fit into the mould of the others.
+run-region:
+	@services/run $(service_names_region)
+.PHONY: run-region
+run-rack:
+	@services/run $(service_names_rack)
+.PHONY: run-rack
+run:
+	@services/run $(service_names_all)
+.PHONY: run
+
+# Convenient variables and functions for service control.
+
+setlock = $(call available,setlock,daemontools)
+supervise = $(call available,supervise,daemontools)
+svc = $(call available,svc,daemontools)
+svok = $(call available,svok,daemontools)
+svstat = $(call available,svstat,daemontools)
+
+service_lock = $(setlock) -n /run/lock/maas.dev.$(firstword $(1))
+
+# Pseudo-magic targets for controlling individual services.
+
+services/%/@run: services/%/@stop services/%/@deps
+	@$(call service_lock, $*) services/$*/run
+
+services/%/@start: services/%/@supervise
+	@$(svc) -u $(@D)
+
+services/%/@pause: services/%/@supervise
+	@$(svc) -d $(@D)
+
+services/%/@status:
+	@$(svstat) $(@D)
+
+services/%/@restart: services/%/@supervise
+	@$(svc) -du $(@D)
+
+services/%/@stop:
+	@if $(svok) $(@D); then $(svc) -dx $(@D); fi
+	@while $(svok) $(@D); do sleep 0.1; done
+
+services/%/@supervise: services/%/@deps
+	@mkdir -p logs/$*
+	@touch $(@D)/down
+	@if ! $(svok) $(@D); then \
+	    logdir=$(CURDIR)/logs/$* \
+	        $(call service_lock, $*) $(supervise) $(@D) & fi
+	@while ! $(svok) $(@D); do sleep 0.1; done
+
+# Dependencies for individual services.
+
+services/dns/@deps: bin/py bin/maas-common
+
+services/database/@deps: bin/database
+
+services/http/@deps: bin/py
+
+services/rackd/@deps: bin/rackd bin/maas-rack bin/maas-common bin/maas-power
+
+services/reloader/@deps:
+
+services/regiond/@deps: bin/maas-region bin/maas-rack bin/maas-common bin/maas-power
+
+#
 # Package building
 #
 
@@ -292,7 +451,7 @@ packaging-dir := maas_$(packaging-version)
 packaging-orig-tar := $(packaging-dir).orig.tar
 packaging-orig-targz := $(packaging-dir).orig.tar.gz
 
-machine_resources_vendor := src/machine-resources/vendor
+machine_resources_vendor := src/machine-resources/src/machine-resources/vendor
 
 -packaging-clean:
 	rm -rf $(packaging-build-area)
@@ -384,7 +543,7 @@ source-package-clean:
 
 # Debugging target. Allows printing of any variable.
 # As an example, try:
-#     make print-BIN_SCRIPTS
+#     make print-scss_input
 print-%:
 	@echo $* = $($*)
 
@@ -408,13 +567,13 @@ snap:
 # Helpers for using the snap for development testing.
 #
 
-DEV_SNAP_DIR ?= $(PWD)/build/dev-snap
+DEV_SNAP_DIR ?= build/dev-snap
 DEV_SNAP_PRIME_DIR = $(DEV_SNAP_DIR)/prime
 DEV_SNAP_PRIME_MARKER = $(DEV_SNAP_PRIME_DIR)/snap/primed
 
 $(DEV_SNAP_DIR): ## Check out a clean version of the working tree.
 	git checkout-index -a --prefix $(DEV_SNAP_DIR)/
-	git submodule foreach --recursive 'git checkout-index -a --prefix $(DEV_SNAP_DIR)/$$sm_path/'
+	git submodule foreach --recursive 'git checkout-index -a --prefix $(PWD)/$(DEV_SNAP_DIR)/$$sm_path/'
 
 $(DEV_SNAP_PRIME_MARKER): $(DEV_SNAP_DIR)
 	cd $(DEV_SNAP_DIR) && $(snapcraft) prime --destructive-mode
@@ -430,9 +589,9 @@ sync-dev-snap: $(UI_BUILD) $(DEV_SNAP_PRIME_MARKER)
 		--exclude '*.pyc' --exclude '__pycache__' \
 		src/ $(DEV_SNAP_PRIME_DIR)/lib/python3.8/site-packages/
 	$(RSYNC) \
-		$(UI_BUILD)/ $(DEV_SNAP_PRIME_DIR)/usr/share/maas/web/static/
+		$(UI_BUILD) $(DEV_SNAP_PRIME_DIR)/usr/share/maas/web/static/
 	$(RSYNC) \
-		$(OFFLINE_DOCS)/production-html-snap/ $(DEV_SNAP_PRIME_DIR)/usr/share/maas/web/static/docs/
+		$(OFFLINE_DOCS)/production-html/ $(DEV_SNAP_PRIME_DIR)/usr/share/maas/web/static/docs/
 	$(RSYNC) snap/local/tree/ $(DEV_SNAP_PRIME_DIR)/
 	$(RSYNC) src/machine-resources/bin/ \
 		$(DEV_SNAP_PRIME_DIR)/usr/share/maas/machine-resources/

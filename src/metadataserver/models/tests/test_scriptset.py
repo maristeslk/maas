@@ -135,7 +135,7 @@ class TestTranslateResultType(MAASServerTestCase):
             with self.assertRaisesRegex(ValidationError, self.exception):
                 translate_result_type(self.value)
         else:
-            self.assertEqual(
+            self.assertEquals(
                 self.return_value, translate_result_type(self.value)
             )
 
@@ -162,8 +162,8 @@ class TestScriptSetManager(MAASServerTestCase):
             expected_scripts,
             [script_result.name for script_result in script_set],
         )
-        self.assertEqual(RESULT_TYPE.COMMISSIONING, script_set.result_type)
-        self.assertEqual(
+        self.assertEquals(RESULT_TYPE.COMMISSIONING, script_set.result_type)
+        self.assertEquals(
             node.power_state, script_set.power_state_before_transition
         )
 
@@ -191,8 +191,8 @@ class TestScriptSetManager(MAASServerTestCase):
             expected_scripts,
             [script_result.name for script_result in script_set],
         )
-        self.assertEqual(RESULT_TYPE.COMMISSIONING, script_set.result_type)
-        self.assertEqual(
+        self.assertEquals(RESULT_TYPE.COMMISSIONING, script_set.result_type)
+        self.assertEquals(
             node.power_state, script_set.power_state_before_transition
         )
 
@@ -212,8 +212,8 @@ class TestScriptSetManager(MAASServerTestCase):
             expected_scripts,
             [script_result.name for script_result in script_set],
         )
-        self.assertEqual(RESULT_TYPE.COMMISSIONING, script_set.result_type)
-        self.assertEqual(
+        self.assertEquals(RESULT_TYPE.COMMISSIONING, script_set.result_type)
+        self.assertEquals(
             node.power_state, script_set.power_state_before_transition
         )
 
@@ -229,8 +229,8 @@ class TestScriptSetManager(MAASServerTestCase):
             list(NODE_INFO_SCRIPTS),
             [script_result.name for script_result in script_set],
         )
-        self.assertEqual(RESULT_TYPE.COMMISSIONING, script_set.result_type)
-        self.assertEqual(
+        self.assertEquals(RESULT_TYPE.COMMISSIONING, script_set.result_type)
+        self.assertEquals(
             node.power_state, script_set.power_state_before_transition
         )
 
@@ -272,8 +272,10 @@ class TestScriptSetManager(MAASServerTestCase):
                 expected_scripts,
                 [script_result.name for script_result in script_set],
             )
-            self.assertEqual(RESULT_TYPE.COMMISSIONING, script_set.result_type)
-            self.assertEqual(
+            self.assertEquals(
+                RESULT_TYPE.COMMISSIONING, script_set.result_type
+            )
+            self.assertEquals(
                 node.power_state, script_set.power_state_before_transition
             )
 
@@ -318,8 +320,10 @@ class TestScriptSetManager(MAASServerTestCase):
                 expected_scripts,
                 [script_result.name for script_result in script_set],
             )
-            self.assertEqual(RESULT_TYPE.COMMISSIONING, script_set.result_type)
-            self.assertEqual(
+            self.assertEquals(
+                RESULT_TYPE.COMMISSIONING, script_set.result_type
+            )
+            self.assertEquals(
                 node.power_state, script_set.power_state_before_transition
             )
 
@@ -347,8 +351,8 @@ class TestScriptSetManager(MAASServerTestCase):
             expected_scripts,
             [script_result.name for script_result in script_set],
         )
-        self.assertEqual(RESULT_TYPE.COMMISSIONING, script_set.result_type)
-        self.assertEqual(
+        self.assertEquals(RESULT_TYPE.COMMISSIONING, script_set.result_type)
+        self.assertEquals(
             node.power_state, script_set.power_state_before_transition
         )
 
@@ -384,8 +388,8 @@ class TestScriptSetManager(MAASServerTestCase):
             set(expected_scripts),
             [script_result.name for script_result in script_set],
         )
-        self.assertEqual(RESULT_TYPE.COMMISSIONING, script_set.result_type)
-        self.assertEqual(
+        self.assertEquals(RESULT_TYPE.COMMISSIONING, script_set.result_type)
+        self.assertEquals(
             node.power_state, script_set.power_state_before_transition
         )
 
@@ -653,8 +657,8 @@ class TestScriptSetManager(MAASServerTestCase):
             expected_scripts,
             [script_result.name for script_result in script_set],
         )
-        self.assertEqual(RESULT_TYPE.TESTING, script_set.result_type)
-        self.assertEqual(
+        self.assertEquals(RESULT_TYPE.TESTING, script_set.result_type)
+        self.assertEquals(
             node.power_state, script_set.power_state_before_transition
         )
 
@@ -692,8 +696,8 @@ class TestScriptSetManager(MAASServerTestCase):
             set(expected_scripts),
             [script_result.name for script_result in script_set],
         )
-        self.assertEqual(RESULT_TYPE.TESTING, script_set.result_type)
-        self.assertEqual(
+        self.assertEquals(RESULT_TYPE.TESTING, script_set.result_type)
+        self.assertEquals(
             node.power_state, script_set.power_state_before_transition
         )
 
@@ -925,8 +929,8 @@ class TestScriptSetManager(MAASServerTestCase):
             [CURTIN_INSTALL_LOG],
             [script_result.name for script_result in script_set],
         )
-        self.assertEqual(RESULT_TYPE.INSTALLATION, script_set.result_type)
-        self.assertEqual(
+        self.assertEquals(RESULT_TYPE.INSTALLATION, script_set.result_type)
+        self.assertEquals(
             node.power_state, script_set.power_state_before_transition
         )
 
@@ -1026,7 +1030,7 @@ class TestScriptSet(MAASServerTestCase):
             factory.make_ScriptResult(script_set=script_set) for _ in range(3)
         ]
         script_result = random.choice(script_results)
-        self.assertEqual(
+        self.assertEquals(
             script_result,
             script_set.find_script_result(script_result_id=script_result.id),
         )
@@ -1037,7 +1041,7 @@ class TestScriptSet(MAASServerTestCase):
             factory.make_ScriptResult(script_set=script_set) for _ in range(3)
         ]
         script_result = random.choice(script_results)
-        self.assertEqual(
+        self.assertEquals(
             script_result,
             script_set.find_script_result(script_name=script_result.name),
         )
@@ -1101,7 +1105,7 @@ class TestScriptSet(MAASServerTestCase):
                 )
             if status == SCRIPT_STATUS.TIMEDOUT:
                 status = SCRIPT_STATUS.FAILED
-            self.assertEqual(status, script_set.status)
+            self.assertEquals(status, script_set.status)
 
     def test_status_with_suppressed(self):
         script_set = factory.make_ScriptSet()
@@ -1122,11 +1126,11 @@ class TestScriptSet(MAASServerTestCase):
         factory.make_ScriptResult(
             script_set=script_set, status=SCRIPT_STATUS.SKIPPED
         )
-        self.assertEqual(SCRIPT_STATUS.PASSED, script_set.status)
+        self.assertEquals(SCRIPT_STATUS.PASSED, script_set.status)
 
     def test_empty_scriptset_has_no_status(self):
         script_set = factory.make_ScriptSet()
-        self.assertEqual(-1, script_set.status)
+        self.assertEquals(-1, script_set.status)
 
     def test_started(self):
         script_set = factory.make_ScriptSet()
@@ -1134,7 +1138,7 @@ class TestScriptSet(MAASServerTestCase):
         started = now - timedelta(seconds=random.randint(1, 500))
         factory.make_ScriptResult(script_set=script_set, started=now)
         factory.make_ScriptResult(script_set=script_set, started=started)
-        self.assertEqual(started, script_set.started)
+        self.assertEquals(started, script_set.started)
 
     def test_ended(self):
         script_set = factory.make_ScriptSet()
@@ -1145,7 +1149,7 @@ class TestScriptSet(MAASServerTestCase):
         factory.make_ScriptResult(
             script_set=script_set, status=SCRIPT_STATUS.PASSED, ended=ended
         )
-        self.assertEqual(ended, script_set.ended)
+        self.assertEquals(ended, script_set.ended)
 
     def test_ended_returns_none_when_not_all_results_finished(self):
         script_set = factory.make_ScriptSet()
@@ -1171,14 +1175,14 @@ class TestScriptSet(MAASServerTestCase):
             text_seconds = "0%d" % runtime_seconds
         else:
             text_seconds = "%d" % runtime_seconds
-        self.assertEqual("0:00:%s" % text_seconds, script_set.runtime)
+        self.assertEquals("0:00:%s" % text_seconds, script_set.runtime)
 
     def test_get_runtime_blank_when_missing(self):
         script_set = factory.make_ScriptSet()
         factory.make_ScriptResult(
             script_set=script_set, status=SCRIPT_STATUS.PENDING
         )
-        self.assertEqual("", script_set.runtime)
+        self.assertEquals("", script_set.runtime)
 
     def test_select_for_hardware_scripts_removes_if_not_selected(self):
         script = factory.make_Script(
@@ -1363,11 +1367,11 @@ class TestScriptSet(MAASServerTestCase):
                 "storage": {
                     "type": "storage",
                     "value": {
-                        "id": bd.id,
                         "name": bd.name,
                         "model": bd.model,
                         "serial": bd.serial,
                         "id_path": bd.id_path,
+                        "physical_blockdevice_id": bd.id,
                     },
                 }
             },
@@ -1465,11 +1469,11 @@ class TestScriptSet(MAASServerTestCase):
                 "interface": {
                     "type": "interface",
                     "value": {
-                        "id": interface.id,
                         "name": interface.name,
                         "mac_address": str(interface.mac_address),
                         "vendor": interface.vendor,
                         "product": interface.product,
+                        "interface_id": interface.id,
                     },
                 }
             },
@@ -1535,11 +1539,11 @@ class TestScriptSet(MAASServerTestCase):
                 "interface": {
                     "type": "interface",
                     "value": {
-                        "id": interface.id,
                         "name": interface.name,
                         "mac_address": str(interface.mac_address),
                         "vendor": interface.vendor,
                         "product": interface.product,
+                        "interface_id": interface.id,
                     },
                 },
                 "url": {
@@ -1598,7 +1602,7 @@ class TestScriptSet(MAASServerTestCase):
             name=EVENT_TYPES.SCRIPT_RESULT_ERROR
         )
         event = Event.objects.get(node=node, type_id=event_type.id)
-        self.assertEqual(expected_msg, event.description)
+        self.assertEquals(expected_msg, event.description)
         self.assertThat(mock_logger, MockCalledOnceWith(expected_msg))
 
     def test_delete(self):
@@ -1612,14 +1616,14 @@ class TestScriptSet(MAASServerTestCase):
 
         node = reload_object(node)
         self.assertIsNone(reload_object(script_set))
-        self.assertEqual(
+        self.assertEquals(
             orig_commissioning_script_set,
             node.current_commissioning_script_set,
         )
-        self.assertEqual(
+        self.assertEquals(
             orig_testing_script_set, node.current_testing_script_set
         )
-        self.assertEqual(
+        self.assertEquals(
             orig_installation_script_set, node.current_installation_script_set
         )
 
@@ -1646,6 +1650,6 @@ class TestScriptSet(MAASServerTestCase):
         node.save()
 
         node.current_testing_script_set.delete()
-        self.assertEqual(
+        self.assertEquals(
             previous_script_set, reload_object(node).current_testing_script_set
         )

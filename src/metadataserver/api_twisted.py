@@ -30,10 +30,6 @@ from metadataserver import logger
 from metadataserver.api import add_event_to_node_event_log, process_file
 from metadataserver.enum import SCRIPT_STATUS
 from metadataserver.models import NodeKey
-from metadataserver.vendor_data import (
-    LXD_PASSWORD_METADATA_KEY,
-    VIRSH_PASSWORD_METADATA_KEY,
-)
 from provisioningserver.events import EVENT_STATUS_MESSAGES
 from provisioningserver.logger import LegacyLogger
 from provisioningserver.utils.twisted import deferred
@@ -177,62 +173,38 @@ class StatusHandlerResource(Resource):
 
 
 POD_CREATION_ERROR = (
-    "Internal error while creating VM host. (See regiond.log for details.)"
+    "Internal error while creating KVM pod. (See regiond.log for details.)"
 )
 
 
-def _create_vmhost_for_deployment(node):
-    passwords_meta = list(
-        NodeMetadata.objects.filter(
-            node=node,
-            key__in=(LXD_PASSWORD_METADATA_KEY, VIRSH_PASSWORD_METADATA_KEY),
-        )
-    )
-    if not passwords_meta:
+def _create_pod_for_deployment(node):
+    virsh_password_meta = NodeMetadata.objects.filter(
+        node=node, key="virsh_password"
+    ).first()
+    if virsh_password_meta is None:
         node.mark_failed(
-            comment="Failed to deploy VM host: Password not found.",
-            commit=False,
+            comment="Failed to deploy KVM: Password not found.", commit=False
         )
-        return
-
-    for password_meta in passwords_meta:
-        is_lxd = password_meta.key == LXD_PASSWORD_METADATA_KEY
-        password = password_meta.value
-        password_meta.delete()
-
+    else:
+        virsh_password = virsh_password_meta.value
+        virsh_password_meta.delete()
         # XXX: Should find the best IP to communicate with, given what the rack
         # controller can access, or use the boot interface IP address.
         ip = node.ip_addresses()[0]
         if ":" in ip:
-            ip = f"[{ip}]"
-        name = node.hostname
-        if len(passwords_meta) > 1:
-            # make pod names unique
-            name += "-lxd" if is_lxd else "-virsh"
-
-        form_data = {
-            "name": name,
-            "zone": node.zone.name,
-            "pool": node.pool.name,
-        }
-        if is_lxd:
-            form_data.update(
-                {
-                    "type": "lxd",
-                    "power_address": ip,
-                    "password": password,
-                    "project": "maas",
-                }
-            )
-        else:
-            form_data.update(
-                {
-                    "type": "virsh",
-                    "power_address": f"qemu+ssh://virsh@{ip}/system",
-                    "power_pass": password,
-                }
-            )
-        pod_form = PodForm(data=form_data, user=node.owner)
+            ip = "[%s]" % ip
+        power_address = "qemu+ssh://virsh@%s/system" % ip
+        pod_form = PodForm(
+            data=dict(
+                type="virsh",
+                name=node.hostname,
+                power_address=power_address,
+                power_pass=virsh_password,
+                zone=node.zone.name,
+                pool=node.pool.name,
+            ),
+            user=node.owner,
+        )
         if pod_form.is_valid():
             try:
                 pod_form.save()
@@ -245,19 +217,17 @@ def _create_vmhost_for_deployment(node):
                 # that the node is marked failed/deployed in a seperate
                 # transaction than the one doing the processing.
                 raise
-            except Exception as e:
+            except Exception:
                 node.mark_failed(comment=POD_CREATION_ERROR, commit=False)
-                log.err(None, f"Error saving VM host: {e}")
-                return
+                log.err(None, "Exception while saving pod form.")
+            else:
+                node.status = NODE_STATUS.DEPLOYED
         else:
             node.mark_failed(comment=POD_CREATION_ERROR, commit=False)
-            log.msg("Error while creating VM host: %s" % dict(pod_form.errors))
-            return
-
-    node.status = NODE_STATUS.DEPLOYED
+            log.msg("Error while creating KVM pod: %s" % dict(pod_form.errors))
 
 
-class StatusWorkerService(TimerService):
+class StatusWorkerService(TimerService, object):
     """Service to update nodes from recieved status messages."""
 
     check_interval = 60  # Every second.
@@ -437,9 +407,9 @@ class StatusWorkerService(TimerService):
                 # for the apt configuration. The only reason why we don't
                 # see additional issues because of this is due to the node
                 # already being marked "Deployed". Right now this is prevented
-                # only in the VM host deploy case, but we should make this check
+                # only in the install_kvm case, but we should make this check
                 # more general when time allows.
-                if failed and not (node.install_kvm or node.register_vmhost):
+                if failed and not node.install_kvm:
                     node.mark_failed(
                         comment="Installation failed (refer to the "
                         "installation log for more information).",
@@ -449,11 +419,11 @@ class StatusWorkerService(TimerService):
                 elif (
                     not failed
                     and activity_name == "modules-final"
-                    and (node.install_kvm or node.register_vmhost)
+                    and node.install_kvm
                     and node.agent_name == "maas-kvm-pod"
                 ):
                     save_node = True
-                    _create_vmhost_for_deployment(node)
+                    _create_pod_for_deployment(node)
             elif node.status == NODE_STATUS.DISK_ERASING:
                 if failed:
                     node.mark_failed(

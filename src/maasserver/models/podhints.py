@@ -36,3 +36,9 @@ class PodHints(CleanSave, Model):
     local_storage = BigIntegerField(  # Bytes
         blank=False, null=False, default=0
     )
+
+    local_disks = IntegerField(blank=False, null=False, default=-1)
+
+    iscsi_storage = BigIntegerField(  # Bytes
+        blank=False, null=False, default=-1
+    )

@@ -1,4 +1,4 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2018 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """RPC helpers relating to DHCP."""
@@ -7,6 +7,8 @@ __all__ = [
     "configure",
     "DHCPv4Server",
     "DHCPv6Server",
+    "downgrade_shared_networks",
+    "upgrade_shared_networks",
 ]
 
 from collections import namedtuple
@@ -15,7 +17,7 @@ import os
 import re
 from tempfile import NamedTemporaryFile
 
-from netaddr import AddrConversionError, IPAddress
+from netaddr import IPAddress
 from twisted.internet.defer import inlineCallbacks, maybeDeferred
 from twisted.internet.threads import deferToThread
 
@@ -36,6 +38,7 @@ from provisioningserver.utils.service_monitor import (
     ServiceActionError,
 )
 from provisioningserver.utils.shell import call_and_check, ExternalProcessError
+from provisioningserver.utils.text import split_string_list
 from provisioningserver.utils.twisted import asynchronous, synchronous
 
 maaslog = get_maas_logger("dhcp")
@@ -88,7 +91,7 @@ class DHCPState(DHCPStateBase):
             global_dhcp_snippets=global_dhcp_snippets,
         )
 
-    def requires_restart(self, other_state, is_dhcpv6_server=False):
+    def requires_restart(self, other_state):
         """Return True when this state differs from `other_state` enough to
         require a restart."""
 
@@ -99,26 +102,12 @@ class DHCPState(DHCPStateBase):
                     hosts_dhcp_snippets.append(dhcp_snippet)
             return sorted(hosts_dhcp_snippets, key=itemgetter("name"))
 
-        def ipv6_hosts_require_restart(hosts):
-            if is_dhcpv6_server:  # dhcpv4 can still manage ipv6 subnets
-                return False
-
-            for host in hosts.values():
-                ip = host.get("ip")
-                if ip is not None:
-                    try:
-                        IPAddress(ip).ipv4()
-                    except AddrConversionError:
-                        return True
-            return False
-
         # Currently the OMAPI doesn't allow you to add or remove arbitrary
         # config options. So gather a list of DHCP snippets from
         hosts_dhcp_snippets = gather_hosts_dhcp_snippets(self.hosts)
         other_hosts_dhcp_snippets = gather_hosts_dhcp_snippets(
             other_state.hosts
         )
-
         return (
             self.omapi_key != other_state.omapi_key
             or self.failover_peers != other_state.failover_peers
@@ -126,8 +115,6 @@ class DHCPState(DHCPStateBase):
             or self.interfaces != other_state.interfaces
             or self.global_dhcp_snippets != other_state.global_dhcp_snippets
             or hosts_dhcp_snippets != other_hosts_dhcp_snippets
-            or ipv6_hosts_require_restart(self.hosts)
-            or ipv6_hosts_require_restart(other_state.hosts)
         )
 
     def host_diff(self, other_state):
@@ -359,9 +346,7 @@ def configure(
                 service_monitor.restartService,
                 server.dhcp_service,
             )
-        elif new_state.requires_restart(
-            current_state, is_dhcpv6_server=server.ipv6
-        ):
+        elif new_state.requires_restart(current_state):
             log.debug(
                 "Restarting {name} service; configuration change requires "
                 "full restart.",
@@ -536,3 +521,34 @@ def validate(
         except ExternalProcessError as e:
             return _parse_dhcpd_errors(e.output_as_unicode)
     return None
+
+
+def upgrade_shared_networks(shared_networks):
+    """Update the `shared_networks` structure to match the V2 calls.
+
+    Mutates `shared_networks` in place.
+    """
+    for shared_network in shared_networks:
+        for subnet in shared_network["subnets"]:
+            dns_servers = subnet["dns_servers"]
+            if isinstance(dns_servers, str):
+                dns_servers = map(IPAddress, split_string_list(dns_servers))
+                subnet["dns_servers"] = list(dns_servers)
+            if "ntp_server" in subnet:  # Note singular.
+                ntp_servers = split_string_list(subnet.pop("ntp_server"))
+                subnet["ntp_servers"] = list(ntp_servers)
+
+
+def downgrade_shared_networks(shared_networks):
+    """Downgrade the `shared_networks` structure to match the V1 calls.
+
+    Mutates `shared_networks` in place.
+    """
+    for shared_network in shared_networks:
+        shared_network.pop("interface", None)
+        for subnet in shared_network["subnets"]:
+            dns_servers = subnet["dns_servers"]
+            if not isinstance(dns_servers, str):
+                subnet["dns_servers"] = ", ".join(map(str, dns_servers))
+            if "ntp_servers" in subnet:
+                subnet["ntp_server"] = ", ".join(subnet.pop("ntp_servers"))

@@ -69,6 +69,7 @@ from maasserver.preseed import (
     PreseedTemplate,
     render_enlistment_preseed,
     render_preseed,
+    split_subarch,
     TemplateNotFoundError,
 )
 from maasserver.rpc.testing.mixins import PreseedRPCMixin
@@ -111,6 +112,16 @@ class BootImageHelperMixin:
         ]
 
 
+class TestSplitSubArch(MAASServerTestCase):
+    """Tests for `split_subarch`."""
+
+    def test_split_subarch_returns_list(self):
+        self.assertEqual(["amd64"], split_subarch("amd64"))
+
+    def test_split_subarch_splits_sub_architecture(self):
+        self.assertEqual(["amd64", "test"], split_subarch("amd64/test"))
+
+
 class TestGetNetlocAndPath(MAASServerTestCase):
     """Tests for `get_netloc_and_path`."""
 
@@ -138,7 +149,7 @@ class TestGetPreseedFilenames(MAASServerTestCase):
         osystem = factory.make_string()
         release = factory.make_string()
         node = factory.make_Node(hostname=hostname)
-        arch, subarch = node.split_arch()
+        arch, subarch = node.architecture.split("/")
         self.assertSequenceEqual(
             [
                 "%s_%s_%s_%s_%s_%s"
@@ -175,7 +186,7 @@ class TestGetPreseedFilenames(MAASServerTestCase):
         osystem = factory.make_string()
         release = factory.make_string()
         node = factory.make_Node(hostname=hostname)
-        arch, subarch = node.split_arch()
+        arch, subarch = node.architecture.split("/")
         self.assertSequenceEqual(
             [
                 "%s_%s_%s_%s_%s" % (osystem, arch, subarch, release, hostname),
@@ -224,7 +235,7 @@ class TestGetPreseedFilenames(MAASServerTestCase):
         osystem = UbuntuOS().name
         release = factory.make_string()
         node = factory.make_Node(hostname=hostname)
-        arch, subarch = node.split_arch()
+        arch, subarch = node.architecture.split("/")
         self.assertSequenceEqual(
             [
                 "%s_%s_%s_%s_%s" % (osystem, arch, subarch, release, hostname),
@@ -247,7 +258,7 @@ class TestGetPreseedFilenames(MAASServerTestCase):
         osystem = UbuntuOS().name
         release = factory.make_string()
         node = factory.make_Node(hostname=hostname)
-        arch, subarch = node.split_arch()
+        arch, subarch = node.architecture.split("/")
         prefix = factory.make_string()
         self.assertSequenceEqual(
             [
@@ -461,7 +472,7 @@ class TestPreseedContext(MAASServerTestCase):
         remote_syslog = "192.168.1.1:514"
         Config.objects.set_config("remote_syslog", remote_syslog)
         context = get_preseed_context(make_HttpRequest())
-        self.assertEqual(remote_syslog, context["syslog_host_port"])
+        self.assertEquals(remote_syslog, context["syslog_host_port"])
 
     def test_get_preseed_context_uses_maas_syslog_port(self):
         syslog_port = factory.pick_port()
@@ -790,7 +801,7 @@ class TestComposeCurtinCloudConfig(MAASServerTestCase):
                 }
             }
         }
-        snap_config = {"snap": {"email": node.owner.email}}
+        snappy_config = {"snappy": {"email": node.owner.email}}
         reporting_config = {
             "reporting": {
                 "maas": {
@@ -822,7 +833,7 @@ class TestComposeCurtinCloudConfig(MAASServerTestCase):
             yaml.safe_load(
                 config["cloudconfig"]["maas-ubuntu-sso"]["content"]
             ),
-            Equals(snap_config),
+            Equals(snappy_config),
         )
         self.assertThat(
             config["cloudconfig"]["maas-reporting"]["content"],
@@ -1169,7 +1180,7 @@ class TestGetCurtinUserDataOS(
         node = factory.make_Node_with_Interface_on_Subnet(
             primary_rack=self.rpc_rack_controller, osystem=self.os_name
         )
-        arch, subarch = node.split_arch()
+        arch, subarch = node.architecture.split("/")
         self.configure_get_boot_images_for_node(node, "xinstall")
         user_data = get_curtin_userdata(make_HttpRequest(), node)
 

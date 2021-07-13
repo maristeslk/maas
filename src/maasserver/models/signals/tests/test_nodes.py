@@ -17,7 +17,7 @@ from maasserver.enum import (
     POWER_STATE,
     POWER_STATE_CHOICES,
 )
-from maasserver.models import Node, RackController, StaticIPAddress
+from maasserver.models import Node, StaticIPAddress
 from maasserver.models.service import RACK_SERVICES, REGION_SERVICES, Service
 from maasserver.models.signals import power
 from maasserver.node_status import NODE_TRANSITIONS
@@ -36,7 +36,7 @@ class TestNodeDeletion(MAASServerTestCase):
         events = [factory.make_Event(node=node) for _ in range(3)]
         node.delete()
         for event in events:
-            self.assertEqual(event.node_hostname, node_hostname)
+            self.assertEquals(event.node_hostname, node_hostname)
 
     def test_deleting_node_sets_node_to_null(self):
         node = factory.make_Node()
@@ -87,7 +87,7 @@ class TestNodePreviousStatus(MAASServerTestCase):
         )
         node.status = random.choice(NODE_TRANSITIONS[node.status])
         node.save()
-        self.assertEqual(previous_status, node.previous_status)
+        self.assertEquals(previous_status, node.previous_status)
 
 
 class TestNodeClearsOwnerNEWOrREADYStatus(MAASServerTestCase):
@@ -217,13 +217,6 @@ class TestNodeCreateServices(MAASServerTestCase):
 class TestNodeDefaultNUMANode(MAASServerTestCase):
     def test_create_node_creates_default_numanode(self):
         node = Node()
-        node.save()
-        [numanode] = node.numanode_set.all()
-        self.assertIs(numanode.node, node)
-        self.assertEqual(numanode.index, 0)
-
-    def test_create_node_creates_default_numanode_controller(self):
-        node = RackController()
         node.save()
         [numanode] = node.numanode_set.all()
         self.assertIs(numanode.node, node)

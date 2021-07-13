@@ -96,32 +96,32 @@ def _render_ntp_maas_conf(servers, peers, offset):
         orphan mode (https://chrony.tuxfamily.org/doc/3.2/chrony.conf.html).
     """
     lines = [
-        "# MAAS NTP configuration.",
+        "# MAAS NTP configuration. == apt chrony.conf",
         # LP: #1789872 - Use hardware timestamps (on interfaces where it is
         # available).
-        "hwtimestamp *",
+        #"hwtimestamp *",
     ]
     servers = map(normalise_address, servers)
     lines.extend(
-        "%s %s iburst"
+        "%s %s iburst maxdelay 0.5 prefer minpoll 4 maxpoll 9 polltarget 16 maxdelayratio 2 maxdelaydevratio 2"
         % (("server" if isinstance(server, IPAddress) else "pool"), server)
         for server in servers
     )
     peers = map(normalise_address, peers)
     # Note: `xleave` is needed here in order to take advantage of the increased
     # accuracy that comes with enabling hardware timestamps.
-    lines.extend("peer %s xleave" % peer for peer in peers)
+    #lines.extend("peer %s xleave" % peer for peer in peers)
     # Chrony provides a special 'orphan' mode that is compatible
     # with ntpd's 'tos orphan' mode. (see
     # https://chrony.tuxfamily.org/doc/devel/chrony.conf.html)
-    lines.append("local stratum {:d} orphan".format(offset + 8))
+    #lines.append("local stratum {:d} orphan".format(offset + 8))
     # Chrony requires 'allow' option to specify which client IPs
     # or Networks can use it as a time source. For now, allow all
     # clients to be compatible to 'ntpd'. In the future, it would
     # be nice to limit this similarly to how we do proxy. (see
     # https://chrony.tuxfamily.org/doc/3.2/chrony.conf.html)
-    lines.append("allow")
-    lines.append("")  # Add newline at end.
+    #lines.append("allow")
+    #lines.append("")  # Add newline at end.
     return "\n".join(lines)
 
 

@@ -1,4 +1,4 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2019 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Tests for `BlockDevice`."""
@@ -15,12 +15,14 @@ from testtools.matchers import Equals
 from maasserver.enum import FILESYSTEM_GROUP_TYPE, FILESYSTEM_TYPE
 from maasserver.models import (
     FilesystemGroup,
+    ISCSIBlockDevice,
     PhysicalBlockDevice,
     VirtualBlockDevice,
     VolumeGroup,
 )
 from maasserver.models import BlockDevice
 from maasserver.models import blockdevice as blockdevice_module
+from maasserver.models.iscsiblockdevice import validate_iscsi_target
 from maasserver.models.partition import PARTITION_ALIGNMENT_SIZE
 from maasserver.permissions import NodePermission
 from maasserver.testing.factory import factory
@@ -28,6 +30,15 @@ from maasserver.testing.testcase import MAASServerTestCase
 from maasserver.utils.orm import reload_object
 from maastesting.matchers import MockCalledWith
 from maastesting.testcase import MAASTestCase
+
+
+class TestValidateISCSITarget(MAASTestCase):
+    """Tests for the `validate_iscsi_target`."""
+
+    def test_raises_no_errors_with_iscsi_prefix(self):
+        host = factory.make_ipv4_address()
+        target_name = factory.make_name("target")
+        validate_iscsi_target("iscsi:%s::::%s" % (host, target_name))
 
 
 class TestBlockDeviceManagerGetBlockDeviceOr404(MAASServerTestCase):
@@ -329,6 +340,10 @@ class TestBlockDevice(MAASServerTestCase):
             "/dev/disk/by-dname/%s" % block_device.name, block_device.path
         )
 
+    def test_type_iscsi(self):
+        block_device = factory.make_ISCSIBlockDevice()
+        self.assertEqual("iscsi", block_device.type)
+
     def test_type_physical(self):
         block_device = factory.make_PhysicalBlockDevice()
         self.assertEqual("physical", block_device.type)
@@ -341,6 +356,11 @@ class TestBlockDevice(MAASServerTestCase):
         block_device = factory.make_BlockDevice()
         with ExpectedException(ValueError):
             block_device.type
+
+    def test_actual_instance_returns_ISCSIBlockDevice(self):
+        block_device = factory.make_ISCSIBlockDevice()
+        parent_type = BlockDevice.objects.get(id=block_device.id)
+        self.assertIsInstance(parent_type.actual_instance, ISCSIBlockDevice)
 
     def test_actual_instance_returns_PhysicalBlockDevice(self):
         block_device = factory.make_PhysicalBlockDevice()
@@ -409,19 +429,8 @@ class TestBlockDevice(MAASServerTestCase):
     def test_remove_tag_doesnt_error_on_missing_tag(self):
         block_device = BlockDevice()
         tag = factory.make_name("tag")
-        # Test is this doesn't raise an exception
+        #: Test is this doesn't raise an exception
         block_device.remove_tag(tag)
-
-    def test_serialize(self):
-        block_device = factory.make_BlockDevice()
-        self.assertEqual(
-            {
-                "id": block_device.id,
-                "name": block_device.name,
-                "id_path": block_device.id_path,
-            },
-            block_device.serialize(),
-        )
 
     def test_negative_size(self):
         node = factory.make_Node()
@@ -495,7 +504,7 @@ class TestBlockDevice(MAASServerTestCase):
 
     def test_create_partition_if_boot_disk_creates_partition(self):
         node = factory.make_Node(with_boot_disk=False)
-        boot_disk = factory.make_PhysicalBlockDevice(node=node, bootable=True)
+        boot_disk = factory.make_PhysicalBlockDevice(node=node)
         partition = boot_disk.create_partition_if_boot_disk()
         self.assertIsNotNone(partition)
         available_size = boot_disk.get_available_size()

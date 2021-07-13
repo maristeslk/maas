@@ -97,15 +97,6 @@ class DomainManager(Manager, DomainQueriesMixin):
 
         return GlobalDefault.objects.instance().domain
 
-    def get_forward_domains(self):
-        rows = self.raw(
-            """SELECT * FROM maasserver_domain domain
-            WHERE EXISTS (
-                SELECT id FROM maasserver_forwarddnsserver_domains WHERE domain_id = domain.id
-            );"""
-        )
-        return list(rows)
-
     def get_or_create_default_domain(self):
         """Return the default domain."""
         now = datetime.datetime.now()
@@ -249,13 +240,6 @@ class Domain(CleanSave, TimestampedModel):
             count += len(resource.dnsdata_set.all())
         return count
 
-    @property
-    def forward_dns_servers(self):
-        # avoid circular import
-        from maasserver.models.forwarddnsserver import ForwardDNSServer
-
-        return ForwardDNSServer.objects.filter(domains=self)
-
     def add_delegations(self, mapping, ns_host_name, dns_ip_list, default_ttl):
         """Find any subdomains that need to be added to this domain, and add
         them.
@@ -382,17 +366,9 @@ class Domain(CleanSave, TimestampedModel):
         if self.name is not None and self.name.endswith("."):
             self.name = self.name[:-1]
 
-    def validate_authority(self):
-        if self.authoritative and len(self.forward_dns_servers) > 0:
-            raise ValidationError(
-                "A Domain cannot be both authoritative and have"
-                "forward DNS servers"
-            )
-
     def clean(self, *args, **kwargs):
         super().clean(*args, **kwargs)
         self.clean_name()
-        self.validate_authority()
 
     def render_json_for_related_rrdata(
         self, for_list=False, include_dnsdata=True, as_dict=False, user=None

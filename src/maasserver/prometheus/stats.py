@@ -5,16 +5,17 @@
 
 
 from datetime import timedelta
+import json
 
 from django.http import HttpResponse, HttpResponseNotFound
 from twisted.application.internet import TimerService
 
 from maasserver.models import Config
 from maasserver.stats import (
+    get_kvm_pods_stats,
     get_maas_stats,
     get_machines_by_architecture,
     get_subnets_utilisation_stats,
-    get_vm_hosts_stats,
 )
 from maasserver.utils.orm import transactional
 from maasserver.utils.threads import deferToDatabase
@@ -113,8 +114,6 @@ STATS_DEFINITIONS = [
     ),
 ]
 
-_METRICS = {}
-
 
 def prometheus_stats_handler(request):
     configs = Config.objects.get_configs(["prometheus_enabled", "uuid"])
@@ -122,25 +121,22 @@ def prometheus_stats_handler(request):
     if not have_prometheus:
         return HttpResponseNotFound()
 
-    global _METRICS
-    if not _METRICS:
-        _METRICS = create_metrics(
-            STATS_DEFINITIONS,
-            extra_labels={"maas_id": configs["uuid"]},
-            update_handlers=[update_prometheus_stats],
-            registry=prom_cli.CollectorRegistry(),
-        )
-
+    metrics = create_metrics(
+        STATS_DEFINITIONS,
+        extra_labels={"maas_id": configs["uuid"]},
+        update_handlers=[update_prometheus_stats],
+        registry=prom_cli.CollectorRegistry(),
+    )
     return HttpResponse(
-        content=_METRICS.generate_latest(), content_type="text/plain"
+        content=metrics.generate_latest(), content_type="text/plain"
     )
 
 
 def update_prometheus_stats(metrics: PrometheusMetrics):
     """Update metrics in a PrometheusMetrics based on database values."""
-    stats = get_maas_stats()
+    stats = json.loads(get_maas_stats())
     architectures = get_machines_by_architecture()
-    vm_hosts = get_vm_hosts_stats()
+    pods = get_kvm_pods_stats()
 
     # Gather counter for machines per status
     for status, machines in stats["machine_status"].items():
@@ -166,31 +162,31 @@ def update_prometheus_stats(metrics: PrometheusMetrics):
     for resource, value in stats["machine_stats"].items():
         metrics.update("maas_machines_{}".format(resource), "set", value=value)
 
-    # Gather all stats for vm_hosts
-    metrics.update("maas_kvm_pods", "set", value=vm_hosts["vm_hosts"])
-    metrics.update("maas_kvm_machines", "set", value=vm_hosts["vms"])
+    # Gather all stats for pods
+    metrics.update("maas_kvm_pods", "set", value=pods["kvm_pods"])
+    metrics.update("maas_kvm_machines", "set", value=pods["kvm_machines"])
     for metric in ("cores", "memory", "storage"):
         metrics.update(
             "maas_kvm_{}".format(metric),
             "set",
-            value=vm_hosts["available_resources"][metric],
+            value=pods["kvm_available_resources"][metric],
             labels={"status": "available"},
         )
         metrics.update(
             "maas_kvm_{}".format(metric),
             "set",
-            value=vm_hosts["utilized_resources"][metric],
+            value=pods["kvm_utilized_resources"][metric],
             labels={"status": "used"},
         )
     metrics.update(
         "maas_kvm_overcommit_cores",
         "set",
-        value=vm_hosts["available_resources"]["over_cores"],
+        value=pods["kvm_available_resources"]["over_cores"],
     )
     metrics.update(
         "maas_kvm_overcommit_memory",
         "set",
-        value=vm_hosts["available_resources"]["over_memory"],
+        value=pods["kvm_available_resources"]["over_memory"],
     )
 
     # Gather statistics for architectures
@@ -246,7 +242,7 @@ def push_stats_to_prometheus(maas_name, push_gateway):
 PROMETHEUS_SERVICE_PERIOD = timedelta(minutes=60)
 
 
-class PrometheusService(TimerService):
+class PrometheusService(TimerService, object):
     """Service to periodically push stats to Prometheus
 
     This will run immediately when it's started, by default, it will run

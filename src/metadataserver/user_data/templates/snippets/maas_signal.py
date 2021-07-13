@@ -3,14 +3,14 @@
 import os
 import sys
 
-from maas_api_helper import Config, MD_VERSION, signal, SignalException
+from maas_api_helper import MD_VERSION, read_config, signal, SignalException
 
 VALID_STATUS = ("OK", "FAILED", "WORKING", "TESTING", "COMMISSIONING")
 POWER_TYPES = ("ipmi", "virsh", "manual", "moonshot", "wedge")
 
 
-def fail(msg_or_exc):
-    sys.stderr.write("FAIL: %s" % msg_or_exc)
+def fail(msg):
+    sys.stderr.write("FAIL: %s" % msg)
     sys.exit(1)
 
 
@@ -119,21 +119,18 @@ def main():
 
     args = parser.parse_args()
 
-    config = Config()
-    config.update(
-        {
-            "consumer_key": args.ckey,
-            "token_key": args.tkey,
-            "token_secret": args.tsec,
-            "consumer_secret": args.csec,
-            "metadata_url": args.url,
-        }
-    )
+    creds = {
+        "consumer_key": args.ckey,
+        "token_key": args.tkey,
+        "token_secret": args.tsec,
+        "consumer_secret": args.csec,
+        "metadata_url": args.url,
+    }
 
     if args.config:
-        config.update_from_url(args.config)
+        read_config(args.config, creds)
 
-    url = config.metadata_url
+    url = creds.get("metadata_url")
     if url is None:
         fail("URL must be provided either in --url or in config\n")
     url = "%s/%s/" % (url, args.apiver)
@@ -145,7 +142,7 @@ def main():
     try:
         signal(
             url,
-            config.credentials,
+            creds,
             args.status,
             args.error,
             args.script_name,
@@ -158,7 +155,7 @@ def main():
             args.power_params,
         )
     except SignalException as e:
-        fail(str(e))
+        fail(e.error)
 
 
 if __name__ == "__main__":

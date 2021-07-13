@@ -1,4 +1,4 @@
-# Copyright 2017-2020 Canonical Ltd.  This software is licensed under the
+# Copyright 2017-2019 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 __all__ = [
@@ -63,16 +63,7 @@ def translate_hardware_type(hardware_type):
             if ret == hardware_type_id:
                 return ret
         raise ValidationError("Invalid hardware type numeric value.")
-
-    hardware_type = hardware_type.lower()
-
-    if hardware_type in [
-        "node",
-        "machine",
-        "controller",
-        "other",
-        "generic",
-    ]:
+    elif hardware_type in ["node", "machine", "controller", "other"]:
         return HARDWARE_TYPE.NODE
     elif hardware_type in ["cpu", "processor"]:
         return HARDWARE_TYPE.CPU
@@ -82,11 +73,9 @@ def translate_hardware_type(hardware_type):
         return HARDWARE_TYPE.STORAGE
     elif hardware_type in ["network", "net", "interface"]:
         return HARDWARE_TYPE.NETWORK
-    elif hardware_type in ["gpu", "graphics"]:
-        return HARDWARE_TYPE.GPU
     else:
         raise ValidationError(
-            "Hardware type must be node, cpu, memory, storage, or gpu"
+            "Hardware type must be node, cpu, memory, or storage"
         )
 
 

@@ -18,7 +18,7 @@ from provisioningserver.utils import load_template, locate_config
 from provisioningserver.utils.fs import atomic_write
 from provisioningserver.utils.isc import read_isc_file
 from provisioningserver.utils.shell import call_and_check
-from provisioningserver.utils.snap import running_in_snap
+from provisioningserver.utils.snappy import running_in_snap
 
 maaslog = get_maas_logger("dns")
 NAMED_CONF_OPTIONS = "named.conf.options"
@@ -289,13 +289,10 @@ class DNSConfig:
     template_file_name = "named.conf.template"
     target_file_name = MAAS_NAMED_CONF_NAME
 
-    def __init__(self, zones=None, forwarded_zones=None):
+    def __init__(self, zones=None):
         if zones is None:
             zones = ()
-        if forwarded_zones is None:
-            forwarded_zones = ()
         self.zones = zones
-        self.forwarded_zones = forwarded_zones
 
     def write_config(self, overwrite=True, **kwargs):
         """Write out this DNS config file.
@@ -306,7 +303,6 @@ class DNSConfig:
         trusted_networks = kwargs.pop("trusted_networks", "")
         context = {
             "zones": self.zones,
-            "forwarded_zones": self.forwarded_zones,
             "DNS_CONFIG_DIR": get_dns_config_dir(),
             "named_rndc_conf_path": get_named_rndc_conf_path(),
             "trusted_networks": trusted_networks,

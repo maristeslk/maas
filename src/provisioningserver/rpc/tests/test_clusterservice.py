@@ -1,5 +1,8 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
+
+"""Tests for the cluster's RPC implementation."""
+
 
 from hashlib import sha256
 from hmac import HMAC
@@ -70,7 +73,9 @@ from provisioningserver.dhcp.testing.config import (
     make_host,
     make_interface,
     make_shared_network,
+    make_shared_network_v1,
 )
+from provisioningserver.drivers.nos.registry import NOSDriverRegistry
 from provisioningserver.drivers.osystem import (
     OperatingSystem,
     OperatingSystemRegistry,
@@ -79,7 +84,6 @@ from provisioningserver.drivers.pod import (
     DiscoveredMachine,
     DiscoveredPod,
     DiscoveredPodHints,
-    DiscoveredPodProject,
     RequestedMachine,
     RequestedMachineBlockDevice,
     RequestedMachineInterface,
@@ -122,12 +126,13 @@ from provisioningserver.service_monitor import service_monitor
 from provisioningserver.testing.config import ClusterConfigurationFixture
 from provisioningserver.utils.env import set_maas_id
 from provisioningserver.utils.fs import get_maas_common_command, NamedLock
+from provisioningserver.utils.network import get_all_interfaces_definition
 from provisioningserver.utils.shell import ExternalProcessError
 from provisioningserver.utils.twisted import (
     makeDeferredWithProcessProtocol,
     pause,
 )
-from provisioningserver.utils.version import get_running_version
+from provisioningserver.utils.version import get_maas_version
 
 
 class TestClusterProtocol_Identify(MAASTestCase):
@@ -207,15 +212,18 @@ class TestClusterProtocol_StartTLS(MAASTestCase):
         return d.addCallback(check)
 
 
-class TestClusterProtocol_ListBootImages(MAASTestCase):
+class TestClusterProtocol_ListBootImages_and_ListBootImagesV2(MAASTestCase):
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
 
+    scenarios = (
+        ("ListBootImages", {"rpc_call": cluster.ListBootImages}),
+        ("ListBootImagesV2", {"rpc_call": cluster.ListBootImagesV2}),
+    )
+
     def test_list_boot_images_is_registered(self):
         protocol = Cluster()
-        responder = protocol.locateResponder(
-            cluster.ListBootImages.commandName
-        )
+        responder = protocol.locateResponder(self.rpc_call.commandName)
         self.assertIsNotNone(responder)
 
     @inlineCallbacks
@@ -225,7 +233,7 @@ class TestClusterProtocol_ListBootImages(MAASTestCase):
         list_boot_images = self.patch(tftppath, "list_boot_images")
         list_boot_images.return_value = []
 
-        response = yield call_responder(Cluster(), cluster.ListBootImages, {})
+        response = yield call_responder(Cluster(), self.rpc_call, {})
 
         self.assertEqual({"images": []}, response)
 
@@ -283,7 +291,7 @@ class TestClusterProtocol_ListBootImages(MAASTestCase):
                 expected_image["xinstall_path"] = ""
                 expected_image["xinstall_type"] = ""
 
-        response = yield call_responder(Cluster(), cluster.ListBootImages, {})
+        response = yield call_responder(Cluster(), self.rpc_call, {})
 
         self.assertThat(response, KeysEqual("images"))
         self.assertItemsEqual(expected_images, response["images"])
@@ -439,6 +447,30 @@ class TestClusterProtocol_DescribePowerTypes(MAASTestCase):
         self.assertItemsEqual(
             PowerDriverRegistry.get_schema(detect_missing_packages=False),
             response["power_types"],
+        )
+
+
+class TestClusterProtocol_DescribeNOSTypes(MAASTestCase):
+
+    run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
+
+    def test_describe_nos_types_is_registered(self):
+        protocol = Cluster()
+        responder = protocol.locateResponder(
+            cluster.DescribeNOSTypes.commandName
+        )
+        self.assertIsNotNone(responder)
+
+    @inlineCallbacks
+    def test_describe_nos_types_returns_jsonized_schema(self):
+
+        response = yield call_responder(
+            Cluster(), cluster.DescribeNOSTypes, {}
+        )
+
+        self.assertThat(response, KeysEqual("nos_types"))
+        self.assertItemsEqual(
+            NOSDriverRegistry.get_schema(), response["nos_types"]
         )
 
 
@@ -937,7 +969,7 @@ class TestClusterClientService(MAASTestCase):
         self.assertItemsEqual(
             _make_connection_expected, _make_connection.call_args_list
         )
-        self.assertEqual(
+        self.assertEquals(
             {
                 "host1:pid=1001": mock_client,
                 "host1:pid=2002": mock_client,
@@ -1196,7 +1228,7 @@ class TestClusterClientService(MAASTestCase):
         connection = Mock()
         service.connections[endpoint] = connection
         service.remove_connection(endpoint, connection)
-        self.assertEqual(service.step, service.INTERVAL_LOW)
+        self.assertEquals(service.step, service.INTERVAL_LOW)
 
     def test_remove_connection_stops_both_dhcpd_and_dhcpd6(self):
         service = make_inert_client_service()
@@ -1405,9 +1437,6 @@ class TestClusterClient(MAASTestCase):
                 cluster_uuid=factory.make_UUID(),
             )
         )
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
         self.maas_id = None
 
         def set_maas_id(maas_id):
@@ -1877,6 +1906,7 @@ class TestClusterClient(MAASTestCase):
 
         maas_url = factory.make_simple_http_url()
         hostname = platform.node().split(".")[0]
+        interfaces = get_all_interfaces_definition()
         self.useFixture(ClusterConfigurationFixture())
         fixture = self.useFixture(MockLiveClusterToRegionRPCFixture(maas_url))
         protocol, connecting = fixture.makeEventLoop()
@@ -1888,11 +1918,11 @@ class TestClusterClient(MAASTestCase):
                 protocol,
                 system_id="",
                 hostname=hostname,
-                interfaces={},
+                interfaces=interfaces,
                 url=urlparse(maas_url),
                 nodegroup_uuid=None,
                 beacon_support=True,
-                version=str(get_running_version()),
+                version=get_maas_version(),
             ),
         )
         # Clear cache for the next test
@@ -1959,6 +1989,7 @@ class TestClusterClient(MAASTestCase):
         self.patch_autospec(
             clusterservice, "gethostname"
         ).return_value = hostname
+        interfaces = get_all_interfaces_definition()
         self.useFixture(ClusterConfigurationFixture())
         fixture = self.useFixture(MockLiveClusterToRegionRPCFixture(maas_url))
         protocol, connecting = fixture.makeEventLoop()
@@ -1970,11 +2001,11 @@ class TestClusterClient(MAASTestCase):
                 protocol,
                 system_id="",
                 hostname=hostname,
-                interfaces={},
+                interfaces=interfaces,
                 url=urlparse(maas_url),
                 nodegroup_uuid=None,
                 beacon_support=True,
-                version=str(get_running_version()),
+                version=get_maas_version(),
             ),
         )
 
@@ -2524,120 +2555,6 @@ class TestClusterProtocol_PowerQuery(MAASTestCase):
         )
 
 
-class TestClusterProtocol_SetBootOrder(MAASTestCase):
-
-    run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
-
-    def test_is_registered(self):
-        protocol = Cluster()
-        responder = protocol.locateResponder(cluster.SetBootOrder.commandName)
-        self.assertIsNotNone(responder)
-
-    @inlineCallbacks
-    def test_set_boot_order(self):
-        mock_get_item = self.patch(PowerDriverRegistry, "get_item")
-        mock_get_item.return_value.can_set_boot_order = True
-        mock_get_item.return_value.set_boot_order.return_value = succeed(None)
-        system_id = factory.make_name("system_id")
-        context = factory.make_name("context")
-        order = [
-            {
-                "id": random.randint(0, 100),
-                "name": factory.make_name("name"),
-                "mac_address": factory.make_mac_address(),
-                "vendor": factory.make_name("vendor"),
-                "product": factory.make_name("product"),
-                "id_path": factory.make_name("id_path"),
-                "model": factory.make_name("model"),
-                "serial": factory.make_name("serial"),
-            }
-            for _ in range(3)
-        ]
-
-        yield call_responder(
-            Cluster(),
-            cluster.SetBootOrder,
-            {
-                "system_id": system_id,
-                "hostname": factory.make_name("hostname"),
-                "power_type": factory.make_name("power_type"),
-                "context": context,
-                "order": order,
-            },
-        )
-
-        mock_get_item.return_value.set_boot_order.assert_called_once_with(
-            system_id, context, order
-        )
-
-    @inlineCallbacks
-    def test_set_boot_order_unknown_power_typer(self):
-        mock_get_item = self.patch(PowerDriverRegistry, "get_item")
-        mock_get_item.return_value = None
-        system_id = factory.make_name("system_id")
-        context = factory.make_name("context")
-        order = [
-            {
-                "id": random.randint(0, 100),
-                "name": factory.make_name("name"),
-                "mac_address": factory.make_mac_address(),
-                "vendor": factory.make_name("vendor"),
-                "product": factory.make_name("product"),
-                "id_path": factory.make_name("id_path"),
-                "model": factory.make_name("model"),
-                "serial": factory.make_name("serial"),
-            }
-            for _ in range(3)
-        ]
-
-        with ExpectedException(exceptions.UnknownPowerType):
-            yield call_responder(
-                Cluster(),
-                cluster.SetBootOrder,
-                {
-                    "system_id": system_id,
-                    "hostname": factory.make_name("hostname"),
-                    "power_type": factory.make_name("power_type"),
-                    "context": context,
-                    "order": order,
-                },
-            )
-
-    @inlineCallbacks
-    def test_set_boot_order_unsupported(self):
-        mock_get_item = self.patch(PowerDriverRegistry, "get_item")
-        mock_get_item.return_value.can_set_boot_order = False
-        system_id = factory.make_name("system_id")
-        context = factory.make_name("context")
-        order = [
-            {
-                "id": random.randint(0, 100),
-                "name": factory.make_name("name"),
-                "mac_address": factory.make_mac_address(),
-                "vendor": factory.make_name("vendor"),
-                "product": factory.make_name("product"),
-                "id_path": factory.make_name("id_path"),
-                "model": factory.make_name("model"),
-                "serial": factory.make_name("serial"),
-            }
-            for _ in range(3)
-        ]
-
-        yield call_responder(
-            Cluster(),
-            cluster.SetBootOrder,
-            {
-                "system_id": system_id,
-                "hostname": factory.make_name("hostname"),
-                "power_type": factory.make_name("power_type"),
-                "context": context,
-                "order": order,
-            },
-        )
-
-        mock_get_item.return_value.set_boot_order.assert_not_called()
-
-
 class TestClusterProtocol_ConfigureDHCP(MAASTestCase):
 
     scenarios = (
@@ -2646,6 +2563,17 @@ class TestClusterProtocol_ConfigureDHCP(MAASTestCase):
             {
                 "dhcp_server": (dhcp, "DHCPv4Server"),
                 "command": cluster.ConfigureDHCPv4,
+                "make_network": factory.make_ipv4_network,
+                "make_shared_network": make_shared_network_v1,
+                "make_shared_network_kwargs": {},
+                "concurrency_lock": concurrency.dhcpv4,
+            },
+        ),
+        (
+            "DHCPv4,V2",
+            {
+                "dhcp_server": (dhcp, "DHCPv4Server"),
+                "command": cluster.ConfigureDHCPv4_V2,
                 "make_network": factory.make_ipv4_network,
                 "make_shared_network": make_shared_network,
                 "make_shared_network_kwargs": {"with_interface": True},
@@ -2657,6 +2585,17 @@ class TestClusterProtocol_ConfigureDHCP(MAASTestCase):
             {
                 "dhcp_server": (dhcp, "DHCPv6Server"),
                 "command": cluster.ConfigureDHCPv6,
+                "make_network": factory.make_ipv6_network,
+                "make_shared_network": make_shared_network_v1,
+                "make_shared_network_kwargs": {},
+                "concurrency_lock": concurrency.dhcpv6,
+            },
+        ),
+        (
+            "DHCPv6,V2",
+            {
+                "dhcp_server": (dhcp, "DHCPv6Server"),
+                "command": cluster.ConfigureDHCPv6_V2,
                 "make_network": factory.make_ipv6_network,
                 "make_shared_network": make_shared_network,
                 "make_shared_network_kwargs": {"with_interface": True},
@@ -2699,6 +2638,9 @@ class TestClusterProtocol_ConfigureDHCP(MAASTestCase):
                 "interfaces": interfaces,
             },
         )
+
+        # The `shared_networks` structure is always the V2 style.
+        dhcp.upgrade_shared_networks(shared_networks)
 
         self.assertThat(DHCPServer, MockCalledOnceWith(omapi_key))
         self.assertThat(
@@ -2814,6 +2756,15 @@ class TestClusterProtocol_ValidateDHCP(MAASTestCase):
                 "dhcp_server": (dhcp, "DHCPv4Server"),
                 "command": cluster.ValidateDHCPv4Config,
                 "make_network": factory.make_ipv4_network,
+                "make_shared_network": make_shared_network_v1,
+            },
+        ),
+        (
+            "DHCPv4,V2",
+            {
+                "dhcp_server": (dhcp, "DHCPv4Server"),
+                "command": cluster.ValidateDHCPv4Config_V2,
+                "make_network": factory.make_ipv4_network,
                 "make_shared_network": make_shared_network,
             },
         ),
@@ -2822,6 +2773,15 @@ class TestClusterProtocol_ValidateDHCP(MAASTestCase):
             {
                 "dhcp_server": (dhcp, "DHCPv6Server"),
                 "command": cluster.ValidateDHCPv6Config,
+                "make_network": factory.make_ipv6_network,
+                "make_shared_network": make_shared_network_v1,
+            },
+        ),
+        (
+            "DHCPv6,V2",
+            {
+                "dhcp_server": (dhcp, "DHCPv6Server"),
+                "command": cluster.ValidateDHCPv6Config_V2,
                 "make_network": factory.make_ipv6_network,
                 "make_shared_network": make_shared_network,
             },
@@ -2865,7 +2825,7 @@ class TestClusterProtocol_ValidateDHCP(MAASTestCase):
                 "interfaces": interfaces,
             },
         )
-        self.assertEqual(None, response["errors"])
+        self.assertEquals(None, response["errors"])
 
     @inlineCallbacks
     def test_validates_bad_dhcp_config(self):
@@ -3039,6 +2999,172 @@ class MAASTestCaseThatWaitsForDeferredThreads(MAASTestCase):
         d = self.__deferToThreadOrig(f, *args, **kwargs)
         self.addCleanup(lambda: d)  # Wait during teardown.
         return d
+
+
+class TestClusterProtocol_Refresh(MAASTestCaseThatWaitsForDeferredThreads):
+
+    run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
+
+    def test_is_registered(self):
+        protocol = Cluster()
+        responder = protocol.locateResponder(
+            cluster.RefreshRackControllerInfo.commandName
+        )
+        self.assertIsNotNone(responder)
+
+    @inlineCallbacks
+    def test_raises_refresh_already_in_progress_when_locked(self):
+        system_id = factory.make_name("system_id")
+        consumer_key = factory.make_name("consumer_key")
+        token_key = factory.make_name("token_key")
+        token_secret = factory.make_name("token_secret")
+
+        with NamedLock("refresh"):
+            with ExpectedException(exceptions.RefreshAlreadyInProgress):
+                yield call_responder(
+                    Cluster(),
+                    cluster.RefreshRackControllerInfo,
+                    {
+                        "system_id": system_id,
+                        "consumer_key": consumer_key,
+                        "token_key": token_key,
+                        "token_secret": token_secret,
+                    },
+                )
+
+    @inlineCallbacks
+    def test_acquires_lock_when_refreshing_releases_when_done(self):
+        def mock_refresh(*args, **kwargs):
+            lock = NamedLock("refresh")
+            self.assertTrue(lock.is_locked())
+
+        self.patch(clusterservice, "refresh", mock_refresh)
+        system_id = factory.make_name("system_id")
+        consumer_key = factory.make_name("consumer_key")
+        token_key = factory.make_name("token_key")
+        token_secret = factory.make_name("token_secret")
+
+        yield call_responder(
+            Cluster(),
+            cluster.RefreshRackControllerInfo,
+            {
+                "system_id": system_id,
+                "consumer_key": consumer_key,
+                "token_key": token_key,
+                "token_secret": token_secret,
+            },
+        )
+
+        lock = NamedLock("refresh")
+        self.assertFalse(lock.is_locked())
+
+    @inlineCallbacks
+    def test_releases_on_error(self):
+        exception = factory.make_exception()
+        self.patch(clusterservice, "refresh").side_effect = exception
+        system_id = factory.make_name("system_id")
+        consumer_key = factory.make_name("consumer_key")
+        token_key = factory.make_name("token_key")
+        token_secret = factory.make_name("token_secret")
+
+        conn_cluster = Cluster()
+        conn_cluster.service = MagicMock()
+        conn_cluster.service.maas_url = factory.make_simple_http_url()
+
+        with TwistedLoggerFixture() as logger:
+            yield call_responder(
+                conn_cluster,
+                cluster.RefreshRackControllerInfo,
+                {
+                    "system_id": system_id,
+                    "consumer_key": consumer_key,
+                    "token_key": token_key,
+                    "token_secret": token_secret,
+                },
+            )
+
+        # The failure is logged
+        self.assertDocTestMatches(
+            """
+            Failed to refresh the rack controller.
+            Traceback (most recent call last):
+            ...
+            maastesting.factory.TestException#...:
+            """,
+            logger.output,
+        )
+
+        # The lock is released
+        lock = NamedLock("refresh")
+        self.assertFalse(lock.is_locked())
+
+    @inlineCallbacks
+    def test_defers_refresh_to_thread(self):
+        mock_deferToThread = self.patch_autospec(
+            clusterservice, "deferToThread"
+        )
+        mock_deferToThread.side_effect = [
+            succeed(None),
+            succeed({"maas_version": factory.make_name("maas_version")}),
+        ]
+
+        system_id = factory.make_name("system_id")
+        consumer_key = factory.make_name("consumer_key")
+        token_key = factory.make_name("token_key")
+        token_secret = factory.make_name("token_secret")
+
+        conn_cluster = Cluster()
+        conn_cluster.service = MagicMock()
+        conn_cluster.service.maas_url = factory.make_simple_http_url()
+
+        yield call_responder(
+            conn_cluster,
+            cluster.RefreshRackControllerInfo,
+            {
+                "system_id": system_id,
+                "consumer_key": consumer_key,
+                "token_key": token_key,
+                "token_secret": token_secret,
+            },
+        )
+
+        self.assertThat(
+            mock_deferToThread,
+            MockAnyCall(
+                clusterservice.refresh,
+                system_id,
+                consumer_key,
+                token_key,
+                token_secret,
+                ANY,
+            ),
+        )
+
+    @inlineCallbacks
+    def test_returns_extra_info(self):
+        self.patch_autospec(clusterservice, "refresh")
+
+        system_id = factory.make_name("system_id")
+        consumer_key = factory.make_name("consumer_key")
+        token_key = factory.make_name("token_key")
+        token_secret = factory.make_name("token_secret")
+        maas_version = factory.make_name("maas_version")
+        self.patch_autospec(
+            clusterservice, "get_maas_version"
+        ).return_value = maas_version
+
+        response = yield call_responder(
+            Cluster(),
+            cluster.RefreshRackControllerInfo,
+            {
+                "system_id": system_id,
+                "consumer_key": consumer_key,
+                "token_key": token_key,
+                "token_secret": token_secret,
+            },
+        )
+
+        self.assertEqual({"maas_version": maas_version}, response)
 
 
 class TestClusterProtocol_ScanNetworks(
@@ -3357,169 +3483,6 @@ class TestClusterProtocol_AddChassis(MAASTestCase):
             clusterservice.maaslog.error,
             MockAnyCall(
                 "Failed to probe and enlist %s nodes: %s", "virsh", fake_error
-            ),
-        )
-
-    def test_chassis_type_proxmox_calls_probe_proxmoxand_enlist(self):
-        mock_proxmox = self.patch_autospec(
-            clusterservice, "probe_proxmox_and_enlist"
-        )
-        user = factory.make_name("user")
-        hostname = factory.make_hostname()
-        username = factory.make_name("username")
-        password = factory.make_name("password")
-        token_name = factory.make_name("token_name")
-        token_secret = factory.make_name("token_secret")
-        verify_ssl = factory.pick_bool()
-        accept_all = factory.pick_bool()
-        domain = factory.make_name("domain")
-        prefix_filter = factory.make_name("prefix_filter")
-        call_responder(
-            Cluster(),
-            cluster.AddChassis,
-            {
-                "user": user,
-                "chassis_type": "proxmox",
-                "hostname": hostname,
-                "username": username,
-                "password": password,
-                "token_name": token_name,
-                "token_secret": token_secret,
-                "verify_ssl": verify_ssl,
-                "accept_all": accept_all,
-                "domain": domain,
-                "prefix_filter": prefix_filter,
-            },
-        )
-        self.assertThat(
-            mock_proxmox,
-            MockCalledOnceWith(
-                user,
-                hostname,
-                username,
-                password,
-                token_name,
-                token_secret,
-                verify_ssl,
-                accept_all,
-                domain,
-                prefix_filter,
-            ),
-        )
-
-    def test_chassis_type_proxmox_logs_error_to_maaslog(self):
-        fake_error = factory.make_name("error")
-        self.patch(clusterservice, "maaslog")
-        mock_proxmox = self.patch_autospec(
-            clusterservice, "probe_proxmox_and_enlist"
-        )
-        mock_proxmox.return_value = fail(Exception(fake_error))
-        user = factory.make_name("user")
-        hostname = factory.make_hostname()
-        username = factory.make_name("username")
-        password = factory.make_name("password")
-        token_name = factory.make_name("token_name")
-        token_secret = factory.make_name("token_secret")
-        verify_ssl = factory.pick_bool()
-        accept_all = factory.pick_bool()
-        domain = factory.make_name("domain")
-        prefix_filter = factory.make_name("prefix_filter")
-        call_responder(
-            Cluster(),
-            cluster.AddChassis,
-            {
-                "user": user,
-                "chassis_type": "proxmox",
-                "hostname": hostname,
-                "username": username,
-                "password": password,
-                "token_name": token_name,
-                "token_secret": token_secret,
-                "verify_ssl": verify_ssl,
-                "accept_all": accept_all,
-                "domain": domain,
-                "prefix_filter": prefix_filter,
-            },
-        )
-        self.assertThat(
-            clusterservice.maaslog.error,
-            MockAnyCall(
-                "Failed to probe and enlist %s nodes: %s",
-                "proxmox",
-                fake_error,
-            ),
-        )
-
-    def test_chassis_type_hmcz_calls_probe_hmcz_and_enlist(self):
-        mock_probe_hmcz_and_enlist = self.patch_autospec(
-            clusterservice, "probe_hmcz_and_enlist"
-        )
-        user = factory.make_name("user")
-        hostname = factory.make_hostname()
-        username = factory.make_name("username")
-        password = factory.make_name("password")
-        accept_all = factory.pick_bool()
-        domain = factory.make_name("domain")
-        prefix_filter = factory.make_name("prefix_filter")
-        call_responder(
-            Cluster(),
-            cluster.AddChassis,
-            {
-                "user": user,
-                "chassis_type": "hmcz",
-                "hostname": hostname,
-                "username": username,
-                "password": password,
-                "accept_all": accept_all,
-                "domain": domain,
-                "prefix_filter": prefix_filter,
-            },
-        )
-        self.assertThat(
-            mock_probe_hmcz_and_enlist,
-            MockCalledOnceWith(
-                user,
-                hostname,
-                username,
-                password,
-                accept_all,
-                domain,
-                prefix_filter,
-            ),
-        )
-
-    def test_chassis_type_hmcz_logs_error_to_maaslog(self):
-        fake_error = factory.make_name("error")
-        self.patch(clusterservice, "maaslog")
-        mock_probe_hmcz_and_enlist = self.patch_autospec(
-            clusterservice, "probe_hmcz_and_enlist"
-        )
-        mock_probe_hmcz_and_enlist.return_value = fail(Exception(fake_error))
-        user = factory.make_name("user")
-        hostname = factory.make_hostname()
-        username = factory.make_name("username")
-        password = factory.make_name("password")
-        accept_all = factory.pick_bool()
-        domain = factory.make_name("domain")
-        prefix_filter = factory.make_name("prefix_filter")
-        call_responder(
-            Cluster(),
-            cluster.AddChassis,
-            {
-                "user": user,
-                "chassis_type": "hmcz",
-                "hostname": hostname,
-                "username": username,
-                "password": password,
-                "accept_all": accept_all,
-                "domain": domain,
-                "prefix_filter": prefix_filter,
-            },
-        )
-        self.assertThat(
-            clusterservice.maaslog.error,
-            MockAnyCall(
-                "Failed to probe and enlist %s nodes: %s", "hmcz", fake_error
             ),
         )
 
@@ -4005,49 +3968,7 @@ class TestClusterProtocol_AddChassis(MAASTestCase):
                 "hostname": factory.make_hostname(),
             },
         )
-        self.assertEqual({}, response.result)
-
-
-class TestClusterProtocol_DiscoverPodProjects(MAASTestCase):
-
-    run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
-
-    def test_is_registered(self):
-        protocol = Cluster()
-        responder = protocol.locateResponder(
-            cluster.DiscoverPodProjects.commandName
-        )
-        self.assertIsNotNone(responder)
-
-    def test_calls_discover_pod_projects(self):
-        mock_discover_pod_projects = self.patch_autospec(
-            pods, "discover_pod_projects"
-        )
-        mock_discover_pod_projects.return_value = succeed(
-            {
-                "projects": [
-                    DiscoveredPodProject(
-                        name="p1",
-                        description="Project 1",
-                    ),
-                    DiscoveredPodProject(
-                        name="p2",
-                        description="Project 2",
-                    ),
-                ]
-            }
-        )
-        pod_type = factory.make_name("pod_type")
-        context = {}
-        call_responder(
-            Cluster(),
-            cluster.DiscoverPodProjects,
-            {
-                "type": pod_type,
-                "context": context,
-            },
-        )
-        mock_discover_pod_projects.assert_called_once_with(pod_type, context)
+        self.assertEquals({}, response.result)
 
 
 class TestClusterProtocol_DiscoverPod(MAASTestCase):
@@ -4276,7 +4197,7 @@ class TestClusterProtocol_DisableAndShutoffRackd(MAASTestCase):
         response = call_responder(
             Cluster(), cluster.DisableAndShutoffRackd, {}
         )
-        self.assertEqual({}, response.result)
+        self.assertEquals({}, response.result)
         mock_call_and_check.assert_called_once_with(
             ["sudo", "systemctl", "restart", "maas-rackd"]
         )
@@ -4297,13 +4218,14 @@ class TestClusterProtocol_DisableAndShutoffRackd(MAASTestCase):
 
     def test_issues_restart_snap(self):
         self.patch(clusterservice, "running_in_snap").return_value = True
+        self.patch(clusterservice, "get_snap_path").return_value = "/"
         mock_call_and_check = self.patch(clusterservice, "call_and_check")
         response = call_responder(
             Cluster(), cluster.DisableAndShutoffRackd, {}
         )
-        self.assertEqual({}, response.result)
+        self.assertEquals({}, response.result)
         mock_call_and_check.assert_called_once_with(
-            ["snapctl", "restart", "maas.supervisor"]
+            ["snapctl", "restart", "agora-maas.supervisor"]
         )
 
     @inlineCallbacks
@@ -4326,6 +4248,7 @@ class TestClusterProtocol_DisableAndShutoffRackd(MAASTestCase):
 
     def test_snap_ignores_signal_error_code_on_restart(self):
         self.patch(clusterservice, "running_in_snap").return_value = True
+        self.patch(clusterservice, "get_snap_path").return_value = "/"
         mock_call_and_check = self.patch(clusterservice, "call_and_check")
         mock_call_and_check.side_effect = ExternalProcessError(
             -15, "maas-wrapper", "failure"
@@ -4333,8 +4256,8 @@ class TestClusterProtocol_DisableAndShutoffRackd(MAASTestCase):
         response = call_responder(
             Cluster(), cluster.DisableAndShutoffRackd, {}
         )
-        self.assertEqual({}, response.result)
-        self.assertEqual(1, mock_call_and_check.call_count)
+        self.assertEquals({}, response.result)
+        self.assertEquals(1, mock_call_and_check.call_count)
 
 
 class TestClusterProtocol_CheckIPs(MAASTestCaseThatWaitsForDeferredThreads):

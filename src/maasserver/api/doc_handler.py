@@ -80,7 +80,8 @@ from maasserver.utils import build_absolute_uri
 # the two.
 api_doc_title = dedent(
     """
-    .. _maas-api:
+    :tocdepth: 3
+    .. _region-controller-api:
 
     ========
     MAAS API
@@ -167,9 +168,7 @@ def render_api_docs():
         line()
         for (http_method, op), function in sorted(exports, key=export_key):
             operation = " op=%s" % op if op is not None else ""
-            subsection = (
-                f"<code>{http_method} {uri_template}{operation}</code>"
-            )
+            subsection = "``%s %s%s``" % (http_method, uri_template, operation)
             docstring = getdoc(function)
             if docstring is not None:
                 if APIDocstringParser.is_annotated_docstring(docstring):
@@ -184,10 +183,7 @@ def render_api_docs():
                         )
                     )
                 else:
-                    line(".. raw:: html")
-                    line()
-                    line("  <details>")
-                    line(f"  <summary>{subsection}</summary>")
+                    line("%s\n%s\n" % (subsection, "#" * len(subsection)))
                     line()
                     for docline in dedent(docstring).splitlines():
                         if docline.strip() == "":
@@ -196,16 +192,9 @@ def render_api_docs():
                         else:
                             # Print documentation line, indented.
                             line(docline)
-                    line()
-                    line(".. raw:: html")
-                    line()
-                    line("  </details>")
-                    line()
                 line()
             else:
-                line(".. raw:: html")
-                line()
-                line(f"  <p>{subsection}</p>\n")
+                line("%s\n%s\n" % (subsection, "#" * len(subsection)))
                 line()
 
     line()

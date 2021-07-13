@@ -129,76 +129,6 @@ class TestDHCPSnippetForm(MAASServerTestCase):
         self.assertEqual(enabled, dhcp_snippet.enabled)
         self.assertEqual(subnet, dhcp_snippet.subnet)
 
-    def test_create_dhcp_snippet_with_iprange(self):
-        subnet = factory.make_ipv4_Subnet_with_IPRanges()
-        iprange = subnet.get_dynamic_ranges().first()
-        iprange.save()
-        name = factory.make_name("name")
-        value = factory.make_string()
-        description = factory.make_string()
-        enabled = factory.pick_bool()
-        form = DHCPSnippetForm(
-            data={
-                "name": name,
-                "value": value,
-                "description": description,
-                "enabled": enabled,
-                "subnet": subnet.id,
-                "iprange": iprange.id,
-            }
-        )
-        self.assertTrue(form.is_valid(), form.errors)
-        endpoint = factory.pick_choice(ENDPOINT_CHOICES)
-        request = HttpRequest()
-        request.user = factory.make_User()
-        dhcp_snippet = form.save(endpoint, request)
-        self.assertEqual(name, dhcp_snippet.name)
-        self.assertEqual(value, dhcp_snippet.value.data)
-        self.assertEqual(description, dhcp_snippet.description)
-        self.assertEqual(enabled, dhcp_snippet.enabled)
-        self.assertEqual(subnet, dhcp_snippet.subnet)
-        self.assertEqual(iprange, dhcp_snippet.iprange)
-
-    def test_create_dhcp_snippet_with_iprange_requires_subnet(self):
-        subnet = factory.make_ipv4_Subnet_with_IPRanges()
-        iprange = subnet.get_dynamic_ranges().first()
-        iprange.save()
-        name = factory.make_name("name")
-        value = factory.make_string()
-        description = factory.make_string()
-        enabled = factory.pick_bool()
-        form = DHCPSnippetForm(
-            data={
-                "name": name,
-                "value": value,
-                "dscription": description,
-                "enabled": enabled,
-                "iprange": iprange.id,
-            }
-        )
-        self.assertFalse(form.is_valid(), form.errors)
-
-    def test_create_dhcp_snippet_with_iprange_requires_parent_subnet(self):
-        subnet = factory.make_ipv4_Subnet_with_IPRanges()
-        subnet2 = factory.make_Subnet()
-        iprange = subnet.get_dynamic_ranges().first()
-        iprange.save()
-        name = factory.make_name("name")
-        value = factory.make_string()
-        description = factory.make_string()
-        enabled = factory.pick_bool()
-        form = DHCPSnippetForm(
-            data={
-                "name": name,
-                "value": value,
-                "dscription": description,
-                "enabled": enabled,
-                "subnet": subnet2.id,
-                "iprange": iprange.id,
-            }
-        )
-        self.assertFalse(form.is_valid(), form.errors)
-
     def test_cannt_create_dhcp_snippet_with_node_and_subnet(self):
         node = factory.make_Node()
         subnet = factory.make_Subnet()
@@ -321,7 +251,7 @@ class TestDHCPSnippetForm(MAASServerTestCase):
         request.user = factory.make_User()
         dhcp_snippet = form.save(endpoint, request)
         self.assertIsNone(dhcp_snippet.subnet)
-        self.assertEqual(node, dhcp_snippet.node)
+        self.assertEquals(node, dhcp_snippet.node)
 
     def test_updates_subnet(self):
         dhcp_snippet = factory.make_DHCPSnippet()
@@ -348,7 +278,7 @@ class TestDHCPSnippetForm(MAASServerTestCase):
         request.user = factory.make_User()
         dhcp_snippet = form.save(endpoint, request)
         self.assertIsNone(dhcp_snippet.node)
-        self.assertEqual(subnet, dhcp_snippet.subnet)
+        self.assertEquals(subnet, dhcp_snippet.subnet)
 
     def test_cannot_update_both_node_and_subnet(self):
         dhcp_snippet = factory.make_DHCPSnippet()
@@ -372,7 +302,7 @@ class TestDHCPSnippetForm(MAASServerTestCase):
             },
         )
         self.assertFalse(form.is_valid())
-        self.assertEqual(value, reload_object(dhcp_snippet).value.data)
+        self.assertEquals(value, reload_object(dhcp_snippet).value.data)
 
     def test_update_global_snippet_resets_node(self):
         node = factory.make_Node()
@@ -419,6 +349,6 @@ class TestDHCPSnippetForm(MAASServerTestCase):
             }
         )
         self.assertFalse(form.is_valid())
-        self.assertEqual({"value": [dhcpd_error["error"]]}, form.errors)
+        self.assertEquals({"value": [dhcpd_error["error"]]}, form.errors)
         self.assertItemsEqual([], VersionedTextFile.objects.all())
         self.assertItemsEqual([], DHCPSnippet.objects.all())

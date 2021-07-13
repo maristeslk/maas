@@ -590,7 +590,7 @@ class TestGetReleaseVersionFromString(MAASServerTestCase):
         )
 
     def test_get_release_version_from_string(self):
-        self.assertEqual(
+        self.assertEquals(
             self.expected, get_release_version_from_string(self.string)
         )
 
@@ -786,7 +786,7 @@ class TestValidateHweKernel(MAASServerTestCase):
             None, "hwe-16.04-edge", "%s/generic" % arch, "ubuntu", "xenial"
         )
 
-        self.assertEqual("hwe-16.04-edge", kernel)
+        self.assertEquals("hwe-16.04-edge", kernel)
         self.assertThat(
             mock_get_usable_hwe_kernels,
             MockCalledOnceWith("ubuntu/xenial", arch, "generic"),
@@ -799,10 +799,10 @@ class TestValidateMinHweKernel(MAASServerTestCase):
         self.patch(
             BootResource.objects, "get_supported_hwe_kernels"
         ).return_value = (kernel,)
-        self.assertEqual(kernel, validate_min_hwe_kernel(kernel))
+        self.assertEquals(kernel, validate_min_hwe_kernel(kernel))
 
     def test_returns_empty_string_when_none(self):
-        self.assertEqual("", validate_min_hwe_kernel(None))
+        self.assertEquals("", validate_min_hwe_kernel(None))
 
     def test_raises_exception_when_not_found(self):
         self.assertRaises(
@@ -886,21 +886,21 @@ class TestGetReleaseFromDB(MAASServerTestCase):
 
     def test_finds_by_subarch(self):
         release = self.make_boot_source_cache()
-        self.assertEqual(
+        self.assertEquals(
             release["series"],
             get_release_from_db(release["version"].split(" ")[0])["series"],
         )
 
     def test_finds_by_release(self):
         release = self.make_boot_source_cache()
-        self.assertEqual(
+        self.assertEquals(
             release["version"],
             get_release_from_db(release["series"])["version"],
         )
 
     def test_finds_by_release_first_letter(self):
         release = self.make_boot_source_cache()
-        self.assertEqual(
+        self.assertEquals(
             release["version"],
             get_release_from_db(release["series"][0])["version"],
         )

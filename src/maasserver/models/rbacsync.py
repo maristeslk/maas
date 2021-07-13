@@ -8,21 +8,25 @@ from django.db.models import Manager, Model
 from django.db.models.fields import CharField, DateTimeField, IntegerField
 
 from maasserver import DefaultMeta
-from provisioningserver.enum import enum_choices
 
 
 class RBAC_ACTION:
-    # Perform a full sync.
+    #: Perform a full sync.
     FULL = "full"
-    # Add a new resource.
+    #: Add a new resource.
     ADD = "add"
-    # Update a resource.
+    #: Update a resource.
     UPDATE = "update"
-    # Remove a resource.
+    #: Remove a resource.
     REMOVE = "remove"
 
 
-RBAC_ACTION_CHOICES = enum_choices(RBAC_ACTION)
+RBAC_ACTION_CHOICES = [
+    (RBAC_ACTION.FULL, "full"),
+    (RBAC_ACTION.ADD, "add"),
+    (RBAC_ACTION.UPDATE, "update"),
+    (RBAC_ACTION.REMOVE, "remove"),
+]
 
 
 class RBACSyncManager(Manager):

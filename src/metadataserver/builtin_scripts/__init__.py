@@ -13,22 +13,22 @@ from zope.interface import Attribute, implementer, Interface
 from zope.interface.verify import verifyObject
 
 from maasserver.forms.script import ScriptForm
-from maasserver.models.controllerinfo import get_maas_version
 from metadataserver.models import Script
 from provisioningserver.refresh.node_info_scripts import (
     BMC_DETECTION,
     DHCP_EXPLORE_OUTPUT_NAME,
     GET_FRUID_DATA_OUTPUT_NAME,
+    IPADDR_OUTPUT_NAME,
     KERNEL_CMDLINE_OUTPUT_NAME,
     LIST_MODALIASES_OUTPUT_NAME,
     LLDP_INSTALL_OUTPUT_NAME,
     LLDP_OUTPUT_NAME,
     LSHW_OUTPUT_NAME,
     LXD_OUTPUT_NAME,
-    NODE_INFO_SCRIPTS,
     SERIAL_PORTS_OUTPUT_NAME,
     SUPPORT_INFO_OUTPUT_NAME,
 )
+from provisioningserver.utils.version import get_maas_version
 
 
 class IBuiltinScript(Interface):
@@ -82,6 +82,9 @@ BUILTIN_SCRIPTS = [
         name=DHCP_EXPLORE_OUTPUT_NAME, filename="dhcp_unconfigured_ifaces.py"
     ),
     BuiltinScript(name=BMC_DETECTION, filename="bmc_config.py"),
+    BuiltinScript(
+        name=IPADDR_OUTPUT_NAME, filename="40-maas-01-network-interfaces"
+    ),
     BuiltinScript(name=LXD_OUTPUT_NAME, filename="50-maas-01-commissioning"),
     BuiltinScript(name=SUPPORT_INFO_OUTPUT_NAME, filename="maas-support-info"),
     BuiltinScript(name=LSHW_OUTPUT_NAME, filename="maas-lshw"),
@@ -212,13 +215,18 @@ def load_builtin_scripts():
             form = ScriptForm(
                 data={
                     "script": script_content,
-                    "comment": f"Created by maas-{get_maas_version()}",
+                    "comment": "Created by maas-%s" % get_maas_version(),
                 }
             )
+            # Form validation should never fail as these are the scripts which
+            # ship with MAAS. If they ever do this will be cause by unit tests.
+            if not form.is_valid():
+                raise Exception("%s: %s" % (script.name, form.errors))
+            script_in_db = form.save(commit=False)
+            script_in_db.default = True
+            script_in_db.save()
         else:
-            if script_in_db.script.data == script_content:
-                continue
-            else:
+            if script_in_db.script.data != script_content:
                 # Don't add back old versions of a script. This prevents two
                 # connected regions with different versions of a script from
                 # fighting with eachother.
@@ -235,21 +243,15 @@ def load_builtin_scripts():
                     instance=script_in_db,
                     data={
                         "script": script_content,
-                        "comment": f"Updated by maas-{get_maas_version()}",
+                        "comment": "Updated by maas-%s" % get_maas_version(),
                     },
                     edit_default=True,
                 )
-
-        # Form validation should never fail as these are the scripts
-        # which ship with MAAS. If they ever do this will be cause by
-        # unit tests.
-        assert (
-            form.is_valid()
-        ), f"Builtin script {script.name} caused these errors: {form.errors}"
-        script_in_db = form.save(commit=False)
-        if NODE_INFO_SCRIPTS.get(script.name, {}).get("run_on_controller"):
-            script_in_db.add_tag("deploy-info")
-        else:
-            script_in_db.remove_tag("deploy-info")
-        script_in_db.default = True
-        script_in_db.save()
+                # Form validation should never fail as these are the scripts
+                # which ship with MAAS. If they ever do this will be cause by
+                # unit tests.
+                if not form.is_valid():
+                    raise Exception("%s: %s" % (script.name, form.errors))
+                script_in_db = form.save(commit=False)
+                script_in_db.default = True
+                script_in_db.save()

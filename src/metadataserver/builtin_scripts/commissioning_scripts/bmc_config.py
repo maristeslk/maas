@@ -5,7 +5,7 @@
 # Author: Andres Rodriguez <andres.rodriguez@canonical.com>
 #         Lee Trager <lee.trager@canonical.com>
 #
-# Copyright (C) 2013-2021 Canonical
+# Copyright (C) 2013-2020 Canonical
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -79,13 +79,6 @@ import urllib
 
 from paramiko.client import MissingHostKeyPolicy, SSHClient
 import yaml
-
-# Most commands execute very quickly. A timeout is used to catch commands which
-# hang. Sometimes a hanging command can be handled, othertimes not. 3 minutes
-# is used as the timeout as some BMCs respond slowly when a large amount of
-# data is being returned. LP:1917652 was due to a slow responding BMC which
-# timed out when IPMI._bmc_get_config() was called.
-COMMAND_TIMEOUT = 60 * 3
 
 
 def exit_skipped():
@@ -181,7 +174,7 @@ class IPMI(BMCConfig):
             proc = run(
                 cmd,
                 stdout=PIPE,
-                timeout=COMMAND_TIMEOUT,
+                timeout=60,
             )
         except Exception:
             print(
@@ -190,7 +183,7 @@ class IPMI(BMCConfig):
             )
             raise
         section = None
-        for line in proc.stdout.decode().splitlines():
+        for line in proc.stdout.decode(errors='ignore').splitlines():
             line = line.split("#")[0].strip()
             if not line:
                 continue
@@ -222,7 +215,7 @@ class IPMI(BMCConfig):
                 "--commit",
                 "--key-pair=%s:%s=%s" % (section, key, value),
             ],
-            timeout=COMMAND_TIMEOUT,
+            timeout=60,
         )
         # If the value was set update the cache.
         if section not in self._bmc_config:
@@ -253,7 +246,7 @@ class IPMI(BMCConfig):
     @staticmethod
     @lru_cache(maxsize=1)
     def _get_ipmi_locate_output():
-        return check_output(["ipmi-locate"], timeout=COMMAND_TIMEOUT).decode()
+        return check_output(["ipmi-locate"], timeout=60).decode()
 
     @staticmethod
     @lru_cache(maxsize=1)
@@ -268,11 +261,13 @@ class IPMI(BMCConfig):
                     check_output(
                         ["ipmitool", "lan", "print", i],
                         stderr=DEVNULL,
-                        timeout=COMMAND_TIMEOUT,
+                        timeout=60,
                     ).decode(),
                 )
             except (CalledProcessError, TimeoutExpired):
                 pass
+            else:
+                return i
         return -1, ""
 
     def detected(self):
@@ -501,62 +496,166 @@ class IPMI(BMCConfig):
         )
         self._bmc_set_keys("Lan_Channel_Auth", ["SOL_Payload_Access"], "Yes")
 
-    def _get_ipmitool_cipher_suite_ids(self):
-        print(
-            "INFO: Gathering supported cipher suites and current configuration..."
+    def _get_bmc_config_cipher_suite_ids(self):
+        """Return the supported IPMI cipher suite ids from bmc-config."""
+        cipher_suite_ids = {}
+        max_cipher_suite_id = 0
+        regex = re.compile(
+            r"^Maximum_Privilege_Cipher_Suite_Id_(?P<cipher_suite_id>1?\d)$"
         )
-        supported_cipher_suite_ids = []
-        current_cipher_suite_privs = None
-        _, output = self._get_ipmitool_lan_print()
+        for key, value in self._bmc_config.get(
+            "Rmcpplus_Conf_Privilege", {}
+        ).items():
+            m = regex.search(key)
+            if m:
+                cipher_suite_id = m.group("cipher_suite_id")
+                cipher_suite_ids[cipher_suite_id] = value
+                max_cipher_suite_id = max(
+                    max_cipher_suite_id, int(cipher_suite_id)
+                )
+        return max_cipher_suite_id, cipher_suite_ids
 
-        for line in output.splitlines():
-            try:
-                key, value = line.split(":", 1)
-            except ValueError:
+    def _config_bmc_config_cipher_suite_ids(self, cipher_suite_ids):
+        # First find the most secure cipher suite id MAAS will use to
+        # communicate to the BMC with.
+        # 3  - HMAC-SHA1::HMAC-SHA1-96::AES-CBC-128
+        # 8  - HMAC-MD5::HMAC-MD5-128::AES-CBC-128
+        # 12 - HMAC-MD5::MD5-128::AES-CBC-128
+        # 17 - HMAC-SHA256::HMAC_SHA256_128::AES-CBC-128
+        # This is not in order as MAAS prefers to use the most secure cipher
+        # available.
+        for cipher_suite_id in ["17", "3", "8", "12"]:
+            if cipher_suite_id not in cipher_suite_ids:
                 continue
+            elif cipher_suite_ids[cipher_suite_id] != "Administrator":
+                print(
+                    'INFO: Enabling IPMI cipher suite id "%s" '
+                    "for MAAS use..." % cipher_suite_id
+                )
+                try:
+                    self._bmc_set(
+                        "Rmcpplus_Conf_Privilege",
+                        "Maximum_Privilege_Cipher_Suite_Id_%s"
+                        % cipher_suite_id,
+                        "Administrator",
+                    )
+                except (CalledProcessError, TimeoutExpired):
+                    # Some machines will show what ciphers are available
+                    # but not allow their value to be changed. The ARM64
+                    # machine in the MAAS CI is like this.
+                    print(
+                        "WARNING: Unable to enable secure IPMI cipher "
+                        'suite id "%s"!' % cipher_suite_id
+                    )
+                    # Try the next secure cipher
+                    continue
+            self._cipher_suite_id = cipher_suite_id
+            # Enable the most secure cipher suite id and leave the
+            # other secure cipher suite ids in their current state.
+            # Most IPMI tools, such as freeipmi-tools, use cipher
+            # suite id 3 as its default. If the user has 3 enabled
+            # while 17 is available we want to keep 3 in the same
+            # state to not break other tools.
+            break
+
+        # Disable insecure IPMI cipher suites.
+        for cipher_suite_id, state in cipher_suite_ids.items():
+            if cipher_suite_id in ["17", "3", "8", "12"]:
+                continue
+            elif state != "Unused":
+                print(
+                    'INFO: Disabling insecure IPMI cipher suite id "%s"'
+                    % cipher_suite_id
+                )
+                try:
+                    self._bmc_set(
+                        "Rmcpplus_Conf_Privilege",
+                        "Maximum_Privilege_Cipher_Suite_Id_%s"
+                        % cipher_suite_id,
+                        "Unused",
+                    )
+                except (CalledProcessError, TimeoutExpired):
+                    # Some machines will show what ciphers are available
+                    # but not allow their value to be changed. The ARM64
+                    # machine in the MAAS CI is like this.
+                    print(
+                        "WARNING: Unable to disable insecure IPMI cipher "
+                        'suite id "%s"!' % cipher_suite_id
+                    )
+
+    def _get_ipmitool_cipher_suite_ids(self):
+        supported_cipher_suite_ids = None
+        cipher_suite_privs = None
+        _, output = self._get_ipmitool_lan_print()
+        for line in output.splitlines():
+            key, value = line.split(":", maxsplit=1)
             key = key.strip()
             value = value.strip()
             if key == "RMCP+ Cipher Suites":
                 try:
-                    # Some BMCs return an unordered list.
-                    supported_cipher_suite_ids = sorted(
-                        [int(i) for i in value.split(",")]
-                    )
+                    supported_cipher_suite_ids = [
+                        int(i) for i in value.split(",")
+                    ]
                 except ValueError:
-                    print(
-                        "ERROR: ipmitool returned RMCP+ Cipher Suites with "
-                        "invalid characters: %s" % value,
-                        file=sys.stderr,
-                    )
-                    return [], None
+                    return 0, [], ""
             elif key == "Cipher Suite Priv Max":
-                current_cipher_suite_privs = value
-            if supported_cipher_suite_ids and current_cipher_suite_privs:
-                break
+                cipher_suite_privs = value
 
-        return supported_cipher_suite_ids, current_cipher_suite_privs
+        if supported_cipher_suite_ids and cipher_suite_privs:
+            return (
+                max(
+                    [
+                        i
+                        for i in supported_cipher_suite_ids
+                        if i in [17, 3, 8, 12]
+                    ]
+                ),
+                supported_cipher_suite_ids,
+                cipher_suite_privs,
+            )
+        else:
+            return 0, [], ""
 
-    def _configure_ipmitool_cipher_suite_ids(
-        self, cipher_suite_id, current_suite_privs
+    def _config_ipmitool_cipher_suite_ids(
+        self,
+        max_cipher_suite_id,
+        supported_cipher_suite_ids,
+        cipher_suite_privs,
     ):
         new_cipher_suite_privs = ""
-        for i, c in enumerate(current_suite_privs):
-            if i == cipher_suite_id and c != "a":
-                print(
-                    "INFO: Enabling cipher suite %s for MAAS use..."
-                    % cipher_suite_id
-                )
-                new_cipher_suite_privs += "a"
-            elif i not in [17, 3, 8, 12] and c != "X":
-                print("INFO: Disabling insecure cipher suite %s..." % i)
-                new_cipher_suite_privs += "X"
+        for i, v in enumerate(cipher_suite_privs):
+            if i < len(supported_cipher_suite_ids):
+                cipher_suite_id = supported_cipher_suite_ids[i]
+                if cipher_suite_id in [17, 3, 8, 12]:
+                    if cipher_suite_id == max_cipher_suite_id and v != "a":
+                        print(
+                            'INFO: Enabling IPMI cipher suite id "%s" '
+                            "for MAAS use..." % cipher_suite_id
+                        )
+                        new_cipher_suite_privs += "a"
+                    else:
+                        new_cipher_suite_privs += v
+                else:
+                    if v != "X":
+                        print(
+                            "INFO: Disabling insecure IPMI cipher suite id "
+                            '"%s"' % cipher_suite_id
+                        )
+                    new_cipher_suite_privs = "X"
             else:
-                # Leave secure ciphers as is. Most tools default to 3 while
-                # 17 is considered the most secure.
-                new_cipher_suite_privs += c
+                # 15 characters are usually given even if there
+                # aren't 15 ciphers supported. Copy the current value
+                # incase there is some OEM use for them.
+                new_cipher_suite_privs += v
 
-        if new_cipher_suite_privs != current_suite_privs:
-            channel, _ = self._get_ipmitool_lan_print()
+        if cipher_suite_privs == new_cipher_suite_privs:
+            # Cipher suites are already properly configured, nothing
+            # to do.
+            self._cipher_suite_id = str(max_cipher_suite_id)
+            return
+
+        channel, _ = self._get_ipmitool_lan_print()
+        try:
             check_call(
                 [
                     "ipmitool",
@@ -566,69 +665,56 @@ class IPMI(BMCConfig):
                     "cipher_privs",
                     new_cipher_suite_privs,
                 ],
-                timeout=COMMAND_TIMEOUT,
+                timeout=60,
             )
-        return new_cipher_suite_privs
+        except (CalledProcessError, TimeoutExpired):
+            print(
+                "WARNING: Unable to configure IPMI cipher suites with "
+                "ipmitool!"
+            )
+        else:
+            self._cipher_suite_id = str(max_cipher_suite_id)
 
     def _config_cipher_suite_id(self):
         print("INFO: Configuring IPMI cipher suite ids...")
 
+        # BMC firmware can be buggy and different tools surface these bugs
+        # in different ways. bmc-config works on all machines in the MAAS
+        # CI while ipmitool doesn't detect anything on the ARM64 machine.
+        # However a user has reported that ipmitool detects cipher 17 on
+        # his system while bmc-config doesn't. To make sure MAAS uses the
+        # most secure cipher suite id check both.
+        # https://discourse.maas.io/t/ipmi-cipher-suite-c17-support/3293/11
+
         (
-            supported_cipher_suite_ids,
-            current_cipher_suite_privs,
+            bmc_config_max,
+            bmc_config_ids,
+        ) = self._get_bmc_config_cipher_suite_ids()
+        (
+            ipmitool_max,
+            ipmitool_ids,
+            ipmitool_privs,
         ) = self._get_ipmitool_cipher_suite_ids()
-        print(
-            "INFO: BMC supports the following ciphers - %s"
-            % supported_cipher_suite_ids
-        )
 
-        # First find the most secure cipher suite id MAAS will use to
-        # communicate to the BMC with.
-        # 3  - HMAC-SHA1::HMAC-SHA1-96::AES-CBC-128
-        # 8  - HMAC-MD5::HMAC-MD5-128::AES-CBC-128
-        # 12 - HMAC-MD5::MD5-128::AES-CBC-128
-        # 17 - HMAC-SHA256::HMAC_SHA256_128::AES-CBC-128
-        # This is not in order as MAAS prefers to use the most secure cipher
-        # available.
-        cipher_suite_id = None
-        for i in [17, 3, 8, 12]:
-            if i in supported_cipher_suite_ids:
-                cipher_suite_id = i
-                break
-        if cipher_suite_id is None:
-            # Some BMC's don't allow this to be viewed or configured, such
-            # as the PPC64 machine in the MAAS CI.
-            print(
-                "WARNING: No IPMI supported cipher suite found! "
-                "MAAS will use freeipmi-tools default."
-            )
-            return
-
-        print(
-            "INFO: Current cipher suite configuration - %s"
-            % current_cipher_suite_privs
-        )
-        try:
-            new_cipher_suite_privs = self._configure_ipmitool_cipher_suite_ids(
-                cipher_suite_id, current_cipher_suite_privs
-            )
-        except (CalledProcessError, TimeoutExpired):
-            # Some BMC's don't allow this to be viewed or configured, such
-            # as the PPC64 machine in the MAAS CI.
-            print(
-                "WARNING: Unable to configure IPMI cipher suites! "
-                "MAAS will use freeipmi-tools default."
-            )
+        if bmc_config_max >= ipmitool_max:
+            self._config_bmc_config_cipher_suite_ids(bmc_config_ids)
         else:
-            print(
-                "INFO: New cipher suite configuration - %s"
-                % new_cipher_suite_privs
+            self._config_ipmitool_cipher_suite_ids(
+                ipmitool_max, ipmitool_ids, ipmitool_privs
             )
+
+        if self._cipher_suite_id:
             print(
                 'INFO: MAAS will use IPMI cipher suite id "%s" for '
-                "BMC communication" % cipher_suite_id
+                "BMC communication" % self._cipher_suite_id
             )
-            self._cipher_suite_id = str(cipher_suite_id)
+        else:
+            # Some BMC's don't allow this to be viewed or configured, such
+            # as the PPC64 machine in the MAAS CI.
+            print(
+                "WARNING: No IPMI cipher suite found! "
+                "MAAS will use freeipmi-tools default."
+            )
 
     def _config_kg(self):
         if self._kg:
@@ -801,9 +887,7 @@ class HPMoonshot(BMCConfig):
     def detected(self):
         try:
             output = check_output(
-                ["ipmitool", "raw", "06", "01"],
-                timeout=COMMAND_TIMEOUT,
-                stderr=DEVNULL,
+                ["ipmitool", "raw", "06", "01"], timeout=60, stderr=DEVNULL
             ).decode()
         except Exception:
             return False
@@ -815,7 +899,7 @@ class HPMoonshot(BMCConfig):
 
     def _get_local_address(self):
         output = check_output(
-            ["ipmitool", "raw", "0x2c", "1", "0"], timeout=COMMAND_TIMEOUT
+            ["ipmitool", "raw", "0x2c", "1", "0"], timeout=60
         ).decode()
         return "0x%s" % output.split()[2]
 
@@ -834,7 +918,7 @@ class HPMoonshot(BMCConfig):
                 "1",
                 "0",
             ],
-            timeout=COMMAND_TIMEOUT,
+            timeout=60,
         ).decode()
         return "0x%s" % output.split()[2]
 
@@ -867,7 +951,7 @@ class HPMoonshot(BMCConfig):
                 "print",
                 "2",
             ],
-            timeout=COMMAND_TIMEOUT,
+            timeout=60,
         ).decode()
         m = re.search(
             r"IP Address\s+:\s+"
@@ -897,7 +981,7 @@ class HPMoonshot(BMCConfig):
                 "mcloc",
                 "-v",
             ],
-            timeout=COMMAND_TIMEOUT,
+            timeout=60,
         ).decode()
         local_chan = self._get_channel_number(local_address, output)
         cartridge_chan = self._get_channel_number(node_address, output)
@@ -941,14 +1025,13 @@ class Wedge(BMCConfig):
         # XXX ltrager 2020-09-16 - It would be better to get these values from
         # /sys but no test system is available.
         sys_manufacturer = check_output(
-            ["dmidecode", "-s", "system-manufacturer"], timeout=COMMAND_TIMEOUT
+            ["dmidecode", "-s", "system-manufacturer"], timeout=60
         ).decode()
         prod_name = check_output(
-            ["dmidecode", "-s", "system-product-name"], timeout=COMMAND_TIMEOUT
+            ["dmidecode", "-s", "system-product-name"], timeout=60
         ).decode()
         baseboard_prod_name = check_output(
-            ["dmidecode", "-s", "baseboard-product-name"],
-            timeout=COMMAND_TIMEOUT,
+            ["dmidecode", "-s", "baseboard-product-name"], timeout=60
         ).decode()
         if (
             (sys_manufacturer == "Intel" and prod_name == "EPGSVR")
@@ -971,8 +1054,7 @@ class Wedge(BMCConfig):
             # "fe80::ff:fe00:2" is the address for the device to the internal
             # BMC network.
             output = check_output(
-                ["ip", "-o", "a", "show", "to", "fe80::ff:fe00:2"],
-                timeout=COMMAND_TIMEOUT,
+                ["ip", "-o", "a", "show", "to", "fe80::ff:fe00:2"], timeout=60
             ).decode()
             # fe80::1 is the BMC's LLA.
             return "fe80::1%%%s" % output.split()[1]
@@ -981,13 +1063,8 @@ class Wedge(BMCConfig):
 
     def detected(self):
         # First detect this is a known switch
-        try:
-            switch_type = self._detect_known_switch()
-        except (CalledProcessError, TimeoutExpired, FileNotFoundError):
+        if not self._detect_known_switch():
             return False
-        else:
-            if switch_type is None:
-                return False
         try:
             # Second, lets verify if this is a known endpoint
             # First try to hit the API. This would work on Wedge 100.
@@ -1014,7 +1091,7 @@ class Wedge(BMCConfig):
                 password=self.password,
             )
             _, stdout, _ = client.exec_command(
-                "ip -o -4 addr show", timeout=COMMAND_TIMEOUT
+                "ip -o -4 addr show", timeout=60
             )
             return (
                 stdout.read().decode().splitlines()[1].split()[3].split("/")[0]
@@ -1114,7 +1191,7 @@ def main():
     # XXX: andreserl 2013-04-09 bug=1064527: Try to detect if node
     # is a Virtual Machine. If it is, do not try to detect IPMI.
     try:
-        check_call(["systemd-detect-virt", "-q"], timeout=COMMAND_TIMEOUT)
+        check_call(["systemd-detect-virt", "-q"], timeout=60)
     except CalledProcessError:
         pass
     else:
@@ -1131,11 +1208,11 @@ def main():
         # The IPMI modules will fail to load if loaded on unsupported
         # hardware.
         try:
-            run(["sudo", "-E", "modprobe", module], timeout=COMMAND_TIMEOUT)
+            run(["sudo", "-E", "modprobe", module], timeout=60)
         except TimeoutExpired:
             pass
     try:
-        run(["sudo", "-E", "udevadm", "settle"], timeout=COMMAND_TIMEOUT)
+        run(["sudo", "-E", "udevadm", "settle"], timeout=60)
     except TimeoutExpired:
         pass
     detect_and_configure(args, bmc_config_path)

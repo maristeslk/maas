@@ -1,6 +1,8 @@
 # Copyright 2013-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Tests for enlistment-related portions of the API."""
+
 
 import http.client
 import json
@@ -29,7 +31,7 @@ class EnlistmentAPITest(APITestCase.ForAnonymousAndUserAndAdmin):
     def setUp(self):
         super().setUp()
         self.patch(Node, "get_effective_power_info").return_value = PowerInfo(
-            False, False, False, False, None, None
+            False, False, False, None, None
         )
         ubuntu = factory.make_default_ubuntu_release_bootable()
         osystem, release = ubuntu.name.split("/")
@@ -292,7 +294,7 @@ class MachineHostnameEnlistmentTest(APITestCase.ForAnonymousAndUserAndAdmin):
     def setUp(self):
         super().setUp()
         self.patch(Node, "get_effective_power_info").return_value = PowerInfo(
-            False, False, False, False, None, None
+            False, False, False, None, None
         )
         ubuntu = factory.make_default_ubuntu_release_bootable()
         osystem, release = ubuntu.name.split("/")
@@ -330,7 +332,7 @@ class NonAdminEnlistmentAPITest(APITestCase.ForAnonymousAndUser):
     def setUp(self):
         super().setUp()
         self.patch(Node, "get_effective_power_info").return_value = PowerInfo(
-            False, False, False, False, None, None
+            False, False, False, None, None
         )
 
     def test_POST_non_admin_creates_machine_in_declared_state(self):
@@ -360,7 +362,7 @@ class AnonymousEnlistmentAPITest(APITestCase.ForAnonymous):
     def setUp(self):
         super().setUp()
         self.patch(Node, "get_effective_power_info").return_value = PowerInfo(
-            False, False, False, False, None, None
+            False, False, False, None, None
         )
 
     def test_POST_accept_not_allowed(self):
@@ -602,7 +604,7 @@ class SimpleUserLoggedInEnlistmentAPITest(APITestCase.ForUser):
         super().setUp()
         self.assertFalse(self.user.is_superuser)
         self.patch(Node, "get_effective_power_info").return_value = PowerInfo(
-            False, False, False, False, None, None
+            False, False, False, None, None
         )
 
     def test_POST_accept_not_allowed(self):
@@ -722,6 +724,7 @@ class SimpleUserLoggedInEnlistmentAPITest(APITestCase.ForUser):
                 "bios_boot_method",
                 "boot_interface",
                 "blockdevice_set",
+                "iscsiblockdevice_set",
                 "physicalblockdevice_set",
                 "virtualblockdevice_set",
                 "volume_groups",
@@ -753,7 +756,6 @@ class SimpleUserLoggedInEnlistmentAPITest(APITestCase.ForUser):
                 "interface_test_status",
                 "interface_test_status_name",
                 "virtualmachine_id",
-                "workload_annotations",
             ],
             list(parsed_result),
         )
@@ -765,7 +767,7 @@ class AdminLoggedInEnlistmentAPITest(APITestCase.ForAdmin):
     def setUp(self):
         super().setUp()
         self.patch(Node, "get_effective_power_info").return_value = PowerInfo(
-            False, False, False, False, None, None
+            False, False, False, None, None
         )
         ubuntu = factory.make_default_ubuntu_release_bootable()
         osystem, release = ubuntu.name.split("/")
@@ -942,6 +944,7 @@ class AdminLoggedInEnlistmentAPITest(APITestCase.ForAdmin):
                 "bios_boot_method",
                 "boot_interface",
                 "blockdevice_set",
+                "iscsiblockdevice_set",
                 "numanode_set",
                 "physicalblockdevice_set",
                 "virtualblockdevice_set",
@@ -974,7 +977,6 @@ class AdminLoggedInEnlistmentAPITest(APITestCase.ForAdmin):
                 "interface_test_status",
                 "interface_test_status_name",
                 "virtualmachine_id",
-                "workload_annotations",
             ],
             list(parsed_result),
         )

@@ -1,23 +1,24 @@
 # Copyright 2017 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Test maasserver ControllerInfo model."""
+
+
+from crochet import wait_for
+from testtools.matchers import Equals, Is
 
 from maasserver.models import ControllerInfo, Notification
 from maasserver.models.controllerinfo import (
-    get_maas_version,
-    get_target_version,
-    TargetVersion,
-    UPGRADE_ISSUE_NOTIFICATION_IDENT,
-    UPGRADE_STATUS_NOTIFICATION_IDENT,
-    VERSION_ISSUES,
+    ControllerVersionInfo,
+    create_or_update_version_notification,
+    KNOWN_VERSION_MISMATCH_NOTIFICATION,
+    UNKNOWN_VERSION_MISMATCH_NOTIFICATION,
+    VERSION_NOTIFICATION_IDENT,
 )
 from maasserver.testing.factory import factory
 from maasserver.testing.testcase import MAASServerTestCase
-from maasserver.utils.orm import reload_object
-from provisioningserver.enum import CONTROLLER_INSTALL_TYPE
-from provisioningserver.utils.deb import DebVersionsInfo
-from provisioningserver.utils.snap import SnapChannel, SnapVersionsInfo
-from provisioningserver.utils.version import MAASVersion
+
+wait_for_reactor = wait_for(30)  # 30 seconds.
 
 
 class TestControllerInfo(MAASServerTestCase):
@@ -26,1112 +27,177 @@ class TestControllerInfo(MAASServerTestCase):
         info, _ = ControllerInfo.objects.update_or_create(node=controller)
         self.assertEqual("ControllerInfo (foobar)", str(info))
 
-    def test_set_version(self):
+    def test_controllerinfo_set_version(self):
         controller = factory.make_RackController()
         ControllerInfo.objects.set_version(controller, "2.3.0")
-        self.assertEqual(controller.version, "2.3.0")
+        self.assertThat(controller.version, Equals("2.3.0"))
 
-    def test_set_versions_info_snap(self):
+    def test_controllerinfo_set_infterface_update_info(self):
         controller = factory.make_RackController()
-        versions = SnapVersionsInfo(
-            current={
-                "revision": "1234",
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-            },
-            channel={"track": "3.0", "risk": "stable"},
-            update={
-                "revision": "5678",
-                "version": "3.0.0~alpha2-222-g.cafecafe",
-            },
-            cohort="abc123",
+        interfaces = {"eth0": {}}
+        hints = ["a", "b", "c"]
+        ControllerInfo.objects.set_interface_update_info(
+            controller, interfaces, hints
         )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        controller_info = controller.controllerinfo
-        self.assertEqual(
-            controller_info.install_type, CONTROLLER_INSTALL_TYPE.SNAP
-        )
-        self.assertEqual(
-            controller_info.version, "3.0.0~alpha1-111-g.deadbeef"
-        )
-        self.assertEqual(
-            controller_info.update_version, "3.0.0~alpha2-222-g.cafecafe"
-        )
-        self.assertEqual(controller_info.update_origin, "3.0/stable")
-        self.assertEqual(controller_info.snap_revision, "1234")
-        self.assertEqual(controller_info.snap_update_revision, "5678")
-        self.assertEqual(controller_info.snap_cohort, "abc123")
-        self.assertIsNotNone(controller_info.update_first_reported)
-
-    def test_set_versions_info_snap_no_update(self):
-        controller = factory.make_RackController()
-        versions = SnapVersionsInfo(
-            current={
-                "revision": "1234",
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-            },
-            channel={"track": "3.0", "risk": "stable"},
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        controller_info = controller.controllerinfo
-        self.assertEqual(controller_info.update_origin, "3.0/stable")
-        self.assertEqual(controller_info.snap_update_revision, "")
-        self.assertEqual(controller_info.snap_cohort, "")
-        self.assertIsNone(controller_info.update_first_reported)
-
-    def test_set_versions_info_deb(self):
-        controller = factory.make_RackController()
-        versions = DebVersionsInfo(
-            current={
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-                "origin": "http://archive.ubuntu.com/ focal/main",
-            },
-            update={
-                "version": "3.0.0~alpha2-222-g.cafecafe",
-                "origin": "http://mymirror.example.com/ focal/main",
-            },
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        controller_info = controller.controllerinfo
-        self.assertEqual(
-            controller_info.install_type, CONTROLLER_INSTALL_TYPE.DEB
-        )
-        self.assertEqual(
-            controller_info.version, "3.0.0~alpha1-111-g.deadbeef"
-        )
-        self.assertEqual(
-            controller_info.update_version, "3.0.0~alpha2-222-g.cafecafe"
-        )
-        # the origin for the update is used
-        self.assertEqual(
-            controller_info.update_origin,
-            "http://mymirror.example.com/ focal/main",
-        )
-        self.assertEqual(controller_info.snap_revision, "")
-        self.assertEqual(controller_info.snap_update_revision, "")
-        self.assertEqual(controller_info.snap_cohort, "")
-        self.assertIsNotNone(controller_info.update_first_reported)
-
-    def test_set_versions_info_deb_no_update(self):
-        controller = factory.make_RackController()
-        versions = DebVersionsInfo(
-            current={
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-                "origin": "http://archive.ubuntu.com/ focal/main",
-            },
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        controller_info = controller.controllerinfo
-        self.assertEqual(controller_info.update_version, "")
-        self.assertEqual(
-            controller_info.update_origin,
-            "http://archive.ubuntu.com/ focal/main",
-        )
-        self.assertIsNone(controller_info.update_first_reported)
-
-    def test_set_versions_info_deb_ppa(self):
-        controller = factory.make_RackController()
-        versions = DebVersionsInfo(
-            current={
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-                "origin": "http://ppa.launchpad.net/maas/3.0/ubuntu/ focal/main",
-            },
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        self.assertEqual(
-            controller.controllerinfo.update_origin,
-            "ppa:maas/3.0",
-        )
-
-    def test_set_versions_info_deb_ppa_update(self):
-        controller = factory.make_RackController()
-        versions = DebVersionsInfo(
-            current={
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-            },
-            update={
-                "version": "3.0.1-222-g.cafecafe",
-                "origin": "http://ppa.launchpad.net/maas/3.0/ubuntu/ focal/main",
-            },
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        self.assertEqual(
-            controller.controllerinfo.update_origin,
-            "ppa:maas/3.0",
-        )
-
-    def test_set_versions_info_change_type(self):
-        controller = factory.make_RackController()
-        deb_versions = DebVersionsInfo(
-            current={
-                "version": "3.0.0",
-                "origin": "http://archive.ubuntu.com/ focal/main",
-            },
-            update={
-                "version": "3.0.1",
-                "origin": "http://mymirror.example.com/ focal/main",
-            },
-        )
-        snap_versions = SnapVersionsInfo(
-            current={
-                "revision": "1234",
-                "version": "3.1.0",
-            },
-            channel={"track": "3.0", "risk": "stable"},
-            update={
-                "revision": "5678",
-                "version": "3.1.1",
-            },
-            cohort="abc123",
-        )
-        ControllerInfo.objects.set_versions_info(controller, deb_versions)
-        ControllerInfo.objects.set_versions_info(controller, snap_versions)
-        controller_info = reload_object(controller).controllerinfo
-        # all fields are updated
-        self.assertEqual(
-            controller_info.install_type, CONTROLLER_INSTALL_TYPE.SNAP
-        )
-        self.assertEqual(controller_info.version, "3.1.0")
-        self.assertEqual(controller_info.update_version, "3.1.1")
-        self.assertEqual(controller_info.update_origin, "3.0/stable")
-        self.assertEqual(controller_info.snap_revision, "1234")
-        self.assertEqual(controller_info.snap_update_revision, "5678")
-        self.assertEqual(controller_info.snap_cohort, "abc123")
-
-    def test_set_versions_update_first_reported_update_same_update(self):
-        controller = factory.make_RackController()
-        versions = SnapVersionsInfo(
-            current={
-                "revision": "1234",
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-            },
-            update={
-                "revision": "5678",
-                "version": "3.0.0~alpha2-222-g.cafecafe",
-            },
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        update_first_reported = controller.controllerinfo.update_first_reported
-        versions = SnapVersionsInfo(
-            current={
-                "revision": "1234",
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-            },
-            update={
-                "revision": "5678",
-                "version": "3.0.0~alpha2-222-g.cafecafe",
-            },
-        )
-        controller_info = reload_object(controller).controllerinfo
-        self.assertEqual(
-            controller_info.update_first_reported, update_first_reported
-        )
-
-    def test_set_versions_update_first_reported_update_different_update(self):
-        controller = factory.make_RackController()
-        versions = SnapVersionsInfo(
-            current={
-                "revision": "1234",
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-            },
-            update={
-                "revision": "5678",
-                "version": "3.0.0~alpha2-222-g.cafecafe",
-            },
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        update_first_reported = controller.controllerinfo.update_first_reported
-        versions = SnapVersionsInfo(
-            current={
-                "revision": "1234",
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-            },
-            update={
-                "revision": "5678",
-                "version": "3.0.0~alpha3-333-g.adadadad",
-            },
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        controller_info = reload_object(controller).controllerinfo
-        self.assertGreater(
-            controller_info.update_first_reported, update_first_reported
-        )
-
-    def test_set_versions_update_first_reported_update_same_update_different_install_type(
-        self,
-    ):
-        controller = factory.make_RackController()
-        versions = DebVersionsInfo(
-            current={
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-                "origin": "http://archive.ubuntu.com/ focal/main",
-            },
-            update={
-                "version": "3.0.0~alpha2-222-g.cafecafe",
-                "origin": "http://archive.ubuntu.com/ focal/main",
-            },
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        update_first_reported = controller.controllerinfo.update_first_reported
-        versions = SnapVersionsInfo(
-            current={
-                "revision": "1234",
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-            },
-            update={
-                "revision": "5678",
-                "version": "3.0.0~alpha2-222-g.cafecafe",
-            },
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        controller_info = reload_object(controller).controllerinfo
-        self.assertGreater(
-            controller_info.update_first_reported, update_first_reported
-        )
-
-    def test_set_versions_update_first_reported_no_update(self):
-        controller = factory.make_RackController()
-        versions = SnapVersionsInfo(
-            current={
-                "revision": "1234",
-                "version": "3.0.0~alpha1-111-g.deadbeef",
-            },
-            update={
-                "revision": "5678",
-                "version": "3.0.0~alpha2-222-g.cafecafe",
-            },
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        versions = SnapVersionsInfo(
-            current={
-                "revision": "5678",
-                "version": "3.0.0~alpha2-222-g.cafecafe",
-            },
-        )
-        ControllerInfo.objects.set_versions_info(controller, versions)
-        controller_info = reload_object(controller).controllerinfo
-        self.assertIsNone(controller_info.update_first_reported)
-
-    def test_is_up_to_date(self):
-        version = "3.0.0~alpha1-111-g.deadbeef"
-        target_version = TargetVersion(
-            version=MAASVersion.from_string(version),
-            snap_channel="3.0/stable",
-        )
-        controller = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            controller,
-            SnapVersionsInfo(
-                current={
-                    "revision": "1234",
-                    "version": version,
-                },
-            ),
-        )
-        self.assertTrue(controller.info.is_up_to_date(target_version))
-
-    def test_is_up_to_date_with_update(self):
-        version = "3.0.0~alpha1-111-g.deadbeef"
-        target_version = TargetVersion(
-            version=MAASVersion.from_string(version),
-            snap_channel="3.0/stable",
-        )
-        controller = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            controller,
-            SnapVersionsInfo(
-                current={
-                    "revision": "1234",
-                    "version": version,
-                },
-                update={
-                    "revision": "5678",
-                    "version": "3.0.0-222-g.cafecafe",
-                },
-            ),
-        )
-        self.assertFalse(controller.info.is_up_to_date(target_version))
-
-    def test_is_up_to_date_with_different_version(self):
-        target_version = TargetVersion(
-            version=MAASVersion.from_string("3.0.0-222-g.cafecafe"),
-            snap_channel="3.0/stable",
-        )
-        controller = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            controller,
-            SnapVersionsInfo(
-                current={
-                    "revision": "1234",
-                    "version": "3.0.0~alpha1-111-g.deadbeef",
-                },
-            ),
-        )
-        self.assertFalse(controller.info.is_up_to_date(target_version))
-
-    def test_get_version_issues(self):
-        target_version = TargetVersion(
-            version=MAASVersion.from_string("3.0.0-222-g.cafecafe"),
-            snap_channel="3.0/stable",
-        )
-        controller = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            controller,
-            SnapVersionsInfo(
-                current={
-                    "revision": "1234",
-                    "version": "3.0.0~alpha1-111-g.deadbeef",
-                },
-                channel="3.0/beta",
-                cohort="abc",
-            ),
-        )
-        self.assertEqual(
-            controller.info.get_version_issues(target_version),
-            [
-                VERSION_ISSUES.DIFFERENT_CHANNEL.value,
-                VERSION_ISSUES.DIFFERENT_COHORT.value,
-            ],
-        )
+        self.assertThat(controller.interfaces, Equals(interfaces))
+        self.assertThat(controller.interface_update_hints, Equals(hints))
 
 
-class TestGetTargetVersion(MAASServerTestCase):
-    def test_empty(self):
-        factory.make_RackController()
-        self.assertIsNone(get_target_version())
-
-    def test_return_highest_version(self):
-        c1 = factory.make_RackController()
-        c2 = factory.make_RackController()
-        c3 = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(current={"version": "3.0.0~alpha1-111-g.aaa"}),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            DebVersionsInfo(current={"version": "3.0.0~beta1-222-g.bbb"}),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c3,
-            DebVersionsInfo(current={"version": "3.0.0-333-g.ccc"}),
-        )
-        target_version = get_target_version()
-        self.assertEqual(
-            target_version.version,
-            MAASVersion.from_string("3.0.0-333-g.ccc"),
-        )
-
-    def test_return_highest_update(self):
-        c1 = factory.make_RackController()
-        c2 = factory.make_RackController()
-        c3 = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "2.9.0-001-g.zzz"},
-                update={"version": "3.0.0~alpha1-111-g.aaa"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            DebVersionsInfo(
-                current={"version": "2.9.0-001-g.zzz"},
-                update={"version": "3.0.0~beta1-222-g.bbb"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c3,
-            DebVersionsInfo(
-                current={"version": "2.9.0-001-g.zzz"},
-                update={"version": "3.0.0-333-g.ccc"},
-            ),
-        )
-        target_version = get_target_version()
-        self.assertEqual(
-            target_version.version,
-            MAASVersion.from_string("3.0.0-333-g.ccc"),
-        )
-
-        self.assertEqual(
-            target_version.first_reported,
-            c3.info.update_first_reported,
-        )
-
-    def test_update_return_earliest_reported(self):
-        c1 = factory.make_RackController()
-        c2 = factory.make_RackController()
-        c3 = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "2.9.0-001-g.zzz"},
-                update={"version": "3.0.0~alpha1-111-g.aaa"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            DebVersionsInfo(
-                current={"version": "2.9.0-001-g.zzz"},
-                update={"version": "3.0.0-333-g.ccc"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c3,
-            DebVersionsInfo(
-                current={"version": "2.9.0-001-g.zzz"},
-                update={"version": "3.0.0-333-g.ccc"},
-            ),
-        )
-        target_version = get_target_version()
-        self.assertEqual(
-            target_version.version,
-            MAASVersion.from_string("3.0.0-333-g.ccc"),
-        )
-        self.assertEqual(
-            target_version.first_reported,
-            c2.info.update_first_reported,
-        )
-
-    def test_update_older_than_installed(self):
-        c1 = factory.make_RackController()
-        c2 = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            DebVersionsInfo(
-                current={"version": "2.9.0-001-g.zzz"},
-                update={"version": "2.9.1-010-g.bbb"},
-            ),
-        )
-        target_version = get_target_version()
-        self.assertEqual(
-            target_version.version, MAASVersion.from_string("3.0.0-111-g.aaa")
-        )
-
-    def test_snap_channel(self):
-        c1 = factory.make_RackController()
-        c2 = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                channel={"track": "3.0", "risk": "stable"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                channel={"track": "3.0", "risk": "beta"},
-            ),
-        )
-        target_version = get_target_version()
-        # the most stable channel is returned
-        self.assertEqual(
-            target_version.snap_channel,
-            SnapChannel("3.0", "stable"),
-        )
-
-    def test_snap_channel_no_branch(self):
-        controller = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            controller,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                channel={"track": "3.0", "risk": "beta", "branch": "mybranch"},
-            ),
-        )
-        target_version = get_target_version()
-        self.assertEqual(
-            target_version.snap_channel,
-            SnapChannel("3.0", "beta"),
-        )
-
-    def test_snap_channel_keep_release_branch(self):
-        controller = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            controller,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                channel={
-                    "track": "3.0",
-                    "risk": "beta",
-                    "branch": "ubuntu-20.04",
-                },
-            ),
-        )
-        target_version = get_target_version()
-        self.assertEqual(
-            target_version.snap_channel,
-            SnapChannel("3.0", "beta", branch="ubuntu-20.04"),
-        )
-
-    def test_snap_channel_from_version(self):
-        c1 = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0~rc1-111-g.aaa"},
-            ),
-        )
-        target_version = get_target_version()
-        self.assertEqual(
-            target_version.snap_channel,
-            SnapChannel("3.0", "candidate"),
-        )
-
-    def test_snap_channel_ignores_deb(self):
-        c1 = factory.make_RackController()
-        c2 = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                channel={"track": "3.0", "risk": "stable"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            DebVersionsInfo(
-                current={
-                    "version": "3.0.0~beta1-001-g.bbb",
-                    "origin": "http://archive.ubuntu.com/ focal/main",
-                },
-                update={
-                    "version": "3.0.0-111-g.aaa",
-                    "origin": "http://archive.ubuntu.com/ focal/main",
-                },
-            ),
-        )
-        target_version = get_target_version()
-        self.assertEqual(
-            target_version.snap_channel,
-            SnapChannel("3.0", "stable"),
-        )
-
-    def test_snap_cohort_from_target_version(self):
-        c1 = factory.make_RackController()
-        c2 = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                cohort="abc",
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            SnapVersionsInfo(
-                current={"version": "3.0.1-222-g.bbb", "revision": "5678"},
-                cohort="xyz",
-            ),
-        )
-        target_version = get_target_version()
-        self.assertEqual(target_version.snap_cohort, "xyz")
-
-    def test_snap_cohort_from_update(self):
-        c1 = factory.make_RackController()
-        c2 = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                cohort="abc",
-                update={"version": "3.0.2-333-g.ccc", "revision": "7890"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            SnapVersionsInfo(
-                current={"version": "3.0.1-222-g.bbb", "revision": "5678"},
-                cohort="xyz",
-            ),
-        )
-        target_version = get_target_version()
-        self.assertEqual(target_version.snap_cohort, "abc")
-
-    def test_snap_cohort_multiple_cohorts_target_version(self):
-        c1 = factory.make_RackController()
-        c2 = factory.make_RackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                cohort="abc",
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                cohort="xyz",
-            ),
-        )
-        target_version = get_target_version()
-        self.assertEqual(target_version.snap_cohort, "")
-
-
-class TestGetMAASVersion(MAASServerTestCase):
-    def test_no_versions(self):
-        factory.make_RegionRackController()
-        factory.make_RegionRackController()
-        self.assertIsNone(get_maas_version())
-
-    def test_version_with_highest_count(self):
+class TestGetControllerVersionInfo(MAASServerTestCase):
+    def test_sorts_controllerversioninfo_by_most_recent_version_first(self):
         c1 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_version(c1, "3.0.0")
+        ControllerInfo.objects.set_version(c1, "2.3.0")
         c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_version(c2, "3.0.0")
+        ControllerInfo.objects.set_version(c2, "2.4.0")
         c3 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_version(c3, "3.1.0")
-        self.assertEqual(get_maas_version(), MAASVersion.from_string("3.0.0"))
+        ControllerInfo.objects.set_version(c3, "2.3.5")
+        version_info = ControllerInfo.objects.get_controller_version_info()
+        # Should have returend a list of ControllerVersionInfo objects.
+        for i in range(len(version_info)):
+            self.assertThat(
+                isinstance(version_info[i], ControllerVersionInfo), Is(True)
+            )
+        # The versions should be in descending order.
+        self.assertThat(version_info[0].version, Equals("2.4.0"))
+        self.assertThat(version_info[1].version, Equals("2.3.5"))
+        self.assertThat(version_info[2].version, Equals("2.3.0"))
 
-    def test_highest_version_same_count(self):
-        c1 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_version(c1, "3.0.0")
-        c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_version(c2, "3.1.0")
-        self.assertEqual(get_maas_version(), MAASVersion.from_string("3.1.0"))
 
-    def test_combine_versions_up_to_qualifier(self):
-        c1 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_version(c1, "3.0.0~beta1-123-g.asdf")
-        c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_version(c2, "3.0.0~beta2-456-g.cafe")
-        c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_version(c2, "3.0.0~beta2-789-g.abcd")
-        c3 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_version(c3, "3.1.0")
-        self.assertEqual(
-            get_maas_version(), MAASVersion.from_string("3.0.0~beta2")
+class TestCreateOrUpdateVersionNotification(MAASServerTestCase):
+    def test_create(self):
+        system_id = "xyzzy"
+        create_or_update_version_notification(
+            system_id,
+            "Fix your MAAS, you slacker! It's only version {ver}.",
+            context=dict(ver="1.9"),
         )
+        expected_notification = Notification.objects.filter(
+            ident=VERSION_NOTIFICATION_IDENT + system_id
+        ).first()
+        self.assertThat(
+            expected_notification.render(),
+            Equals("Fix your MAAS, you slacker! It's only version 1.9."),
+        )
+
+    def test_update(self):
+        system_id = "xyzzy"
+        create_or_update_version_notification(
+            system_id,
+            "Fix your MAAS, you slacker! It's only version {ver}.",
+            context=dict(ver="1.9"),
+        )
+        # The second time should update.
+        create_or_update_version_notification(
+            system_id,
+            "I can't believe you. Still using MAAS {ver}?!",
+            context=dict(ver="2.0"),
+        )
+        expected_notification = Notification.objects.filter(
+            ident=VERSION_NOTIFICATION_IDENT + system_id
+        ).first()
+        self.assertThat(
+            expected_notification.render(),
+            Equals("I can't believe you. Still using MAAS 2.0?!"),
+        )
+
+
+def get_version_notifications():
+    return Notification.objects.filter(
+        ident__startswith=VERSION_NOTIFICATION_IDENT
+    )
 
 
 class TestUpdateVersionNotifications(MAASServerTestCase):
-    def test_same_upgrade(self):
+    def test_single_controller_never_generates_notifications(self):
+        c1 = factory.make_RegionRackController()
+        self.assertThat(get_version_notifications().count(), Equals(0))
+        ControllerInfo.objects.set_version(c1, "2.3.0")
+        self.assertThat(get_version_notifications().count(), Equals(0))
+        ControllerInfo.objects.set_version(c1, None)
+        self.assertThat(get_version_notifications().count(), Equals(0))
+        ControllerInfo.objects.set_version(c1, "")
+        self.assertThat(get_version_notifications().count(), Equals(0))
+
+    def test_out_of_date_controller_generates_concise_notification(self):
         c1 = factory.make_RegionRackController()
         c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa"},
-                update={"version": "3.0.1-222-g.bbb"},
+        ControllerInfo.objects.set_version(c1, "2.3.0-500-g1")
+        ControllerInfo.objects.set_version(c2, "2.3.1-500-g1")
+        self.assertThat(get_version_notifications().count(), Equals(1))
+        self.assertThat(
+            get_version_notifications().first().render(),
+            Equals(
+                KNOWN_VERSION_MISMATCH_NOTIFICATION.format(
+                    system_id=c1.system_id, hostname=c1.hostname, v1="2.3.0"
+                )
             ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa"},
-                update={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        self.assertFalse(
-            Notification.objects.filter(
-                ident=UPGRADE_ISSUE_NOTIFICATION_IDENT
-            ).exists()
         )
 
-    def test_different_versions(self):
+    def test_version_qualifiers_considered(self):
         c1 = factory.make_RegionRackController()
         c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa"},
+        # Note: the revno and git revision are intentionally identical here,
+        # so we know they don't affect the comparison of qualifiers, and we
+        # know that useless information won't appear in the notification.
+        ControllerInfo.objects.set_version(c1, "2.3.0~alpha1-500-g1")
+        ControllerInfo.objects.set_version(c2, "2.3.0~alpha2-500-g1")
+        self.assertThat(get_version_notifications().count(), Equals(1))
+        self.assertThat(
+            get_version_notifications().first().render(),
+            Equals(
+                KNOWN_VERSION_MISMATCH_NOTIFICATION.format(
+                    system_id=c1.system_id,
+                    hostname=c1.hostname,
+                    v1="2.3.0~alpha1",
+                )
             ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            DebVersionsInfo(
-                current={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        notification = Notification.objects.filter(
-            ident=UPGRADE_ISSUE_NOTIFICATION_IDENT
-        ).first()
-        self.assertIn(
-            "Controllers have different versions.",
-            notification.message,
         )
 
-    def test_different_upgrades(self):
+    def test_assumes_old_controller_if_version_unknown(self):
         c1 = factory.make_RegionRackController()
         c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa"},
-                update={"version": "3.0.1-222-g.bbb"},
+        ControllerInfo.objects.set_version(c1, "2.3.0")
+        self.assertThat(get_version_notifications().count(), Equals(1))
+        self.assertThat(
+            get_version_notifications().first().render(),
+            Equals(
+                UNKNOWN_VERSION_MISMATCH_NOTIFICATION.format(
+                    system_id=c2.system_id, hostname=c2.hostname
+                )
             ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa"},
-                update={"version": "3.0.2-333-g.ccc"},
-            ),
-        )
-        notification = Notification.objects.filter(
-            ident=UPGRADE_ISSUE_NOTIFICATION_IDENT
-        ).first()
-        self.assertIn(
-            "Controllers report different upgrade versions.",
-            notification.message,
         )
 
-    def test_different_install_types(self):
+    def test_revno_differences_cause_full_version_to_be_shown(self):
         c1 = factory.make_RegionRackController()
         c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa"},
+        ControllerInfo.objects.set_version(c1, "2.3.0~beta2-6000-g123abc")
+        ControllerInfo.objects.set_version(c2, "2.3.0~beta2-6001-g234bcd")
+        self.assertThat(get_version_notifications().count(), Equals(1))
+        self.assertThat(
+            get_version_notifications().first().render(),
+            Equals(
+                KNOWN_VERSION_MISMATCH_NOTIFICATION.format(
+                    system_id=c1.system_id,
+                    hostname=c1.hostname,
+                    v1="2.3.0~beta2 (6000-g123abc)",
+                )
             ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-            ),
-        )
-        notification = Notification.objects.filter(
-            ident=UPGRADE_ISSUE_NOTIFICATION_IDENT
-        ).first()
-        self.assertIn(
-            "Controllers have different installation sources.",
-            notification.message,
         )
 
-    def test_different_origins(self):
+    def test_upgrading_controller_causes_old_notifications_to_go_away(self):
         c1 = factory.make_RegionRackController()
-        c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                channel={"track": "3.0", "risk": "stable"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                channel={"track": "3.0", "risk": "beta"},
-            ),
-        )
-        notification = Notification.objects.filter(
-            ident=UPGRADE_ISSUE_NOTIFICATION_IDENT
-        ).first()
-        self.assertIn(
-            "Controllers have different installation sources.",
-            notification.message,
-        )
+        c2 = factory.make_RegionController()
+        ControllerInfo.objects.set_version(c1, "2.3.0~beta2-6000-g123abc")
+        ControllerInfo.objects.set_version(c2, "2.3.0~beta2-6001-g234bcd")
+        self.assertThat(get_version_notifications().count(), Equals(1))
+        ControllerInfo.objects.set_version(c1, "2.3.0~beta2-6001-g234bcd")
+        self.assertThat(get_version_notifications().count(), Equals(0))
 
-    def test_different_snap_cohorts(self):
+    def test_deleting_controller_causes_old_notifications_to_go_away(self):
         c1 = factory.make_RegionRackController()
-        c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                cohort="abc",
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                cohort="xyz",
-            ),
-        )
-        notification = Notification.objects.filter(
-            ident=UPGRADE_ISSUE_NOTIFICATION_IDENT
-        ).first()
-        self.assertIn(
-            "Controllers have different installation sources.",
-            notification.message,
-        )
-
-    def test_issue_resolved_removes_notification(self):
-        c1 = factory.make_RegionRackController()
-        c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                cohort="abc",
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-            ),
-        )
-        self.assertTrue(
-            Notification.objects.filter(
-                ident=UPGRADE_ISSUE_NOTIFICATION_IDENT
-            ).exists()
-        )
-        # remove the cohort
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-            ),
-        )
-        self.assertFalse(
-            Notification.objects.filter(
-                ident=UPGRADE_ISSUE_NOTIFICATION_IDENT
-            ).exists()
-        )
-
-    def test_different_issue_new_notification(self):
-        c1 = factory.make_RegionRackController()
-        c2 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                channel={"track": "3.0", "risk": "stable"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            SnapVersionsInfo(
-                current={"version": "3.0.0-111-g.aaa", "revision": "1234"},
-                channel={"track": "3.0", "risk": "beta"},
-            ),
-        )
-        notification1 = Notification.objects.filter(
-            ident=UPGRADE_ISSUE_NOTIFICATION_IDENT
-        ).first()
-        self.assertIn(
-            "Controllers have different installation sources.",
-            notification1.message,
-        )
-        ControllerInfo.objects.set_versions_info(
-            c2,
-            SnapVersionsInfo(
-                current={"version": "3.0.2-222-g.bbb", "revision": "5678"},
-                channel={"track": "3.0", "risk": "stable"},
-            ),
-        )
-        notification2 = Notification.objects.filter(
-            ident=UPGRADE_ISSUE_NOTIFICATION_IDENT
-        ).first()
-        self.assertIn(
-            "Controllers have different versions.",
-            notification2.message,
-        )
-        self.assertNotEqual(notification1.id, notification2.id)
-
-    def test_update_status_update_available(self):
-        c1 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111.aaa"},
-                update={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        notification = Notification.objects.filter(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-        ).first()
-        self.assertEqual(notification.category, "info")
-        self.assertEqual(
-            notification.render(),
-            "MAAS 3.0.1 is available, controllers will upgrade soon.",
-        )
-        self.assertEqual(
-            notification.context,
-            {"status": "inprogress", "version": "3.0.1"},
-        )
-
-    def test_update_status_update_same_version(self):
-        c1 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111.aaa"},
-                update={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        notification1 = Notification.objects.filter(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-        ).first()
-        self.assertEqual(
-            notification1.render(),
-            "MAAS 3.0.1 is available, controllers will upgrade soon.",
-        )
-        # report again, same version
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111.aaa"},
-                update={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        notification2 = Notification.objects.filter(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-        ).first()
-        self.assertEqual(
-            notification2.render(),
-            "MAAS 3.0.1 is available, controllers will upgrade soon.",
-        )
-        self.assertEqual(
-            notification2.context,
-            {"status": "inprogress", "version": "3.0.1"},
-        )
-        self.assertEqual(notification1.id, notification2.id)
-
-    def test_update_status_update_new_version(self):
-        c1 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111.aaa"},
-                update={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        notification1 = Notification.objects.filter(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-        ).first()
-        self.assertEqual(
-            notification1.render(),
-            "MAAS 3.0.1 is available, controllers will upgrade soon.",
-        )
-        # report again, but new upgrade version
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111.aaa"},
-                update={"version": "3.0.2-333-g.ccc"},
-            ),
-        )
-        notification2 = Notification.objects.filter(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-        ).first()
-        self.assertEqual(
-            notification2.render(),
-            "MAAS 3.0.2 is available, controllers will upgrade soon.",
-        )
-        self.assertEqual(
-            notification2.context,
-            {"status": "inprogress", "version": "3.0.2"},
-        )
-        self.assertNotEqual(notification1.id, notification2.id)
-
-    def test_update_status_update_completed(self):
-        c1 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111.aaa"},
-                update={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        notification1 = Notification.objects.filter(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-        ).first()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        notification2 = Notification.objects.filter(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-        ).first()
-        self.assertEqual(notification2.category, "success")
-        self.assertEqual(
-            notification2.render(),
-            "MAAS has been updated to version 3.0.1.",
-        )
-        self.assertEqual(
-            notification2.context,
-            {"status": "completed", "version": "3.0.1"},
-        )
-        self.assertNotEqual(notification1.id, notification2.id)
-
-    def test_update_status_update_already_completed(self):
-        c1 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111.aaa"},
-                update={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        notification1 = Notification.objects.filter(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-        ).first()
-        # report again, but with no change
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        notification2 = Notification.objects.filter(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-        ).first()
-        self.assertEqual(
-            notification2.render(),
-            "MAAS has been updated to version 3.0.1.",
-        )
-        self.assertEqual(
-            notification2.context,
-            {"status": "completed", "version": "3.0.1"},
-        )
-        self.assertEqual(notification1.id, notification2.id)
-
-    def test_update_status_new_update_already_completed(self):
-        c1 = factory.make_RegionRackController()
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.0-111.aaa"},
-                update={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.1-222-g.bbb"},
-            ),
-        )
-        notification1 = Notification.objects.filter(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-        ).first()
-        # a new update is available
-        ControllerInfo.objects.set_versions_info(
-            c1,
-            DebVersionsInfo(
-                current={"version": "3.0.1-222-g.bbb"},
-                update={"version": "3.0.2-333-g.ccc"},
-            ),
-        )
-        notification2 = Notification.objects.filter(
-            ident=UPGRADE_STATUS_NOTIFICATION_IDENT,
-        ).first()
-        self.assertEqual(
-            notification2.render(),
-            "MAAS 3.0.2 is available, controllers will upgrade soon.",
-        )
-        self.assertEqual(
-            notification2.context,
-            {"status": "inprogress", "version": "3.0.2"},
-        )
-        self.assertNotEqual(notification1.id, notification2.id)
+        c2 = factory.make_RegionController()
+        ControllerInfo.objects.set_version(c1, "2.3.0~beta2-6000-g123abc")
+        ControllerInfo.objects.set_version(c2, "2.3.0~beta2-6001-g234bcd")
+        self.assertThat(get_version_notifications().count(), Equals(1))
+        c2.delete()
+        self.assertThat(get_version_notifications().count(), Equals(0))

@@ -13,16 +13,11 @@ from provisioningserver.drivers.pod import (
     DiscoveredMachine,
     DiscoveredPod,
     DiscoveredPodHints,
-    DiscoveredPodProject,
     get_error_message,
 )
 from provisioningserver.drivers.pod.registry import PodDriverRegistry
 from provisioningserver.logger import get_maas_logger, LegacyLogger
-from provisioningserver.refresh.maas_api_helper import (
-    Credentials,
-    signal,
-    SignalException,
-)
+from provisioningserver.refresh.maas_api_helper import signal, SignalException
 from provisioningserver.rpc.exceptions import (
     PodActionFail,
     PodInvalidResources,
@@ -32,34 +27,6 @@ from provisioningserver.utils.twisted import asynchronous
 
 maaslog = get_maas_logger("pod")
 log = LegacyLogger()
-
-
-@asynchronous
-def discover_pod_projects(pod_type, context):
-    """Discover projects in the specified pod."""
-    pod_driver = PodDriverRegistry.get_item(pod_type)
-    if pod_driver is None:
-        raise UnknownPodType(pod_type)
-
-    # there's no database ID for the pod yet as it's not register. The ID is
-    # only used for logging, so we pass 0 to distinguish from existing pods.
-    d = ensureDeferred(pod_driver.discover_projects(0, context))
-
-    def convert(projects):
-        return {
-            "projects": [
-                DiscoveredPodProject(
-                    name=project["name"], description=project["description"]
-                )
-                for project in projects
-            ]
-        }
-
-    d.addCallback(convert)
-    d.addErrback(
-        convert_errors, log_message="Failed to discover VM host projects."
-    )
-    return d
 
 
 @asynchronous
@@ -93,8 +60,18 @@ def discover_pod(pod_type, context, pod_id=None, name=None):
         else:
             return {"pod": result}
 
+    def catch_all(failure):
+        """Convert all failures into `PodActionFail` unless already a
+        `PodActionFail` or `NotImplementedError`."""
+        # Log locally to help debugging.
+        log.err(failure, "Failed to discover pod.")
+        if failure.check(NotImplementedError, PodActionFail):
+            return failure
+        else:
+            raise PodActionFail(get_error_message(failure.value))
+
     d.addCallback(convert)
-    d.addErrback(convert_errors, log_message="Failed to discover VM host.")
+    d.addErrback(catch_all)
     return d
 
 
@@ -138,12 +115,23 @@ def compose_machine(pod_type, context, request, pod_id, name):
                     "invalid result." % pod_type
                 )
 
+    def catch_all(failure):
+        """Convert all failures into `PodActionFail` unless already a
+        `PodActionFail`, `PodInvalidResources` or `NotImplementedError`."""
+        if failure.check(PodInvalidResources):
+            # Driver returned its own invalid resource exception instead of
+            # None. Just pass this onto the region.
+            return failure
+
+        # Log locally to help debugging.
+        log.err(failure, "%s: Failed to compose machine: %s" % (name, request))
+        if failure.check(NotImplementedError, PodActionFail):
+            return failure
+        else:
+            raise PodActionFail(get_error_message(failure.value))
+
     d.addCallback(convert)
-    d.addErrback(
-        convert_errors,
-        log_message=f"{name}: Failed to compose machine: {request}",
-        keep_failures=[PodInvalidResources],
-    )
+    d.addErrback(catch_all)
     return d
 
 
@@ -163,9 +151,8 @@ def send_pod_commissioning_results(
     pod_driver = PodDriverRegistry.get_item(pod_type)
     if pod_driver is None:
         raise UnknownPodType(pod_type)
-    try:
-        d = ensureDeferred(pod_driver.get_commissioning_data(pod_id, context))
-    except ValueError:
+    d = pod_driver.get_commissioning_data(pod_id, context)
+    if not isinstance(d, Deferred):
         raise PodActionFail(
             f"bad pod driver '{pod_type}'; 'get_commissioning_data' did not return Deferred."
         )
@@ -179,11 +166,12 @@ def send_pod_commissioning_results(
             try:
                 signal(
                     url=metadata_url.geturl(),
-                    credentials=Credentials(
-                        token_key=token_key,
-                        token_secret=token_secret,
-                        consumer_key=consumer_key,
-                    ),
+                    creds={
+                        "consumer_key": consumer_key,
+                        "token_key": token_key,
+                        "token_secret": token_secret,
+                        "consumer_secret": "",
+                    },
                     status="WORKING",
                     files={
                         # UI shows combined output by default.
@@ -199,8 +187,18 @@ def send_pod_commissioning_results(
                 )
             except SignalException as e:
                 raise PodActionFail(
-                    f"Unable to send Pod commissioning information for {name}({system_id}): {e}"
+                    f"Unable to send Pod commissioning information for {name}({system_id}): {e.error}"
                 )
+
+    def catch_all(failure):
+        """Convert all failures into `PodActionFail` unless already a
+        `PodActionFail` or `NotImplementedError`."""
+        # Log locally to help debugging.
+        log.err(failure, "Failed to send_pod_commissioning_results.")
+        if failure.check(NotImplementedError, PodActionFail):
+            return failure
+        else:
+            raise PodActionFail(get_error_message(failure.value))
 
     d.addCallback(
         lambda commissioning_results: deferToThread(
@@ -208,9 +206,7 @@ def send_pod_commissioning_results(
         )
     )
     d.addCallback(lambda _: {})
-    d.addErrback(
-        convert_errors, log_message="Failed to send_pod_commissioning_results."
-    )
+    d.addErrback(catch_all)
     return d
 
 
@@ -238,23 +234,16 @@ def decompose_machine(pod_type, context, pod_id, name):
         else:
             return {"hints": result}
 
+    def catch_all(failure):
+        """Convert all failures into `PodActionFail` unless already a
+        `PodActionFail` or `NotImplementedError`."""
+        # Log locally to help debugging.
+        log.err(failure, "Failed to decompose machine.")
+        if failure.check(NotImplementedError, PodActionFail):
+            return failure
+        else:
+            raise PodActionFail(get_error_message(failure.value))
+
     d.addCallback(convert)
-    d.addErrback(convert_errors, log_message="Failed to decompose machine.")
+    d.addErrback(catch_all)
     return d
-
-
-def convert_errors(failure, log_message=None, keep_failures=None):
-    """Convert all failures into PodActionFail unless already a
-    PodActionFail or NotImplementedError.
-
-    Optionally, also log a failure message.
-    """
-    valid_failures = [NotImplementedError, PodActionFail]
-    if keep_failures:
-        valid_failures.extend(keep_failures)
-    if log_message:
-        log.err(failure, log_message)
-    if failure.check(*valid_failures):
-        return failure
-    else:
-        raise PodActionFail(get_error_message(failure.value))

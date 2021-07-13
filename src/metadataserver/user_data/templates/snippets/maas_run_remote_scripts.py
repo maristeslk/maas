@@ -27,7 +27,6 @@ import http.client
 from io import BytesIO
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import shutil
@@ -53,24 +52,22 @@ import yaml
 
 try:
     from maas_api_helper import (
-        capture_script_output,
-        Config,
-        get_base_url,
         geturl,
         MD_VERSION,
+        read_config,
         signal,
         SignalException,
+        capture_script_output,
     )
 except ImportError:
     # For running unit tests.
     from snippets.maas_api_helper import (
-        capture_script_output,
-        Config,
-        get_base_url,
         geturl,
         MD_VERSION,
+        read_config,
         signal,
         SignalException,
+        capture_script_output,
     )
 
 
@@ -78,7 +75,9 @@ NETPLAN_DIR = "/etc/netplan"
 
 
 def fail(msg):
-    sys.exit("FAIL: %s" % msg)
+    sys.stderr.write("FAIL: %s" % msg)
+    sys.stderr.flush()
+    sys.exit(1)
 
 
 def signal_wrapper(url, creds, *args, **kwargs):
@@ -86,18 +85,19 @@ def signal_wrapper(url, creds, *args, **kwargs):
     # During enlistment the token_secret isn't received until the
     # machine has been created. Don't try to send anything and let
     # the caller know nothing was sent by returning False
-    if not creds.token_secret:
+    if not creds["token_secret"]:
         return False
     try:
         signal(url, creds, *args, **kwargs)
     except SignalException as e:
-        fail(e)
+        fail(e.error)
     return True
 
 
 def output_and_send(error, send_result=True, *args, **kwargs):
     """Output the error message to stderr and send iff send_result is True."""
-    sys.stderr.write("%s\n" % error)
+    sys.stdout.write("%s\n" % error)
+    sys.stdout.flush()
     if send_result:
         return signal_wrapper(*args, error=error, **kwargs)
     else:
@@ -385,12 +385,13 @@ class CustomNetworking:
         self.netplan_yaml = os.path.join(self.config_dir, "netplan.yaml")
         self.send_result = send_result
         if scripts:
-            self.config = scripts[0]["config"]
+            self.url = scripts[0]["args"]["url"]
+            self.creds = scripts[0]["args"]["creds"]
             self.apply_configured_networking = scripts[0].get(
                 "apply_configured_networking", False
             )
         else:
-            self.config = None
+            self.url = self.creds = None
             self.apply_configured_networking = False
 
     def _bring_down_networking(self):
@@ -511,8 +512,8 @@ class CustomNetworking:
         if self.send_result:
             # Confirm we can still communicate with MAAS.
             signal_wrapper(
-                self.config.metadata_url,
-                self.config.credentials,
+                self.url,
+                self.creds,
                 "APPLYING_NETCONF",
                 "ephemeral netplan applied",
             )
@@ -574,8 +575,8 @@ class CustomNetworking:
             # Confirm we can still communicate with MAAS.
             if self.send_result:
                 signal(
-                    self.config.metadata_url,
-                    self.config.credentials,
+                    self.url,
+                    self.creds,
                     "APPLYING_NETCONF",
                     "User netplan config applied",
                 )
@@ -949,7 +950,7 @@ def get_mac_addresses_for_enlistment():
     return ",".join(
         [
             mac
-            for mac in get_interfaces()
+            for mac in get_interfaces().keys()
             # This is an OpenBMC MAC and as such, we ignore it.
             # This MAC will be the same for all Wedge systems (e.g Wedge 40/100).
             if mac != "02:00:00:00:00:02"
@@ -957,7 +958,7 @@ def get_mac_addresses_for_enlistment():
     )
 
 
-def enlist(config, power_type=None, power_parameters=None):
+def enlist(url, creds, power_type=None, power_parameters=None):
     """Enlist a new machine with MAAS.
 
     Create a new machine by interacting with the MAAS machines endpoint. Once
@@ -977,7 +978,6 @@ def enlist(config, power_type=None, power_parameters=None):
         post_data["power_type"] = power_type
     if power_parameters:
         post_data["power_parameters"] = json.dumps(power_parameters)
-    url = config.metadata_url
     machine = get_maas_machines(url, post_data=post_data)
     preseed_url = urlparse(url)
     preseed_url = preseed_url._replace(
@@ -989,9 +989,10 @@ def enlist(config, power_type=None, power_parameters=None):
     preseed = geturl(preseed_url.geturl()).read()
     # Overwrite the enlistment preseed as it doesn't contain
     # credentials. This isn't neccessary but can help with debug.
-    if config.config_path.exists():
-        config.config_path.unlink()
-    config.config_path.write_bytes(preseed)
+    if os.path.exists(creds["config_path"]):
+        os.remove(creds["config_path"])
+    with open(creds["config_path"], "wb") as f:
+        f.write(preseed)
     preseed_config = yaml.safe_load(preseed)
     if "datasource" in preseed_config:
         preseed_config = preseed_config["datasource"]["MAAS"]
@@ -1002,7 +1003,7 @@ def enlist(config, power_type=None, power_parameters=None):
         "consumer_secret",
     ]:
         if key in preseed_config:
-            setattr(config.credentials, key, preseed_config[key])
+            creds[key] = preseed_config[key]
 
 
 # Store whether the BMC config has already been uploaded so it only
@@ -1035,13 +1036,14 @@ def bmc_config(script, send_result=True):
         # Create the machine object and get credentials.
         try:
             enlist(
-                script["config"],
+                script["args"]["url"],
+                script["args"]["creds"],
                 power_type,
                 config,
             )
         except Exception as e:
             # If enlistment failed with power credentials try again without
-            enlist(script["config"])
+            enlist(script["args"]["url"], script["args"]["creds"])
             _bmc_config_uploaded = True
             raise e
 
@@ -1064,7 +1066,6 @@ def run_script(script, scripts_dir, send_result=True):
     output_and_send("Starting %s" % script["msg_name"], **args)
 
     env = copy.deepcopy(os.environ)
-    env["MAAS_BASE_URL"] = get_base_url(script["config"].metadata_url)
     env["OUTPUT_COMBINED_PATH"] = script["combined_path"]
     env["OUTPUT_STDOUT_PATH"] = script["stdout_path"]
     env["OUTPUT_STDERR_PATH"] = script["stderr_path"]
@@ -1273,7 +1274,7 @@ def run_serial_scripts(scripts, scripts_dir, config_dir, send_result=True):
         # If the machine hasn't been created by the time all serially run
         # commissioning scripts have finished no BMC detection script has
         # found an applicable BMC. Create the machine with no BMC credentials.
-        enlist(scripts[0]["config"])
+        enlist(scripts[0]["args"]["url"], scripts[0]["args"]["creds"])
         send_unsent_results(scripts)
     return fail_count
 
@@ -1338,7 +1339,7 @@ def run_parallel_scripts(scripts, scripts_dir, config_dir, send_result=True):
                 for script in sorted(
                     nscripts,
                     key=lambda i: (
-                        len(i.get("packages", {})),
+                        len(i.get("packages", {}).keys()),
                         i["name"],
                     ),
                 ):
@@ -1390,7 +1391,8 @@ def add_push_data(script):
 
 
 def run_scripts(
-    config,
+    url,
+    creds,
     scripts_dir,
     out_dir,
     scripts,
@@ -1420,10 +1422,9 @@ def run_scripts(
     ):
         # The arguments used to send MAAS data about the result of the script.
         script["args"] = {
-            "url": config.metadata_url,
-            "creds": config.credentials,
+            "url": url,
+            "creds": creds,
         }
-        script["config"] = config
         add_push_data(script)
         # Create a seperate output directory for each script being run as
         # multiple scripts with the same name may be run.
@@ -1486,7 +1487,7 @@ def run_scripts(
 
 
 def run_scripts_from_metadata(
-    config, scripts_dir, out_dir, send_result=True, download=True
+    url, creds, scripts_dir, out_dir, send_result=True, download=True
 ):
     """Run all scripts from a tar given by MAAS."""
     with open(os.path.join(scripts_dir, "index.json")) as f:
@@ -1498,7 +1499,8 @@ def run_scripts_from_metadata(
         sys.stdout.write("Starting commissioning scripts...\n")
         sys.stdout.flush()
         fail_count += run_scripts(
-            config,
+            url,
+            creds,
             scripts_dir,
             out_dir,
             commissioning_scripts,
@@ -1506,12 +1508,12 @@ def run_scripts_from_metadata(
             allow_bmc_detection=True,
         )
 
-    if fail_count:
+    if fail_count != 0:
         output_and_send(
             "%d commissioning scripts failed to run" % fail_count,
             send_result,
-            config.metadata_url,
-            config.credentials,
+            url,
+            creds,
             "FAILED",
         )
         return fail_count
@@ -1521,13 +1523,11 @@ def run_scripts_from_metadata(
     # the for_hardware field.
     if commissioning_scripts is not None and download:
         if not download_and_extract_tar(
-            config.metadata_url + "maas-scripts",
-            config.credentials,
-            scripts_dir,
+            "%smaas-scripts" % url, creds, scripts_dir
         ):
             return fail_count
         return run_scripts_from_metadata(
-            config, scripts_dir, out_dir, send_result, download
+            url, creds, scripts_dir, out_dir, send_result, download
         )
 
     testing_scripts = scripts.get("testing_scripts")
@@ -1535,19 +1535,19 @@ def run_scripts_from_metadata(
         # If the node status was COMMISSIONING transition the node into TESTING
         # status. If the node is already in TESTING status this is ignored.
         if send_result:
-            signal_wrapper(config.metadata_url, config.credentials, "TESTING")
+            signal_wrapper(url, creds, "TESTING")
 
         sys.stdout.write("Starting testing scripts...\n")
         sys.stdout.flush()
         fail_count += run_scripts(
-            config, scripts_dir, out_dir, testing_scripts, send_result
+            url, creds, scripts_dir, out_dir, testing_scripts, send_result
         )
         if fail_count != 0:
             output_and_send(
                 "%d test scripts failed to run" % fail_count,
                 send_result,
-                config.metadata_url,
-                config.credentials,
+                url,
+                creds,
                 "FAILED",
             )
 
@@ -1663,39 +1663,32 @@ def main():
     parser.add_argument(
         "storage_directory",
         nargs="?",
-        default=Path(__file__).parent.parent.absolute(),
+        default=os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
         help="Directory to store the extracted data from the metadata service.",
     )
 
     args = parser.parse_args()
 
-    config = Config(
-        config={
-            "consumer_key": args.ckey,
-            "token_key": args.tkey,
-            "token_secret": args.tsec,
-            "consumer_secret": args.csec,
-            "metadata_url": args.url,
-            "config_path": args.config,
-        }
-    )
+    creds = {
+        "consumer_key": args.ckey,
+        "token_key": args.tkey,
+        "token_secret": args.tsec,
+        "consumer_secret": args.csec,
+        "metadata_url": args.url,
+        "config_path": args.config,
+    }
 
     if args.config:
-        config.update_from_url(args.config)
+        read_config(args.config, creds)
 
-    if not config.metadata_url:
+    url = creds.get("metadata_url")
+    if url is None:
         fail("URL must be provided either in --url or in config\n")
-    if config.metadata_url.endswith("/"):
-        config.metadata_url = config.metadata_url[:-1]
-    config.metadata_url = "{url}/{apiver}/".format(
-        url=config.metadata_url,
-        apiver=args.apiver,
-    )
+    if url.endswith("/"):
+        url = url[:-1]
+    url = "%s/%s/" % (url, args.apiver)
 
-    url = config.metadata_url
-    creds = config.credentials
-
-    if not creds.token_secret and get_maas_machines(
+    if not creds["token_secret"] and get_maas_machines(
         url,
         {
             "op": "is_registered",
@@ -1710,8 +1703,10 @@ def main():
 
     # Disable the OOM killer on the runner process, the OOM killer will still
     # go after any tests spawned.
-    oom_score_adj_path = Path("/proc") / str(os.getpid()) / "oom_score_adj"
-    oom_score_adj_path.write_text("-1000")
+    oom_score_adj_path = os.path.join(
+        "/proc", str(os.getpid()), "oom_score_adj"
+    )
+    open(oom_score_adj_path, "w").write("-1000")
     # Give the runner the highest nice value to ensure the heartbeat keeps
     # running.
     os.nice(-20)
@@ -1734,11 +1729,12 @@ def main():
     fail_count = 0
     if not args.no_download:
         has_content = download_and_extract_tar(
-            url + "maas-scripts", creds, scripts_dir
+            "%smaas-scripts" % url, creds, scripts_dir
         )
     if has_content:
         fail_count = run_scripts_from_metadata(
-            config,
+            url,
+            creds,
             scripts_dir,
             out_dir,
             not args.no_send,

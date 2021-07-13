@@ -45,7 +45,11 @@ from maasserver.testing.testcase import MAASTransactionServerTestCase
 from maasserver.utils import ignore_unused
 from maasserver.utils.orm import reload_object, transactional
 from maasserver.utils.threads import deferToDatabase
-from maastesting.matchers import MockCalledOnceWith, MockCalledWith
+from maastesting.matchers import (
+    MockCalledOnce,
+    MockCalledOnceWith,
+    MockCalledWith,
+)
 from maastesting.testcase import MAASTestCase
 from maastesting.twisted import TwistedLoggerFixture
 from provisioningserver.rpc.exceptions import NoSuchCluster, NoSuchNode
@@ -56,6 +60,7 @@ from provisioningserver.rpc.region import (
     GetArchiveMirrors,
     GetBootConfig,
     GetBootSources,
+    GetBootSourcesV2,
     GetControllerType,
     GetDNSConfiguration,
     GetProxies,
@@ -73,6 +78,7 @@ from provisioningserver.rpc.region import (
     RequestRackRefresh,
     SendEvent,
     SendEventMACAddress,
+    UpdateInterfaces,
     UpdateLease,
     UpdateNodePowerState,
     UpdateServices,
@@ -331,6 +337,26 @@ class TestRegionProtocol_GetBootSources(MAASTransactionServerTestCase):
         uuid = factory.make_name("uuid")
 
         d = call_responder(Region(), GetBootSources, {"uuid": uuid})
+
+        def check(response):
+            self.assertEqual(
+                {"sources": [get_simplestream_endpoint()]}, response
+            )
+
+        return d.addCallback(check)
+
+
+class TestRegionProtocol_GetBootSourcesV2(MAASTransactionServerTestCase):
+    def test_get_boot_sources_v2_is_registered(self):
+        protocol = Region()
+        responder = protocol.locateResponder(GetBootSourcesV2.commandName)
+        self.assertIsNotNone(responder)
+
+    @wait_for_reactor
+    def test_get_boot_sources_v2_returns_simplestreams_endpoint(self):
+        uuid = factory.make_name("uuid")
+
+        d = call_responder(Region(), GetBootSourcesV2, {"uuid": uuid})
 
         def check(response):
             self.assertEqual(
@@ -1176,6 +1202,35 @@ class TestRegionProtocol_CommissionNode(MAASTransactionServerTestCase):
         )
 
 
+class TestRegionProtocol_UpdateInterfaces(MAASTransactionServerTestCase):
+    def test_update_interfaces_is_registered(self):
+        protocol = Region()
+        responder = protocol.locateResponder(UpdateInterfaces.commandName)
+        self.assertIsNotNone(responder)
+
+    @wait_for_reactor
+    @inlineCallbacks
+    def test_calls_update_interfaces_function(self):
+        update_interfaces = self.patch(
+            regionservice.rackcontrollers, "update_interfaces"
+        )
+
+        params = {
+            "system_id": factory.make_name("system_id"),
+            "interfaces": {"eth0": {"type": "physical"}},
+        }
+
+        response = yield call_responder(Region(), UpdateInterfaces, params)
+        self.assertIsNotNone(response)
+
+        self.assertThat(
+            update_interfaces,
+            MockCalledOnceWith(
+                params["system_id"], params["interfaces"], topology_hints=None
+            ),
+        )
+
+
 class TestRegionProtocol_ReportNeighbours(MAASTestCase):
     def test_report_neighbours_is_registered(self):
         protocol = Region()
@@ -1248,7 +1303,7 @@ class TestRegionProtocol_RequestNodeInforByMACAddress(
         copy_response = dict(response)
         del copy_response["boot_type"]
         self.assertAttributes(node, copy_response)
-        self.assertEqual("fastpath", response["boot_type"])
+        self.assertEquals("fastpath", response["boot_type"])
 
     @wait_for_reactor
     def test_request_node_info_by_mac_address_raises_if_unknown_mac(self):
@@ -1265,27 +1320,18 @@ class TestRegionProtocol_RequestRefresh(MAASTransactionServerTestCase):
 
     @wait_for_reactor
     @inlineCallbacks
-    def test_prepares_for_refresh(self):
-        def get_events(rack):
-            return [
-                event.type.name
-                for event in Event.objects.filter(
-                    node_system_id=rack.system_id
-                )
-            ]
-
+    def test_calls_refresh(self):
         rack = yield deferToDatabase(factory.make_RackController)
+        self.patch(regionservice, "deferToDatabase").return_value = succeed(
+            rack
+        )
+        mock_refresh = self.patch(rack, "refresh")
         response = yield call_responder(
-            Region(),
-            RequestRackRefresh,
-            {"system_id": rack.system_id},
+            Region(), RequestRackRefresh, {"system_id": rack.system_id}
         )
-        self.assertCountEqual(
-            ["consumer_key", "token_key", "token_secret"], response.keys()
-        )
+        self.assertIsNotNone(response)
 
-        event_names = yield deferToDatabase(get_events, rack)
-        self.assertIn("REQUEST_CONTROLLER_REFRESH", event_names)
+        self.assertThat(mock_refresh, MockCalledOnce())
 
 
 class TestRegionProtocol_GetControllerType(MAASTransactionServerTestCase):

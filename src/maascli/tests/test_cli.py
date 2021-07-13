@@ -4,21 +4,25 @@
 """Tests for `maascli.cli`."""
 
 
+import doctest
 from io import StringIO
 import json
 import os
 import sys
+from textwrap import dedent
 from unittest.mock import sentinel
 
 from django.core import management
+from testtools.matchers import DocTestMatches
 
 from apiclient.creds import convert_string_to_tuple
-from maascli import cli, init, snap
+from maascli import cli, init, snappy
 from maascli.auth import UnexpectedResponse
 from maascli.parser import ArgumentParser
 from maascli.tests.test_auth import make_options
 from maastesting.factory import factory
 from maastesting.fixtures import TempDirectory
+from maastesting.matchers import MockCalledOnceWith, MockNotCalled
 from maastesting.testcase import MAASTestCase
 
 
@@ -47,7 +51,7 @@ class TestRegisterCommands(MAASTestCase):
         mock_load_regiond_commands = self.patch(cli, "load_regiond_commands")
         parser = ArgumentParser()
         cli.register_cli_commands(parser)
-        mock_load_regiond_commands.assert_not_called()
+        self.assertThat(mock_load_regiond_commands, MockNotCalled())
 
     def test_doesnt_call_load_regiond_commands_if_no_maasserver(self):
         self.patch(
@@ -57,7 +61,7 @@ class TestRegisterCommands(MAASTestCase):
         mock_load_regiond_commands = self.patch(cli, "load_regiond_commands")
         parser = ArgumentParser()
         cli.register_cli_commands(parser)
-        mock_load_regiond_commands.assert_not_called()
+        self.assertThat(mock_load_regiond_commands, MockNotCalled())
 
     def test_calls_load_regiond_commands_when_management_and_maasserver(self):
         self.patch(
@@ -69,8 +73,9 @@ class TestRegisterCommands(MAASTestCase):
         mock_load_regiond_commands = self.patch(cli, "load_regiond_commands")
         parser = ArgumentParser()
         cli.register_cli_commands(parser)
-        mock_load_regiond_commands.assert_called_once_with(
-            sentinel.management, parser
+        self.assertThat(
+            mock_load_regiond_commands,
+            MockCalledOnceWith(sentinel.management, parser),
         )
 
     def test_loads_all_regiond_commands(self):
@@ -102,7 +107,9 @@ class TestRegisterCommands(MAASTestCase):
         parser = ArgumentParser()
         cli.register_cli_commands(parser)
         subparser = parser.subparsers.choices.get("init")
-        self.assertIsInstance(subparser.get_default("execute"), snap.cmd_init)
+        self.assertIsInstance(
+            subparser.get_default("execute"), snappy.cmd_init
+        )
 
     def test_load_init_command_no_snap(self):
         environ = {}
@@ -141,10 +148,13 @@ class TestLogin(MAASTestCase):
         login = cli.cmd_login(parser)
         error = self.assertRaises(SystemExit, login, options)
         self.assertEqual("The MAAS server rejected your API key.", str(error))
-        check_key.assert_called_once_with(
-            options.url,
-            convert_string_to_tuple(options.credentials),
-            options.insecure,
+        self.assertThat(
+            check_key,
+            MockCalledOnceWith(
+                options.url,
+                convert_string_to_tuple(options.credentials),
+                options.insecure,
+            ),
         )
 
     def test_cmd_login_raises_unexpected_error_when_validating_apikey(self):
@@ -165,12 +175,24 @@ class TestLogin(MAASTestCase):
         }
         stdout = self.patch(sys, "stdout", StringIO())
         cli.cmd_login.print_whats_next(profile)
-        output = stdout.getvalue()
-        self.assertIn(
-            f"You are now logged in to the MAAS server at {profile['url']}",
-            output,
+        expected = (
+            dedent(
+                """\
+
+            You are now logged in to the MAAS server at %(url)s
+            with the profile name '%(name)s'.
+
+            For help with the available commands, try:
+
+              maas %(name)s --help
+
+            """
+            )
+            % profile
         )
-        self.assertIn(f"maas {profile['name']} --help", output)
+        observed = stdout.getvalue()
+        flags = doctest.ELLIPSIS | doctest.NORMALIZE_WHITESPACE
+        self.assertThat(observed, DocTestMatches(expected, flags))
 
 
 class TestCmdInit(MAASTestCase):
@@ -212,11 +234,11 @@ class TestCmdInit(MAASTestCase):
 
 class TestReconfigureSupervisord(MAASTestCase):
     def test_cmd_configure_supervisord(self):
-        self.patch(snap, "get_current_mode").return_value = "region+rack"
-        mock_render_supervisord = self.patch(snap, "render_supervisord")
-        mock_sighup_supervisord = self.patch(snap, "sighup_supervisord")
+        self.patch(snappy, "get_current_mode").return_value = "region+rack"
+        mock_render_supervisord = self.patch(snappy, "render_supervisord")
+        mock_sighup_supervisord = self.patch(snappy, "sighup_supervisord")
         parser = ArgumentParser()
-        cmd = snap.cmd_reconfigure_supervisord(parser)
+        cmd = snappy.cmd_reconfigure_supervisord(parser)
         cmd(parser.parse_args([]))
         mock_render_supervisord.assert_called_once_with("region+rack")
         mock_sighup_supervisord.assert_called_once()

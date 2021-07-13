@@ -1,4 +1,4 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """RPC declarations for clusters.
@@ -10,9 +10,12 @@ __all__ = [
     "Authenticate",
     "ConfigureDHCPv4",
     "ConfigureDHCPv4",
+    "ConfigureDHCPv4_V2",
     "ConfigureDHCPv6",
     "ConfigureDHCPv6",
+    "ConfigureDHCPv6_V2",
     "DescribePowerTypes",
+    "DescribeNOSTypes",
     "GetPreseedData",
     "Identify",
     "ListBootImages",
@@ -23,10 +26,11 @@ __all__ = [
     "PowerOff",
     "PowerOn",
     "PowerQuery",
-    "SetBootOrder",
     "ScanNetworks",
     "ValidateDHCPv4Config",
+    "ValidateDHCPv4Config_V2",
     "ValidateDHCPv6Config",
+    "ValidateDHCPv6Config_V2",
     "ValidateLicenseKey",
 ]
 
@@ -34,8 +38,11 @@ from twisted.protocols import amp
 
 from provisioningserver.rpc import exceptions
 from provisioningserver.rpc.arguments import (
+    AmpDiscoveredMachine,
+    AmpDiscoveredPod,
+    AmpDiscoveredPodHints,
     AmpList,
-    AttrsClassArgument,
+    AmpRequestedMachine,
     Bytes,
     CompressedAmpList,
     IPAddress,
@@ -47,6 +54,33 @@ from provisioningserver.rpc.common import Authenticate, Identify
 
 
 class ListBootImages(amp.Command):
+    """List the boot images available on this rack controller.
+
+    :since: 1.5
+    """
+
+    arguments = []
+    response = [
+        (
+            b"images",
+            AmpList(
+                [
+                    (b"osystem", amp.Unicode()),
+                    (b"architecture", amp.Unicode()),
+                    (b"subarchitecture", amp.Unicode()),
+                    (b"release", amp.Unicode()),
+                    (b"label", amp.Unicode()),
+                    (b"purpose", amp.Unicode()),
+                    (b"xinstall_type", amp.Unicode()),
+                    (b"xinstall_path", amp.Unicode()),
+                ]
+            ),
+        )
+    ]
+    errors = []
+
+
+class ListBootImagesV2(amp.Command):
     """List the boot images available on this rack controller.
 
     This command compresses the images list to allow more images in the
@@ -84,6 +118,17 @@ class DescribePowerTypes(amp.Command):
 
     arguments = []
     response = [(b"power_types", StructureAsJSON())]
+    errors = []
+
+
+class DescribeNOSTypes(amp.Command):
+    """Get a JSON Schema describing this rack's NOS types.
+
+    :since: 2.3
+    """
+
+    arguments = []
+    response = [(b"nos_types", StructureAsJSON())]
     errors = []
 
 
@@ -264,40 +309,125 @@ class PowerCycle(_Power):
     """
 
 
-class SetBootOrder(_Power):
-    """Remotely configure a BMC's boot order
+class _ConfigureDHCP(amp.Command):
+    """Configure a DHCP server.
 
-    :since: 2.10
+    :since: 2.0
     """
 
     arguments = [
-        (b"system_id", amp.Unicode()),
-        (b"hostname", amp.Unicode()),
-        (b"power_type", amp.Unicode()),
-        # We can't define a tighter schema here because this is a highly
-        # variable bag of arguments from a variety of sources.
-        (b"context", StructureAsJSON()),
+        (b"omapi_key", amp.Unicode()),
         (
-            b"order",
+            b"failover_peers",
             AmpList(
                 [
-                    (b"id", amp.Integer()),
                     (b"name", amp.Unicode()),
-                    # Fields used with Interfaces
-                    (b"mac_address", amp.Unicode(optional=True)),
-                    (b"vendor", amp.Unicode(optional=True)),
-                    (b"product", amp.Unicode(optional=True)),
-                    # Fields used with Blockdevices
-                    (b"id_path", amp.Unicode(optional=True)),
-                    (b"model", amp.Unicode(optional=True)),
-                    (b"serial", amp.Unicode(optional=True)),
+                    (b"mode", amp.Unicode()),
+                    (b"address", amp.Unicode()),
+                    (b"peer_address", amp.Unicode()),
                 ]
             ),
         ),
+        (
+            b"shared_networks",
+            CompressedAmpList(
+                [
+                    (b"name", amp.Unicode()),
+                    (
+                        b"subnets",
+                        AmpList(
+                            [
+                                (b"subnet", amp.Unicode()),
+                                (b"subnet_mask", amp.Unicode()),
+                                (b"subnet_cidr", amp.Unicode()),
+                                (b"broadcast_ip", amp.Unicode()),
+                                (b"router_ip", amp.Unicode()),
+                                # dns_servers is a space- or comma-separated list (it's not
+                                # clear which) of IP addresses. In _ConfigureDHCP_V2 is it a
+                                # list proper.
+                                (b"dns_servers", amp.Unicode()),
+                                # ntp_server (note: singular) is a space- or comma-separated
+                                # list (it's not clear which) of IP addresses and/or
+                                # hostnames. In _ConfigureDHCP_V2 is it a list proper.
+                                (b"ntp_server", amp.Unicode()),
+                                (b"domain_name", amp.Unicode()),
+                                (
+                                    b"search_list",
+                                    amp.ListOf(amp.Unicode(), optional=True),
+                                ),
+                                (
+                                    b"pools",
+                                    AmpList(
+                                        [
+                                            (b"ip_range_low", amp.Unicode()),
+                                            (b"ip_range_high", amp.Unicode()),
+                                            (
+                                                b"failover_peer",
+                                                amp.Unicode(optional=True),
+                                            ),
+                                        ]
+                                    ),
+                                ),
+                                (
+                                    b"dhcp_snippets",
+                                    AmpList(
+                                        [
+                                            (b"name", amp.Unicode()),
+                                            (
+                                                b"description",
+                                                amp.Unicode(optional=True),
+                                            ),
+                                            (b"value", amp.Unicode()),
+                                        ],
+                                        optional=True,
+                                    ),
+                                ),
+                            ]
+                        ),
+                    ),
+                    (b"mtu", amp.Integer(optional=True)),
+                ]
+            ),
+        ),
+        (
+            b"hosts",
+            CompressedAmpList(
+                [
+                    (b"host", amp.Unicode()),
+                    (b"mac", amp.Unicode()),
+                    (b"ip", amp.Unicode()),
+                    (
+                        b"dhcp_snippets",
+                        AmpList(
+                            [
+                                (b"name", amp.Unicode()),
+                                (b"description", amp.Unicode(optional=True)),
+                                (b"value", amp.Unicode()),
+                            ],
+                            optional=True,
+                        ),
+                    ),
+                ]
+            ),
+        ),
+        (b"interfaces", AmpList([(b"name", amp.Unicode())])),
+        (
+            b"global_dhcp_snippets",
+            CompressedAmpList(
+                [
+                    (b"name", amp.Unicode()),
+                    (b"description", amp.Unicode(optional=True)),
+                    (b"value", amp.Unicode()),
+                ],
+                optional=True,
+            ),
+        ),
     ]
+    response = []
+    errors = {exceptions.CannotConfigureDHCP: b"CannotConfigureDHCP"}
 
 
-class _ConfigureDHCP(amp.Command):
+class _ConfigureDHCP_V2(amp.Command):
     """Configure a DHCP server.
 
     :since: 2.1
@@ -347,28 +477,6 @@ class _ConfigureDHCP(amp.Command):
                                                 b"failover_peer",
                                                 amp.Unicode(optional=True),
                                             ),
-                                            (
-                                                b"dhcp_snippets",
-                                                AmpList(
-                                                    [
-                                                        (
-                                                            b"name",
-                                                            amp.Unicode(),
-                                                        ),
-                                                        (
-                                                            b"description",
-                                                            amp.Unicode(
-                                                                optional=True
-                                                            ),
-                                                        ),
-                                                        (
-                                                            b"value",
-                                                            amp.Unicode(),
-                                                        ),
-                                                    ],
-                                                    optional=True,
-                                                ),
-                                            ),
                                         ]
                                     ),
                                 ),
@@ -386,11 +494,7 @@ class _ConfigureDHCP(amp.Command):
                                         optional=True,
                                     ),
                                 ),
-                                (
-                                    b"disabled_boot_architectures",
-                                    amp.ListOf(amp.Unicode(optional=True)),
-                                ),
-                            ],
+                            ]
                         ),
                     ),
                     (b"mtu", amp.Integer(optional=True)),
@@ -439,6 +543,28 @@ class _ConfigureDHCP(amp.Command):
 class _ValidateDHCPConfig(_ConfigureDHCP):
     """Validate the configure the DHCPv4 server.
 
+    :since: 2.0
+    """
+
+    response = [
+        (
+            b"errors",
+            CompressedAmpList(
+                [
+                    (b"error", amp.Unicode()),
+                    (b"line_num", amp.Integer()),
+                    (b"line", amp.Unicode()),
+                    (b"position", amp.Unicode()),
+                ],
+                optional=True,
+            ),
+        )
+    ]
+
+
+class _ValidateDHCPConfig_V2(_ConfigureDHCP_V2):
+    """Validate the configure the DHCPv4 server.
+
     :since: 2.1
     """
 
@@ -461,11 +587,25 @@ class _ValidateDHCPConfig(_ConfigureDHCP):
 class ConfigureDHCPv4(_ConfigureDHCP):
     """Configure the DHCPv4 server.
 
+    :since: 2.0
+    """
+
+
+class ConfigureDHCPv4_V2(_ConfigureDHCP_V2):
+    """Configure the DHCPv4 server.
+
     :since: 2.1
     """
 
 
 class ValidateDHCPv4Config(_ValidateDHCPConfig):
+    """Validate the configure the DHCPv4 server.
+
+    :since: 2.0
+    """
+
+
+class ValidateDHCPv4Config_V2(_ValidateDHCPConfig_V2):
     """Validate the configure the DHCPv4 server.
 
     :since: 2.1
@@ -475,11 +615,25 @@ class ValidateDHCPv4Config(_ValidateDHCPConfig):
 class ConfigureDHCPv6(_ConfigureDHCP):
     """Configure the DHCPv6 server.
 
+    :since: 2.0
+    """
+
+
+class ConfigureDHCPv6_V2(_ConfigureDHCP_V2):
+    """Configure the DHCPv6 server.
+
     :since: 2.1
     """
 
 
 class ValidateDHCPv6Config(_ValidateDHCPConfig):
+    """Configure the DHCPv6 server.
+
+    :since: 2.0
+    """
+
+
+class ValidateDHCPv6Config_V2(_ValidateDHCPConfig_V2):
     """Configure the DHCPv6 server.
 
     :since: 2.1
@@ -557,6 +711,22 @@ class IsImportBootImagesRunning(amp.Command):
     errors = {}
 
 
+class RefreshRackControllerInfo(amp.Command):
+    """Refresh the rack controller's hardware and network details.
+
+    :since: 2.0
+    """
+
+    arguments = [
+        (b"system_id", amp.Unicode()),
+        (b"consumer_key", amp.Unicode()),
+        (b"token_key", amp.Unicode()),
+        (b"token_secret", amp.Unicode()),
+    ]
+    response = [(b"maas_version", amp.Unicode())]
+    errors = {exceptions.RefreshAlreadyInProgress: b"RefreshAlreadyInProgress"}
+
+
 class AddChassis(amp.Command):
     """Probe and enlist the chassis which a rack controller can connect to.
 
@@ -575,40 +745,8 @@ class AddChassis(amp.Command):
         (b"power_control", amp.Unicode(optional=True)),
         (b"port", amp.Integer(optional=True)),
         (b"protocol", amp.Unicode(optional=True)),
-        (b"token_name", amp.Unicode(optional=True)),
-        (b"token_secret", amp.Unicode(optional=True)),
-        (b"verify_ssl", amp.Boolean(optional=True)),
     ]
     errors = {}
-
-
-class DiscoverPodProjects(amp.Command):
-    """Discover pod projects names.
-
-    :since: 2.10
-    """
-
-    arguments = [
-        (b"type", amp.Unicode()),
-        # We can't define a tighter schema here because this is a highly
-        # variable bag of arguments from a variety of sources.
-        (b"context", StructureAsJSON()),
-    ]
-    response = [
-        (
-            b"projects",
-            amp.ListOf(
-                AttrsClassArgument(
-                    "provisioningserver.drivers.pod.DiscoveredPodProject"
-                )
-            ),
-        )
-    ]
-    errors = {
-        exceptions.UnknownPodType: b"UnknownPodType",
-        NotImplementedError: b"NotImplementedError",
-        exceptions.PodActionFail: b"PodActionFail",
-    }
 
 
 class DiscoverPod(amp.Command):
@@ -625,12 +763,7 @@ class DiscoverPod(amp.Command):
         # variable bag of arguments from a variety of sources.
         (b"context", StructureAsJSON()),
     ]
-    response = [
-        (
-            b"pod",
-            AttrsClassArgument("provisioningserver.drivers.pod.DiscoveredPod"),
-        )
-    ]
+    response = [(b"pod", AmpDiscoveredPod())]
     errors = {
         exceptions.UnknownPodType: b"UnknownPodType",
         NotImplementedError: b"NotImplementedError",
@@ -675,26 +808,11 @@ class ComposeMachine(amp.Command):
         # We can't define a tighter schema here because this is a highly
         # variable bag of arguments from a variety of sources.
         (b"context", StructureAsJSON()),
-        (
-            b"request",
-            AttrsClassArgument(
-                "provisioningserver.drivers.pod.RequestedMachine"
-            ),
-        ),
+        (b"request", AmpRequestedMachine()),
     ]
     response = [
-        (
-            b"machine",
-            AttrsClassArgument(
-                "provisioningserver.drivers.pod.DiscoveredMachine"
-            ),
-        ),
-        (
-            b"hints",
-            AttrsClassArgument(
-                "provisioningserver.drivers.pod.DiscoveredPodHints"
-            ),
-        ),
+        (b"machine", AmpDiscoveredMachine()),
+        (b"hints", AmpDiscoveredPodHints()),
     ]
     errors = {
         exceptions.UnknownPodType: b"UnknownPodType",
@@ -718,14 +836,7 @@ class DecomposeMachine(amp.Command):
         # variable bag of arguments from a variety of sources.
         (b"context", StructureAsJSON()),
     ]
-    response = [
-        (
-            b"hints",
-            AttrsClassArgument(
-                "provisioningserver.drivers.pod.DiscoveredPodHints"
-            ),
-        )
-    ]
+    response = [(b"hints", AmpDiscoveredPodHints())]
     errors = {
         exceptions.UnknownPodType: b"UnknownPodType",
         NotImplementedError: b"NotImplementedError",

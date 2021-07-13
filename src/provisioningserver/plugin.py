@@ -46,10 +46,9 @@ class ProvisioningServiceMaker:
 
     def _makeHTTPService(self):
         """Create the HTTP service."""
+        from provisioningserver.rackdservices.http import HTTPResource
         from twisted.application.internet import StreamServerEndpointService
         from twisted.internet.endpoints import AdoptedStreamServerEndpoint
-
-        from provisioningserver.rackdservices.http import HTTPResource
         from provisioningserver.utils.twisted import SiteNoLog
 
         port = 5249
@@ -90,10 +89,9 @@ class ProvisioningServiceMaker:
         # If the TFTP port has been set to zero, use the experimental offload
         # service. Otherwise stick to the normal in-process TFTP service.
         if tftp_port == 0:
-            from twisted.internet.endpoints import UNIXServerEndpoint
-
             from provisioningserver.path import get_maas_data_path
             from provisioningserver.rackdservices import tftp_offload
+            from twisted.internet.endpoints import UNIXServerEndpoint
 
             tftp_offload_socket = get_maas_data_path("tftp-offload.sock")
             tftp_offload_endpoint = UNIXServerEndpoint(
@@ -196,15 +194,6 @@ class ProvisioningServiceMaker:
         external_service.setName("external")
         return external_service
 
-    def _makeSnapUpdateCheckService(self, rpc_service):
-        from provisioningserver.rackdservices.version_update_check import (
-            RackVersionUpdateCheckService,
-        )
-
-        update_check_service = RackVersionUpdateCheckService(rpc_service)
-        update_check_service.setName("version_update_check")
-        return update_check_service
-
     def _makeServices(self, tftp_root, tftp_port, clock=reactor):
         # Several services need to make use of the RPC service.
         rpc_service = self._makeRPCService()
@@ -219,7 +208,6 @@ class ProvisioningServiceMaker:
         yield self._makeImageDownloadService(rpc_service, tftp_root)
         yield self._makeRackHTTPService(tftp_root, rpc_service)
         yield self._makeExternalService(rpc_service)
-        yield self._makeSnapUpdateCheckService(rpc_service)
         # The following are network-accessible services.
         yield self._makeHTTPService()
         yield self._makeTFTPService(tftp_root, tftp_port, rpc_service)

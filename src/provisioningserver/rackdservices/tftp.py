@@ -1,4 +1,4 @@
-# Copyright 2012-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2019 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Twisted Application Plugin for the MAAS TFTP server."""
@@ -324,7 +324,7 @@ class TFTPBackend(FilesystemSynchronousBackend):
 
     @deferred
     @typed
-    def handle_boot_method(self, file_name: TFTPPath, protocol: str, result):
+    def handle_boot_method(self, file_name: TFTPPath, result):
         boot_method, params = result
         if boot_method is None:
             return super().get_reader(file_name)
@@ -341,7 +341,6 @@ class TFTPBackend(FilesystemSynchronousBackend):
         params["local_ip"] = local_host
         remote_host, remote_port = tftp.get_remote_address()
         params["remote_ip"] = remote_host
-        params["protocol"] = protocol if protocol else "tftp"
         d = self.get_boot_method_reader(boot_method, params)
         return d
 
@@ -359,12 +358,7 @@ class TFTPBackend(FilesystemSynchronousBackend):
 
     @deferred
     @typed
-    def get_reader(
-        self,
-        file_name: TFTPPath,
-        skip_logging: bool = False,
-        protocol: str = None,
-    ):
+    def get_reader(self, file_name: TFTPPath, skip_logging: bool = False):
         """See `IBackend.get_reader()`.
 
         If `file_name` matches a boot method then the response is obtained
@@ -380,7 +374,7 @@ class TFTPBackend(FilesystemSynchronousBackend):
             # 2 log messages are not created.
             log_request(file_name)
         d = self.get_boot_method(file_name)
-        d.addCallback(partial(self.handle_boot_method, file_name, protocol))
+        d.addCallback(partial(self.handle_boot_method, file_name))
         d.addErrback(self.no_response_errback, file_name)
         d.addErrback(self.all_is_lost_errback)
         return d
@@ -470,7 +464,7 @@ class TransferTimeTrackingTFTP(TFTP):
         return filename
 
 
-class TFTPService(MultiService):
+class TFTPService(MultiService, object):
     """An umbrella service representing a set of running TFTP servers.
 
     Creates a UDP server individually for each discovered network

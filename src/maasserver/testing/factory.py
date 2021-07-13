@@ -1,4 +1,4 @@
-# Copyright 2012-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Test object factories."""
@@ -35,8 +35,6 @@ from maasserver.enum import (
     IPADDRESS_TYPE,
     IPRANGE_TYPE,
     KEYS_PROTOCOL_TYPE,
-    NODE_DEVICE_BUS,
-    NODE_DEVICE_BUS_CHOICES,
     NODE_STATUS,
     NODE_TYPE,
     PARTITION_TABLE_TYPE,
@@ -67,15 +65,14 @@ from maasserver.models import (
     FileStorage,
     Filesystem,
     FilesystemGroup,
-    ForwardDNSServer,
     IPRange,
+    ISCSIBlockDevice,
     KeySource,
     LargeFile,
     LicenseKey,
     MDNS,
     Neighbour,
     Node,
-    NodeDevice,
     NodeMetadata,
     Notification,
     OwnerData,
@@ -112,9 +109,9 @@ from maasserver.models.interface import Interface, InterfaceRelationship
 from maasserver.models.numa import NUMANode, NUMANodeHugepages
 from maasserver.models.partition import MIN_PARTITION_SIZE
 from maasserver.models.rdns import RDNS
-from maasserver.models.virtualmachine import VirtualMachine, VirtualMachineDisk
+from maasserver.models.switch import Switch
+from maasserver.models.virtualmachine import VirtualMachine
 from maasserver.node_status import NODE_TRANSITIONS
-from maasserver.storage_layouts import MIN_BOOT_PARTITION_SIZE
 from maasserver.testing import get_data
 from maasserver.testing.testclient import MAASSensibleRequestFactory
 from maasserver.utils.converters import round_size_to_nearest_block
@@ -126,7 +123,6 @@ from maastesting.factory import TooManyRandomRetries
 from maastesting.typecheck import typed
 from metadataserver.builtin_scripts import load_builtin_scripts
 from metadataserver.enum import (
-    HARDWARE_TYPE,
     HARDWARE_TYPE_CHOICES,
     RESULT_TYPE,
     RESULT_TYPE_CHOICES,
@@ -139,7 +135,6 @@ from metadataserver.enum import (
 )
 from metadataserver.fields import Bin
 from metadataserver.models import Script, ScriptResult, ScriptSet
-from provisioningserver.boot import BootMethodRegistry
 from provisioningserver.utils.enum import map_enum
 from provisioningserver.utils.network import inet_ntop
 
@@ -169,6 +164,22 @@ RANDOM = object()
 RANDOM_OR_NONE = object()
 
 
+class Messages:
+    """A class to record messages published by Django messaging
+    framework.
+    """
+
+    def __init__(self):
+        self.messages = []
+
+    def add(self, level, message, extras):
+        self.messages.append((level, message, extras))
+
+    def __iter__(self):
+        for message in self.messages:
+            yield message
+
+
 class Factory(maastesting.factory.Factory):
     def make_fake_request(
         self, path="/", method="GET", cookies=None, data=None
@@ -194,6 +205,7 @@ class Factory(maastesting.factory.Factory):
             request = rf.get(path, data=data)
             request.method = method
         request.data = data
+        request._messages = Messages()
         request.COOKIES = cookies.copy()
         return request
 
@@ -486,9 +498,7 @@ class Factory(maastesting.factory.Factory):
                 INTERFACE_TYPE.PHYSICAL, node=node, vlan=vlan, fabric=fabric
             )
         if node_type == NODE_TYPE.MACHINE and with_boot_disk:
-            root_partition = self.make_Partition(
-                node=node, block_device_size=MIN_BOOT_PARTITION_SIZE
-            )
+            root_partition = self.make_Partition(node=node)
             acquired = node.status in ALLOCATED_NODE_STATUSES
             if node.osystem in ["centos", "rhel"]:
                 # CentOS and RHEL do not support Bcache or ZFS so don't create
@@ -589,8 +599,6 @@ class Factory(maastesting.factory.Factory):
             Node.objects.filter(id=node.id).update(updated=updated)
         if created is not None:
             Node.objects.filter(id=node.id).update(created=created)
-        for _ in range(0, random.randint(10, 20)):
-            self.make_NodeDevice(node=node)
         return reload_object(node)
 
     def make_Machine(self, *args, **kwargs):
@@ -617,6 +625,21 @@ class Factory(maastesting.factory.Factory):
             node.last_image_sync = last_image_sync
         node.save()
         return node.as_rack_controller()
+
+    def make_Switch(self, node=None, owner=None, **kwargs):
+        if owner is None:
+            owner = get_worker_user()
+        nos_kwargs = {
+            arg: kwargs.pop(arg)
+            for arg in ("nos_driver", "nos_parameters")
+            if arg in kwargs
+        }
+        if node is None:
+            node = self.make_Node(
+                owner=owner, node_type=NODE_TYPE.MACHINE, **kwargs
+            )
+            node.save()
+        return Switch.objects.create(node=node, **nos_kwargs)
 
     def make_RegionRackController(self, *args, **kwargs):
         region_rack = self.make_RackController(*args, **kwargs)
@@ -706,15 +729,6 @@ class Factory(maastesting.factory.Factory):
         domain = Domain(name=name, ttl=ttl, authoritative=authoritative)
         domain.save()
         return domain
-
-    def make_ForwardDNSServer(self, ip_address=None, domains=None):
-        if ip_address is None:
-            ip_address = self.make_ip_address()
-        fwd_dns_srvr = ForwardDNSServer(ip_address=ip_address)
-        fwd_dns_srvr.save()
-        fwd_dns_srvr.domains.set(domains)
-        fwd_dns_srvr.save()
-        return fwd_dns_srvr
 
     def pick_rrset(self, rrtype=None, rrdata=None, exclude=[]):
         while rrtype is None:
@@ -1353,7 +1367,6 @@ class Factory(maastesting.factory.Factory):
         managed=True,
         space=RANDOM_OR_NONE,
         description="",
-        disabled_boot_architectures=None,
         **kwargs,
     ):
         if name is None:
@@ -1382,18 +1395,6 @@ class Factory(maastesting.factory.Factory):
             dns_servers = [
                 self.make_ip_address() for _ in range(random.randint(1, 3))
             ]
-        if disabled_boot_architectures is None and factory.pick_bool():
-            disabled_boot_architectures = random.sample(
-                [
-                    boot_method.name
-                    for _, boot_method in BootMethodRegistry
-                    if boot_method.arch_octet or boot_method.path_prefix_http
-                ],
-                3,
-            )
-        elif disabled_boot_architectures is None:
-            disabled_boot_architectures = []
-
         subnet = Subnet(
             name=name,
             vlan=vlan,
@@ -1405,7 +1406,6 @@ class Factory(maastesting.factory.Factory):
             allow_proxy=allow_proxy,
             managed=managed,
             description=description,
-            disabled_boot_architectures=disabled_boot_architectures,
             **kwargs,
         )
         subnet.save()
@@ -1674,8 +1674,6 @@ class Factory(maastesting.factory.Factory):
         sriov_max_vf=0,
         params="",
         numa_node=None,
-        neighbour_discovery_state=False,
-        mdns_discovery_state=False,
     ):
         if subnet is None and cluster_interface is not None:
             subnet = cluster_interface.subnet
@@ -1779,8 +1777,6 @@ class Factory(maastesting.factory.Factory):
             sriov_max_vf=sriov_max_vf,
             params=params,
             numa_node=numa_node,
-            neighbour_discovery_state=neighbour_discovery_state,
-            mdns_discovery_state=mdns_discovery_state,
         )
         interface.save()
         if subnet is None and ip is not None:
@@ -1800,14 +1796,6 @@ class Factory(maastesting.factory.Factory):
             for parent in parents:
                 InterfaceRelationship(child=interface, parent=parent).save()
         interface.save(force_update=True)
-        if interface.type == INTERFACE_TYPE.PHYSICAL:
-            self.make_NodeDevice(
-                bus=NODE_DEVICE_BUS.PCIE,
-                hardware_type=HARDWARE_TYPE.NETWORK,
-                node=node,
-                numa_node=numa_node,
-                physical_interface=interface,
-            )
         return reload_object(interface)
 
     def make_IPRange(
@@ -1946,7 +1934,7 @@ class Factory(maastesting.factory.Factory):
         name=None,
         definition=None,
         comment="",
-        kernel_opts="",
+        kernel_opts=None,
         created=None,
         updated=None,
         populate=True,
@@ -2549,6 +2537,64 @@ class Factory(maastesting.factory.Factory):
             node=node, name=name, size=size, block_size=block_size, tags=tags
         )
 
+    def make_ISCSIBlockDevice(
+        self,
+        node=None,
+        name=None,
+        size=None,
+        block_size=None,
+        tags=None,
+        target=None,
+    ):
+        if node is None:
+            node = self.make_Node()
+        if name is None:
+            name = self.make_name("name")
+        if block_size is None:
+            block_size = random.choice([512, 1024, 4096])
+        if size is None:
+            # We need space for MakePartition to choose "largest" _3_ times,
+            # because of TestManagersFilterByNode.test__bcache_on_partitions
+            # in maasserver/models/tests/test_filesystemgroup.py.
+            size = round_size_to_nearest_block(
+                random.randint(
+                    max(MIN_BLOCK_DEVICE_SIZE, MIN_PARTITION_SIZE) * 16,
+                    MIN_BLOCK_DEVICE_SIZE * 1024,
+                ),
+                block_size,
+            )
+        if tags is None:
+            tags = [self.make_name("tag") for _ in range(3)]
+        if target is None:
+            user = factory.make_name("user")
+            password = factory.make_name("pass")
+            init_user = factory.make_name("init_user")
+            init_pass = factory.make_name("init_pass")
+            host = factory.make_ipv4_address()
+            proto = random.choice(["", "6"])
+            port = random.choice(["", str(random.randint(3260, 3269))])
+            lun = random.randint(0, 9)
+            target_name = factory.make_name("target")
+            target = "%s:%s:%s:%s@%s:%s:%s:%s:%s" % (
+                user,
+                password,
+                init_user,
+                init_pass,
+                host,
+                proto,
+                port,
+                lun,
+                target_name,
+            )
+        return ISCSIBlockDevice.objects.create(
+            node=node,
+            name=name,
+            size=size,
+            block_size=block_size,
+            tags=tags,
+            target=target,
+        )
+
     def make_PhysicalBlockDevice(
         self,
         node=None,
@@ -2561,9 +2607,8 @@ class Factory(maastesting.factory.Factory):
         id_path=None,
         formatted_root=False,
         firmware_version=None,
+        storage_pool=None,
         numa_node=None,
-        pcie=False,
-        bootable=False,
     ):
         if node is None and numa_node is None:
             node = self.make_Node()
@@ -2582,8 +2627,6 @@ class Factory(maastesting.factory.Factory):
                 ),
                 block_size,
             )
-            if bootable and size < MIN_BOOT_PARTITION_SIZE:
-                size = MIN_BOOT_PARTITION_SIZE
         if tags is None:
             tags = [self.make_name("tag") for _ in range(3)]
         if id_path is None:
@@ -2606,18 +2649,9 @@ class Factory(maastesting.factory.Factory):
             serial=serial,
             id_path=id_path,
             firmware_version=firmware_version,
+            storage_pool=storage_pool,
             numa_node=numa_node,
         )
-        # Only NVMe drives have a NodeDevice assoicated with them since
-        # they are PCIE devices. Don't always create them.
-        if pcie or self.pick_bool():
-            self.make_NodeDevice(
-                bus=NODE_DEVICE_BUS.PCIE,
-                hardware_type=HARDWARE_TYPE.STORAGE,
-                node=node,
-                numa_node=numa_node,
-                physical_blockdevice=block_device,
-            )
         if formatted_root:
             partition = self.make_Partition(
                 partition_table=(
@@ -2633,7 +2667,6 @@ class Factory(maastesting.factory.Factory):
         block_device=None,
         node=None,
         block_device_size=None,
-        bootable=False,
     ):
         if block_device is None:
             if node is None:
@@ -2642,7 +2675,7 @@ class Factory(maastesting.factory.Factory):
                 else:
                     node = factory.make_Node()
             block_device = self.make_PhysicalBlockDevice(
-                node=node, size=block_device_size, bootable=bootable
+                node=node, size=block_device_size
             )
         return PartitionTable.objects.create(
             table_type=table_type, block_device=block_device
@@ -2660,9 +2693,7 @@ class Factory(maastesting.factory.Factory):
     ):
         if partition_table is None:
             partition_table = self.make_PartitionTable(
-                node=node,
-                block_device_size=block_device_size,
-                bootable=bootable,
+                node=node, block_device_size=block_device_size
             )
         if size is None:
             available_size = partition_table.get_available_size() // 2
@@ -2809,7 +2840,7 @@ class Factory(maastesting.factory.Factory):
                 node = self.make_Node()
             if node.physicalblockdevice_set.count() == 0:
                 # Add the boot disk and leave it as is.
-                self.make_PhysicalBlockDevice(node=node, bootable=True)
+                self.make_PhysicalBlockDevice(node=node)
             if group_type == FILESYSTEM_GROUP_TYPE.LVM_VG:
                 for _ in range(num_lvm_devices):
                     block_device = self.make_PhysicalBlockDevice(
@@ -2974,7 +3005,6 @@ class Factory(maastesting.factory.Factory):
         enabled=True,
         node=None,
         subnet=None,
-        iprange=None,
     ):
         if name is None:
             name = self.make_name("dhcp_snippet")
@@ -2989,7 +3019,6 @@ class Factory(maastesting.factory.Factory):
             enabled=enabled,
             node=node,
             subnet=subnet,
-            iprange=iprange,
         )
 
     def make_default_PackageRepositories(self):
@@ -3155,7 +3184,6 @@ class Factory(maastesting.factory.Factory):
         self,
         identifier=None,
         bmc=None,
-        project="",
         machine=None,
         pinned_cores=None,
         unpinned_cores=0,
@@ -3173,8 +3201,6 @@ class Factory(maastesting.factory.Factory):
             )
         if pinned_cores is None:
             pinned_cores = []
-            if unpinned_cores == 0 and machine is not None:
-                unpinned_cores = machine.cpu_count
         if memory is None:
             if machine is None:
                 memory = 0
@@ -3185,112 +3211,11 @@ class Factory(maastesting.factory.Factory):
         return VirtualMachine.objects.create(
             identifier=identifier,
             bmc=bmc,
-            project=project,
             hugepages_backed=hugepages_backed,
             memory=memory,
             machine=machine,
             pinned_cores=pinned_cores,
             unpinned_cores=unpinned_cores,
-        )
-
-    def make_VirtualMachineDisk(
-        self,
-        vm=None,
-        name=None,
-        size=None,
-        block_device=None,
-        backing_pool=None,
-    ):
-        if vm is None:
-            vm = factory.make_VirtualMachine()
-        if name is None:
-            name = factory.make_name("vmdisk")
-        if size is None:
-            size = random.randint(
-                MIN_BLOCK_DEVICE_SIZE * 4, MIN_BLOCK_DEVICE_SIZE * 1024
-            )
-        return VirtualMachineDisk.objects.create(
-            name=name,
-            vm=vm,
-            size=size,
-            block_device=block_device,
-            backing_pool=backing_pool,
-        )
-
-    def make_NodeDevice(
-        self,
-        bus=None,
-        hardware_type=None,
-        node=None,
-        numa_node=None,
-        physical_blockdevice=None,
-        physical_interface=None,
-        vendor_id=None,
-        vendor_name=None,
-        product_id=None,
-        product_name=None,
-        commissioning_driver=None,
-        bus_number=None,
-        device_number=None,
-        pci_address=None,
-        **kwargs,
-    ):
-        if bus is None:
-            bus = factory.pick_choice(NODE_DEVICE_BUS_CHOICES)
-        if hardware_type is None:
-            hardware_type = factory.pick_choice(
-                HARDWARE_TYPE_CHOICES,
-                but_not=(
-                    # Storage and network NodeDevices are created in
-                    # make_PhysicalBlockDevice and make_Interface
-                    HARDWARE_TYPE.STORAGE,
-                    HARDWARE_TYPE.NETWORK,
-                ),
-            )
-        if node is None:
-            node = factory.make_Node()
-        if numa_node is None:
-            try:
-                numa_node = random.choice(node.numanode_set.all())
-            except IndexError:
-                numa_node = factory.make_NUMANode(node=node)
-        if vendor_id is None:
-            vendor_id = self.make_hex_string(size=4)
-        if vendor_name is None:
-            vendor_name = self.make_name("vendor_name")
-        if product_id is None:
-            product_id = self.make_hex_string(size=4)
-        if product_name is None:
-            product_name = self.make_name("product_name")
-        if commissioning_driver is None:
-            commissioning_driver = self.make_name("commissioning_driver")
-        if bus_number is None:
-            bus_number = random.randint(0, 2 ** 16)
-        if device_number is None:
-            device_number = random.randint(0, 2 ** 16)
-        if pci_address is None and bus == NODE_DEVICE_BUS.PCIE:
-            pci_domain = factory.make_hex_string(size=4)
-            pci_function_number = random.randint(0, 9)
-            pci_address = (
-                f"{pci_domain}:{hex(bus_number)[2:].zfill(2)}"
-                f":{hex(device_number)[2:].zfill(2)}.{pci_function_number}"
-            )
-        return NodeDevice.objects.create(
-            bus=bus,
-            hardware_type=hardware_type,
-            node=node,
-            numa_node=numa_node,
-            physical_blockdevice=physical_blockdevice,
-            physical_interface=physical_interface,
-            vendor_id=vendor_id,
-            vendor_name=vendor_name,
-            product_id=product_id,
-            product_name=product_name,
-            commissioning_driver=commissioning_driver,
-            bus_number=bus_number,
-            device_number=device_number,
-            pci_address=pci_address,
-            **kwargs,
         )
 
 

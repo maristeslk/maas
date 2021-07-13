@@ -1,48 +1,47 @@
-# Copyright 2012-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Builtin script hooks, run upon receipt of ScriptResult"""
 
 
-from collections import defaultdict
 import fnmatch
-from functools import partial
 import json
 import logging
-from operator import itemgetter
 import re
 
 from django.core.exceptions import ValidationError
-from django.db.models import Q
 
-from maasserver.enum import NODE_DEVICE_BUS, NODE_METADATA, NODE_STATUS
+from maasserver.enum import NODE_METADATA, NODE_STATUS
 from maasserver.models.blockdevice import MIN_BLOCK_DEVICE_SIZE
+from maasserver.models.fabric import Fabric
 from maasserver.models.interface import Interface, PhysicalInterface
 from maasserver.models.node import Node
-from maasserver.models.nodedevice import NodeDevice
 from maasserver.models.nodemetadata import NodeMetadata
 from maasserver.models.numa import NUMANode, NUMANodeHugepages
 from maasserver.models.physicalblockdevice import PhysicalBlockDevice
 from maasserver.models.subnet import Subnet
+from maasserver.models.switch import Switch
 from maasserver.models.tag import Tag
 from maasserver.utils.orm import get_one
 from maasserver.utils.osystems import get_release
-from metadataserver.builtin_scripts.network import (
-    is_commissioning,
-    update_node_interfaces,
-)
-from metadataserver.enum import HARDWARE_TYPE
+from metadataserver.enum import SCRIPT_STATUS
 from provisioningserver.refresh.node_info_scripts import (
     GET_FRUID_DATA_OUTPUT_NAME,
+    IPADDR_OUTPUT_NAME,
     KERNEL_CMDLINE_OUTPUT_NAME,
     LIST_MODALIASES_OUTPUT_NAME,
     LXD_OUTPUT_NAME,
     NODE_INFO_SCRIPTS,
 )
 from provisioningserver.utils import kernel_to_debian_architecture
-from provisioningserver.utils.lxd import parse_lxd_cpuinfo, parse_lxd_networks
+from provisioningserver.utils.ipaddr import parse_ip_addr
+from provisioningserver.utils.lxd import parse_lxd_cpuinfo
 
 logger = logging.getLogger(__name__)
+
+
+class DuplicateMACs(Exception):
+    """Exception for when duplicate MAC addresses are in commissioning data."""
 
 
 SWITCH_TAG_NAME = "switch"
@@ -66,6 +65,31 @@ SWITCH_HARDWARE = [
         "Ethernet Switch ASIC",
     },
 ]
+SWITCH_OPENBMC_MAC = "02:00:00:00:00:02"
+
+
+def _create_default_physical_interface(
+    node, ifname, mac, link_connected, **kwargs
+):
+    """Assigns the specified interface to the specified Node.
+
+    Creates or updates a PhysicalInterface that corresponds to the given MAC.
+
+    :param node: Node model object
+    :param ifname: the interface name (for example, 'eth0')
+    :param mac: the Interface to update and associate
+    """
+    # We don't yet have enough information to put this newly-created Interface
+    # into the proper Fabric/VLAN. (We'll do this on a "best effort" basis
+    # later, if we are able to determine that the interface is on a particular
+    # subnet due to a DHCP reply during commissioning.)
+    fabric = Fabric.objects.get_default_fabric()
+    vlan = fabric.get_default_vlan()
+    interface = PhysicalInterface.objects.create(
+        mac_address=mac, name=ifname, node=node, vlan=vlan, **kwargs
+    )
+
+    return interface
 
 
 def _parse_interface_speed(port):
@@ -80,15 +104,35 @@ def _parse_interface_speed(port):
     )
 
 
-def parse_interfaces(node, data):
+def _parse_interfaces(node, data):
     """Return a dict of interfaces keyed by MAC address."""
     interfaces = {}
 
-    resources = data["resources"]
-    ifaces_info = parse_lxd_networks(data["networks"])
+    # Retrieve informaton from IPADDR_OUTPUT_NAME script
+    script_set = node.current_commissioning_script_set
+    script_result = script_set.find_script_result(
+        script_name=IPADDR_OUTPUT_NAME
+    )
+    # Only the IP addresses come from ip addr output. While this information
+    # is useful for automatically associating a device with a VLAN and subnet
+    # it is not necessary for use as users can manually do it.
+    if not script_result or script_result.status != SCRIPT_STATUS.PASSED:
+        # Pods don't currently have ip addr information, don't warn about it.
+        if not node.is_pod:
+            logger.error(
+                "%s: Unable to discover NIC IP addresses due to missing "
+                "passed output from %s" % (node.hostname, IPADDR_OUTPUT_NAME)
+            )
+        ip_addr_info = {}
+    else:
+        ip_addr_info = parse_ip_addr(script_result.output)
 
     def process_port(card, port):
         mac = port.get("address")
+        if mac in (None, SWITCH_OPENBMC_MAC):
+            # Ignore loopback (with no MAC) and OpenBMC interfaces on switches
+            # which all share the same, hard-coded OpenBMC MAC address.
+            return
 
         interface = {
             "name": port.get("id"),
@@ -100,16 +144,20 @@ def parse_interfaces(node, data):
             "product": card.get("product"),
             "firmware_version": card.get("firmware_version"),
             "sriov_max_vf": card.get("sriov", {}).get("maximum_vfs", 0),
-            "pci_address": card.get("pci_address"),
-            "usb_address": card.get("usb_address"),
         }
         # Assign the IP addresses to this interface
-        link = ifaces_info.get(interface["name"])
-        interface["ips"] = link["addresses"] if link else []
+        link = ip_addr_info.get(interface["name"], {})
+        interface["ips"] = link.get("inet", []) + link.get("inet6", [])
+
+        if mac in interfaces:
+            raise DuplicateMACs(
+                f"Duplicated MAC address({mac}) on "
+                f"{interfaces[mac]['name']} and {interface['name']}"
+            )
 
         interfaces[mac] = interface
 
-    network_cards = resources.get("network", {}).get("cards", {})
+    network_cards = data.get("network", {}).get("cards", {})
     for card in network_cards:
         for port in card.get("ports", []):
             process_port(card, port)
@@ -127,10 +175,34 @@ def parse_interfaces(node, data):
     return interfaces
 
 
+def parse_interfaces_details(node):
+    """Get details for node interfaces from commissioning script results."""
+    interfaces = {}
+
+    script_set = node.current_commissioning_script_set
+    if not script_set:
+        return interfaces
+    script_result = script_set.find_script_result(script_name=LXD_OUTPUT_NAME)
+    if not script_result or script_result.status != SCRIPT_STATUS.PASSED:
+        logger.error(
+            f"{node.hostname}: Unable to discover NIC information due to "
+            f"missing output from {LXD_OUTPUT_NAME}"
+        )
+        return interfaces
+
+    details = json.loads(script_result.stdout)
+    # MAAS 2.8 added additional information to machine-resources output.
+    # LXD_OUTPUT_NAME used to only contain resources, now it is one of
+    # the objects provided.
+    if "resources" in details:
+        details = details["resources"]
+    return _parse_interfaces(node, details)
+
+
 def update_interface_details(interface, details):
     """Update details for an existing interface from commissioning data.
 
-    This should be passed details from the parse_interfaces call.
+    This should be passed details from the _parse_interfaces call.
 
     """
     iface_details = details.get(interface.mac_address)
@@ -201,35 +273,89 @@ def update_boot_interface(node, output, exit_status):
 
 
 def update_node_network_information(node, data, numa_nodes):
-    network_devices = {}
     # Skip network configuration if set by the user.
     if node.skip_networking:
         # Turn off skip_networking now that the hook has been called.
         node.skip_networking = False
         node.save(update_fields=["skip_networking"])
-        return network_devices
+        return
 
-    update_node_interfaces(node, data)
-    interfaces_info = parse_interfaces(node, data)
+    try:
+        interfaces_info = _parse_interfaces(node, data)
+    except DuplicateMACs:
+        if node.is_controller or node.is_pod:
+            # Controllers and Pods send commissioning information from a
+            # deployed machine. If the machine is using a bond multiple
+            # interfaces will use the same MAC address. Since MAAS identifies
+            # interfaces by MAC skip updating interface information.
+            # When MAAS gains the ability to model LXD's commissioning
+            # information this can be removed.
+            return
+        else:
+            # Duplicate MACs are not expected on machines, raise the
+            # exception so this can be handled.
+            raise
     current_interfaces = set()
 
     for mac, iface in interfaces_info.items():
+        ifname = iface.get("name")
         link_connected = iface.get("link_connected")
+        interface_speed = iface.get("interface_speed")
+        link_speed = iface.get("link_speed")
+        numa_index = iface.get("numa_node")
+        vendor = iface.get("vendor")
+        product = iface.get("product")
+        firmware_version = iface.get("firmware_version")
         sriov_max_vf = iface.get("sriov_max_vf")
 
         try:
             interface = PhysicalInterface.objects.get(mac_address=mac)
+            if interface.node == node:
+                # Interface already exists on this node, so just update the NIC
+                # info
+                update_interface_details(interface, interfaces_info)
+            else:
+                logger.warning(
+                    "Interface with MAC %s moved from node %s to %s. "
+                    "(The existing interface will be deleted.)"
+                    % (interface.mac_address, interface.node.fqdn, node.fqdn)
+                )
+                interface.delete()
+                interface = _create_default_physical_interface(
+                    node,
+                    ifname,
+                    mac,
+                    link_connected,
+                    interface_speed=interface_speed,
+                    link_speed=link_speed,
+                    numa_node=numa_nodes[numa_index],
+                    vendor=vendor,
+                    product=product,
+                    firmware_version=firmware_version,
+                    sriov_max_vf=sriov_max_vf,
+                )
         except PhysicalInterface.DoesNotExist:
-            continue
-        interface.numa_node = numa_nodes[iface["numa_node"]]
-
-        if iface.get("pci_address"):
-            network_devices[iface.get("pci_address")] = interface
-        elif iface.get("usb_address"):
-            network_devices[iface.get("usb_address")] = interface
+            # Since MAC addresses didn't match, delete any interface that
+            # has a matching (name, node) pair and create a new interface
+            # with the supplied information.
+            PhysicalInterface.objects.filter(name=ifname, node=node).delete()
+            interface = _create_default_physical_interface(
+                node,
+                ifname,
+                mac,
+                link_connected,
+                interface_speed=interface_speed,
+                link_speed=link_speed,
+                numa_node=numa_nodes[numa_index],
+                vendor=vendor,
+                product=product,
+                firmware_version=firmware_version,
+                sriov_max_vf=sriov_max_vf,
+            )
 
         current_interfaces.add(interface)
-        if sriov_max_vf:
+        interface.update_ip_addresses(iface.get("ips"))
+        if sriov_max_vf > 0:
             interface.add_tag("sriov")
             interface.save(update_fields=["tags"])
 
@@ -238,7 +364,6 @@ def update_node_network_information(node, data, numa_nodes):
             if interface.vlan is not None:
                 interface.vlan = None
                 interface.save(update_fields=["vlan", "updated"])
-        interface.save()
 
     # If a machine boots by UUID before commissioning(s390x) no boot_interface
     # will be set as interfaces existed during boot. Set it using the
@@ -247,13 +372,14 @@ def update_node_network_information(node, data, numa_nodes):
         subnet = Subnet.objects.get_best_subnet_for_ip(node.boot_cluster_ip)
         if subnet:
             node.boot_interface = node.interface_set.filter(
+                id__in=[interface.id for interface in current_interfaces],
                 vlan=subnet.vlan,
             ).first()
             node.save(update_fields=["boot_interface"])
 
     # Pods are already deployed. MAAS captures the network state, it does
     # not change it.
-    if is_commissioning(node):
+    if not (node.status == NODE_STATUS.DEPLOYED and node.is_pod):
         # Only configured Interfaces are tested so configuration must be done
         # before regeneration.
         node.set_initial_networking_configuration()
@@ -275,7 +401,11 @@ def update_node_network_information(node, data, numa_nodes):
                 storage=False, network=True
             )
 
-    return network_devices
+        # Don't delete interfaces on Pods. These may be things like
+        # bonds or bridges.
+        Interface.objects.filter(node=node).exclude(
+            id__in=[iface.id for iface in current_interfaces]
+        ).delete()
 
 
 def _process_system_information(node, system_data):
@@ -348,222 +478,16 @@ def _process_system_information(node, system_data):
         node.tags.add(tag)
 
 
-def _add_or_update_node_device(
-    node,
-    numa_nodes,
-    network_devices,
-    storage_devices,
-    gpu_devices,
-    old_devices,
-    bus,
-    device,
-    address,
-    key,
-    commissioning_driver,
-):
-    network_device = network_devices.get(address)
-    storage_device = storage_devices.get(address)
-
-    if network_device:
-        hardware_type = HARDWARE_TYPE.NETWORK
-    elif storage_device:
-        hardware_type = HARDWARE_TYPE.STORAGE
-    elif address in gpu_devices:
-        hardware_type = HARDWARE_TYPE.GPU
-    else:
-        hardware_type = HARDWARE_TYPE.NODE
-
-    if "numa_node" in device:
-        numa_node = numa_nodes[device["numa_node"]]
-    else:
-        # LXD doesn't map USB devices to NUMA node nor does it map
-        # USB devices to USB controller on the PCI bus. Map to the
-        # default numa node in cache.
-        numa_node = numa_nodes[0]
-
-    if key in old_devices:
-        node_device = old_devices.pop(key)
-        node_device.hardware_type = hardware_type
-        node_device.numa_node = numa_node
-        node_device.physical_block_device = storage_device
-        node_device.physical_interface = network_device
-        node_device.vendor_name = device.get("vendor")
-        node_device.product_name = device.get("product")
-        node_device.commissioning_driver = commissioning_driver
-        node_device.save()
-    else:
-        pci_address = device.get("pci_address")
-        create_args = {
-            "bus": bus,
-            "hardware_type": hardware_type,
-            "node": node,
-            "numa_node": numa_node,
-            "physical_blockdevice": storage_device,
-            "physical_interface": network_device,
-            "vendor_id": device["vendor_id"],
-            "product_id": device["product_id"],
-            "vendor_name": device.get("vendor"),
-            "product_name": device.get("product"),
-            "commissioning_driver": commissioning_driver,
-            "bus_number": device.get("bus_address"),
-            "device_number": device.get("device_address"),
-            "pci_address": pci_address,
-        }
-        try:
-            NodeDevice.objects.create(**create_args)
-        except ValidationError:
-            # A device was replaced, delete the old one before creating
-            # the new one.
-            qs = NodeDevice.objects.filter(node=node)
-            if pci_address is not None:
-                identifier = {"pci_address": pci_address}
-            else:
-                identifier = {
-                    "bus_number": device.get("bus_address"),
-                    "device_number": device.get("device_address"),
-                }
-            if storage_device and network_device:
-                qs = qs.filter(
-                    Q(**identifier)
-                    | Q(physical_blockdevice=storage_device)
-                    | Q(physical_interface=network_device)
-                )
-            elif storage_device:
-                qs = qs.filter(
-                    Q(**identifier) | Q(physical_blockdevice=storage_device)
-                )
-            elif network_device:
-                qs = qs.filter(
-                    Q(**identifier) | Q(physical_interface=network_device)
-                )
-            else:
-                qs = qs.filter(**identifier)
-            qs.delete()
-            NodeDevice.objects.create(**create_args)
-
-
-def _process_pcie_devices(add_func, data):
-    for device in data.get("pci", {}).get("devices", []):
-        key = (
-            device["vendor_id"],
-            device["product_id"],
-            device["pci_address"],
-        )
-        add_func(
-            NODE_DEVICE_BUS.PCIE,
-            device,
-            device["pci_address"],
-            key,
-            device.get("driver"),
-        )
-
-
-def _process_usb_devices(add_func, data):
-    for device in data.get("usb", {}).get("devices", []):
-        usb_address = "%s:%s" % (
-            device["bus_address"],
-            device["device_address"],
-        )
-        key = (device["vendor_id"], device["product_id"], usb_address)
-        # USB devices can have different drivers for each
-        # functionality. e.g a webcam has a video and audio driver.
-        commissioning_driver = ", ".join(
-            set(
-                [
-                    interface["driver"]
-                    for interface in device.get("interfaces", [])
-                    if "driver" in interface
-                ]
-            )
-        )
-        add_func(
-            NODE_DEVICE_BUS.USB, device, usb_address, key, commissioning_driver
-        )
-
-
-def update_node_devices(
-    node, data, numa_nodes, network_devices=None, storage_devices=None
-):
-    # network and storage devices are only passed if they were updated. If
-    # configuration was skipped or running on a controller devices must be
-    # loaded for mapping.
-    if not network_devices:
-        network_devices = {}
-        mac_to_dev_ids = {}
-        for card in data.get("network", {}).get("cards", []):
-            for port in card.get("ports", []):
-                if "address" not in port:
-                    continue
-                if "pci_address" in card:
-                    mac_to_dev_ids[port["address"]] = card["pci_address"]
-                elif "usb_address" in card:
-                    mac_to_dev_ids[port["address"]] = card["usb_address"]
-        for iface in node.interface_set.filter(
-            mac_address__in=mac_to_dev_ids.keys()
-        ):
-            network_devices[mac_to_dev_ids[iface.mac_address]] = iface
-
-    if not storage_devices:
-        storage_devices = {}
-        name_to_dev_ids = {}
-        for disk in _condense_luns(data.get("storage", {}).get("disks", [])):
-            if "pci_address" in disk:
-                name_to_dev_ids[disk["id"]] = disk["pci_address"]
-            elif "usb_address" in disk:
-                name_to_dev_ids[disk["id"]] = disk["usb_address"]
-        for block_dev in node.physicalblockdevice_set.filter(
-            name__in=name_to_dev_ids.keys()
-        ):
-            storage_devices[name_to_dev_ids[block_dev.name]] = block_dev
-
-    # Gather the list of GPUs for setting the type.
-    gpu_devices = set()
-    for card in data.get("gpu", {}).get("cards", []):
-        if "pci_address" in card:
-            gpu_devices.add(card["pci_address"])
-        elif "usb_address" in card:
-            gpu_devices.add(card["usb_address"])
-
-    old_devices = {
-        (
-            node_device.vendor_id,
-            node_device.product_id,
-            node_device.pci_address
-            if node_device.bus == NODE_DEVICE_BUS.PCIE
-            else f"{node_device.bus_number}:{node_device.device_number}",
-        ): node_device
-        for node_device in node.node_devices.all()
-    }
-
-    add_func = partial(
-        _add_or_update_node_device,
-        node,
-        numa_nodes,
-        network_devices,
-        storage_devices,
-        gpu_devices,
-        old_devices,
-    )
-
-    _process_pcie_devices(add_func, data)
-    _process_usb_devices(add_func, data)
-
-    NodeDevice.objects.filter(
-        id__in=[node_device.id for node_device in old_devices.values()]
-    ).delete()
-
-
 def _process_lxd_resources(node, data):
     """Process the resources results of the `LXD_OUTPUT_NAME` script."""
-    resources = data["resources"]
     update_deployment_resources = node.status == NODE_STATUS.DEPLOYED
     # Update CPU details.
     node.cpu_count, node.cpu_speed, cpu_model, numa_nodes = parse_lxd_cpuinfo(
-        resources
+        data
     )
     # Update memory.
     node.memory, hugepages_size, numa_nodes_info = _parse_memory(
-        resources.get("memory", {}), numa_nodes
+        data.get("memory", {}), numa_nodes
     )
     # Create or update NUMA nodes. This must be kept as a dictionary as not all
     # systems maintain linear continuity. e.g the PPC64 machine in our CI uses
@@ -583,21 +507,21 @@ def _process_lxd_resources(node, data):
             )
         numa_nodes[numa_index] = numa_node
 
-    network_devices = update_node_network_information(node, data, numa_nodes)
-    storage_devices = update_node_physical_block_devices(
-        node, resources, numa_nodes
-    )
-
-    update_node_devices(
-        node, resources, numa_nodes, network_devices, storage_devices
-    )
+    # Network interfaces
+    # LP: #1849355 -- Don't update the node network information
+    # for controllers during commissioning as this conflicts with
+    # maasserver.models.node:Controller.update_interfaces().
+    if not node.is_controller:
+        update_node_network_information(node, data, numa_nodes)
+    # Storage.
+    update_node_physical_block_devices(node, data, numa_nodes)
 
     if cpu_model:
         NodeMetadata.objects.update_or_create(
             node=node, key="cpu_model", defaults={"value": cpu_model}
         )
 
-    _process_system_information(node, resources.get("system", {}))
+    _process_system_information(node, data.get("system", {}))
 
 
 def _parse_memory(memory, numa_nodes):
@@ -615,7 +539,7 @@ def _parse_memory(memory, numa_nodes):
     return int(total_memory / 1024 ** 2), hugepages_size, numa_nodes
 
 
-def _get_tags_from_block_info(block_info):
+def get_tags_from_block_info(block_info):
     """Return array of tags that will populate the `PhysicalBlockDevice`.
 
     Tags block devices for:
@@ -626,13 +550,11 @@ def _get_tags_from_block_info(block_info):
         sata: Storage device that is connected over SATA.
     """
     tags = []
-    if block_info["rpm"]:
+    if block_info["rpm"] > 0:
         tags.append("rotary")
         tags.append("%srpm" % block_info["rpm"])
-    elif not block_info.get("maas_multipath"):
+    else:
         tags.append("ssd")
-    if block_info.get("maas_multipath"):
-        tags.append("multipath")
     if block_info["removable"]:
         tags.append("removable")
     if block_info["type"] == "sata":
@@ -640,7 +562,7 @@ def _get_tags_from_block_info(block_info):
     return tags
 
 
-def _get_matching_block_device(block_devices, serial=None, id_path=None):
+def get_matching_block_device(block_devices, serial=None, id_path=None):
     """Return the matching block device based on `serial` or `id_path` from
     the provided list of `block_devices`."""
     if serial:
@@ -654,78 +576,19 @@ def _get_matching_block_device(block_devices, serial=None, id_path=None):
     return None
 
 
-def _condense_luns(disks):
-    """Condense disks by LUN.
-
-    LUNs are used in multipath devices to identify a single storage source
-    for the operating system to use. Multiple disks may still show up on the
-    system pointing to the same source using different paths. MAAS should only
-    model one storage source and ignore the paths. On deployment Curtin will
-    detect multipath and properly set it up.
-    """
-    serial_lun_map = defaultdict(list)
-    processed_disks = []
-    for disk in disks:
-        # split the device path from the form "key1-value1-key2-value2..." into
-        # a dict
-        tokens = disk.get("device_path", "").split("-")
-        device_path = dict(zip(tokens[::2], tokens[1::2]))
-        # LXD does not currently give a pci_address, it's included in the
-        # device_path. Add it if it isn't there. A USB disk include the
-        # USB device and PCI device the USB controller is connected to.
-        # Ignore USB devices as they are removable which MAAS doesn't
-        # model.
-        if (
-            "pci" in device_path
-            and "usb" not in device_path
-            and "pci_address" not in disk
-        ):
-            disk["pci_address"] = device_path["pci"]
-        if device_path.get("lun") not in ("0", None) and disk.get("serial"):
-            # multipath devices have LUN different from 0
-            serial_lun_map[(disk["serial"], device_path["lun"])].append(disk)
-        else:
-            processed_disks.append(disk)
-
-    for (serial, lun), paths in serial_lun_map.items():
-        # The first disk is usually the smallest id however doesn't usually
-        # have the device_id associated with it.
-        condensed_disk = paths[0]
-        if len(paths) > 1:
-            # Only tag a disk as multipath if it actually has multiple paths to
-            # it.
-            condensed_disk["maas_multipath"] = True
-        for path in paths[1:]:
-            # Make sure the disk processed has the lowest id. Each path is
-            # given a name variant on a normal id. e.g sda, sdaa, sdab, sdb
-            # sdba, sdbb results in just sda and sdb for two multipath disks.
-            if path["id"] < condensed_disk["id"]:
-                condensed_disk["id"] = path["id"]
-                # The device differs per id, at least on IBM Z. MAAS doesn't
-                # use the device but keep it consistent anyway.
-                condensed_disk["device"] = path["device"]
-            # Only one path is given the device_id. Make sure the disk that
-            # is processed has it for the id_path.
-            if not condensed_disk.get("device_id") and path.get("device_id"):
-                condensed_disk["device_id"] = path["device_id"]
-        processed_disks.append(condensed_disk)
-
-    return sorted(processed_disks, key=itemgetter("id"))
-
-
 def update_node_physical_block_devices(node, data, numa_nodes):
-    block_devices = {}
     # Skip storage configuration if set by the user.
     if node.skip_storage:
         # Turn off skip_storage now that the hook has been called.
         node.skip_storage = False
         node.save(update_fields=["skip_storage"])
-        return block_devices
+        return
 
+    blockdevs = data.get("storage", {}).get("disks", [])
     previous_block_devices = list(
         PhysicalBlockDevice.objects.filter(node=node).all()
     )
-    for block_info in _condense_luns(data.get("storage", {}).get("disks", [])):
+    for block_info in blockdevs:
         # Skip the read-only devices or cdroms. We keep them in the output
         # for the user to view but they do not get an entry in the database.
         if block_info["read_only"] or block_info["type"] == "cdrom":
@@ -749,7 +612,7 @@ def update_node_physical_block_devices(node, data, numa_nodes):
             block_size = 512
         firmware_version = block_info.get("firmware_version")
         numa_index = block_info.get("numa_node")
-        tags = _get_tags_from_block_info(block_info)
+        tags = get_tags_from_block_info(block_info)
 
         # First check if there is an existing device with the same name.
         # If so, we need to rename it. Its name will be changed back later,
@@ -762,7 +625,7 @@ def update_node_physical_block_devices(node, data, numa_nodes):
             device.name = "%s.%d" % (device.name, device.id)
             device.save(update_fields=["name"])
 
-        block_device = _get_matching_block_device(
+        block_device = get_matching_block_device(
             previous_block_devices, serial, id_path
         )
         if block_device is not None:
@@ -791,7 +654,7 @@ def update_node_physical_block_devices(node, data, numa_nodes):
                 continue
 
             # New block device. Create it on the node.
-            block_device = PhysicalBlockDevice.objects.create(
+            PhysicalBlockDevice.objects.create(
                 numa_node=numa_nodes[numa_index],
                 name=name,
                 id_path=id_path,
@@ -802,11 +665,6 @@ def update_node_physical_block_devices(node, data, numa_nodes):
                 serial=serial,
                 firmware_version=firmware_version,
             )
-
-        if block_info.get("pci_address"):
-            block_devices[block_info["pci_address"]] = block_device
-        elif block_info.get("usb_address"):
-            block_devices[block_info["usb_address"]] = block_device
 
     # Clear boot_disk if it is being removed.
     boot_disk = node.boot_disk
@@ -831,7 +689,7 @@ def update_node_physical_block_devices(node, data, numa_nodes):
     # Delete all the previous block devices that are no longer present
     # on the commissioned node.
     delete_block_device_ids = [bd.id for bd in previous_block_devices]
-    if delete_block_device_ids:
+    if len(delete_block_device_ids) > 0:
         PhysicalBlockDevice.objects.filter(
             id__in=delete_block_device_ids
         ).delete()
@@ -841,8 +699,6 @@ def update_node_physical_block_devices(node, data, numa_nodes):
         # applied layout. Deployed Pods should not have a layout set as the
         # layout of the deployed system is unknown.
         node.set_default_storage_layout()
-
-    return block_devices
 
 
 def _process_lxd_environment(node, data):
@@ -893,30 +749,22 @@ def process_lxd_results(node, output, exit_status):
     try:
         data = json.loads(output.decode("utf-8"))
     except ValueError as e:
-        raise ValueError(f"{e}: {output}")
+        raise ValueError(e.message + ": " + output)
 
     assert data.get("api_version") == "1.0", "Data not from LXD API 1.0!"
 
-    # resources_network_usb and resources_disk_address are needed for mapping
-    # between NodeDevices and Interfaces and BlockDevices. It is not included
-    # on this list so MAAS can still use LXD < 4.9 as a VM host where this
-    # information isn't necessary.
-    required_extensions = {
+    for api_extension in [
         "resources",
         "resources_v2",
         "api_os",
         "resources_system",
-        "resources_usb_pci",
-    }
-    missing_extensions = required_extensions - set(
-        data.get("api_extensions", ())
-    )
-    assert (
-        not missing_extensions
-    ), f"Missing required LXD API extensions {sorted(missing_extensions)}"
+    ]:
+        assert api_extension in data.get(
+            "api_extensions", []
+        ), f"Missing required LXD API extension '{api_extension}'"
 
     _process_lxd_environment(node, data["environment"])
-    _process_lxd_resources(node, data)
+    _process_lxd_resources(node, data["resources"])
 
     node.save()
 
@@ -926,6 +774,7 @@ def process_lxd_results(node, output, exit_status):
 
 def create_metadata_by_modalias(node, output: bytes, exit_status):
     """Tags the node based on discovered hardware, determined by modaliases.
+    If nodes are detected as supported switches, they also get Switch objects.
 
     :param node: The node whose tags to set.
     :param output: Output from the LIST_MODALIASES_OUTPUT_NAME script
@@ -943,10 +792,11 @@ def create_metadata_by_modalias(node, output: bytes, exit_status):
     switch_tags_added, _ = retag_node_for_hardware_by_modalias(
         node, modaliases, SWITCH_TAG_NAME, SWITCH_HARDWARE
     )
-    if switch_tags_added:
+    if len(switch_tags_added) > 0:
         dmi_data = get_dmi_data(modaliases)
         vendor, model = detect_switch_vendor_model(dmi_data)
         add_switch_vendor_model_tags(node, vendor, model)
+        add_switch(node, vendor, model)
 
 
 def add_switch_vendor_model_tags(node, vendor, model):
@@ -971,6 +821,21 @@ def add_switch_vendor_model_tags(node, vendor, model):
             "%s: Added model tag '%s' for detected switch hardware."
             % (node.hostname, model)
         )
+
+
+def add_switch(node, vendor, model):
+    """Add Switch object representing the switch hardware."""
+    switch, created = Switch.objects.get_or_create(node=node)
+    logger.info("%s: detected as a switch." % node.hostname)
+    NodeMetadata.objects.update_or_create(
+        node=node, key=NODE_METADATA.VENDOR_NAME, defaults={"value": vendor}
+    )
+    NodeMetadata.objects.update_or_create(
+        node=node,
+        key=NODE_METADATA.PHYSICAL_MODEL_NAME,
+        defaults={"value": model},
+    )
+    return switch
 
 
 def update_node_fruid_metadata(node, output: bytes, exit_status):
@@ -1068,7 +933,7 @@ def get_dmi_data(modaliases):
     for modalias in modaliases:
         if modalias.startswith("dmi:"):
             return frozenset(
-                [data for data in modalias.split(":")[1:] if data]
+                [data for data in modalias.split(":")[1:] if len(data) > 0]
             )
     return frozenset()
 
@@ -1160,7 +1025,7 @@ def determine_hardware_matches(modaliases, hardware_descriptors):
     ruled_out_hardware = []
     for candidate in hardware_descriptors:
         matches = filter_modaliases(modaliases, candidate["modaliases"])
-        if matches:
+        if len(matches) > 0:
             candidate = candidate.copy()
             candidate["matches"] = matches
             discovered_hardware.append(candidate)
@@ -1194,7 +1059,7 @@ def retag_node_for_hardware_by_modalias(
     discovered_hardware, ruled_out_hardware = determine_hardware_matches(
         modaliases, hardware_descriptors
     )
-    if discovered_hardware:
+    if len(discovered_hardware) > 0:
         if parent_tag is None:
             # Create the tag "just in time" if we found matching hardware, and
             # we hadn't created the tag yet.

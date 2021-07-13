@@ -1,5 +1,5 @@
-name: maas
-adopt-info: maas
+name: agora-maas
+adopt-info: agora-maas
 summary: Metal as a Service
 description: |
   Total automation of your physical servers for amazing data center operational efficiency.
@@ -27,11 +27,10 @@ plugs:
     interface: content
     content: db-socket
     target: $SNAP_COMMON/test-db-socket
-
 apps:
   supervisor:
     daemon: simple
-    command: bin/ld-preload $SNAP/bin/run-supervisord
+    command: bin/run-supervisord
     environment:
       PYTHONPATH: $SNAP/usr/lib/python3/dist-packages:$SNAP/usr/lib/python3.8/dist-packages
       LD_PRELOAD: $SNAP/usr/lib/stub_initgroups.so
@@ -46,7 +45,6 @@ apps:
         - network-observe
         - system-observe
         - time-control # chrony
-
   maas:
     command: bin/ld-preload $SNAP/bin/maas
     environment:
@@ -65,7 +63,7 @@ apps:
         - network
 
 parts:
-  maas:
+  agora-maas:
     plugin: python
     source: .
     build-environment:
@@ -82,6 +80,7 @@ parts:
       - python3-setuptools
     stage-packages:
       - amtterm # AMT
+      - archdetect-deb
       - avahi-utils
       - bind9
       - chrony
@@ -101,7 +100,6 @@ parts:
       - libxtables12
       - lshw
       - nginx-core
-      - nmap
       - openssh-client
       - python3-attr
       - python3-bson
@@ -133,23 +131,23 @@ parts:
       - python3-prometheus-client
       - python3-protobuf # for macaroonbakery
       - python3-psycopg2
+      - python3-pypureomapi
       - python3-pylxd
       - python3-pymacaroons # for macaroonbakery
       - python3-pyparsing
-      - python3-pypureomapi
-      - python3-pyrsistent # for jsonschema
       - python3-requests
       - python3-requests-toolbelt  # for pylxd
       - python3-requests-unixsocket  # for pylxd
       - python3-rfc3339 # for macaroonbakery
       - python3-seamicroclient
+      - python3-simplejson
       - python3-simplestreams
+      - python3-sphinx
       - python3-tempita
       - python3-twisted
       - python3-txtftp
       - python3-urllib3 # for macaroonbakery
       - python3-yaml
-      - python3-zhmcclient
       - python3-zope.interface
       - rsyslog
       - snmp # APC
@@ -188,15 +186,20 @@ parts:
     prime:
       - $remove
     override-build: |
+      set -e
       snapcraftctl build
       # If python3-netaddr contains absolute symlinks.
       # See https://bugs.launchpad.net/snapcraft/+bug/1774410
       ln -s -f ../../../../../../var/lib/ieee-data/oui.txt $SNAPCRAFT_PART_INSTALL/usr/lib/python3/dist-packages/netaddr/eui/oui.txt
       ln -s -f ../../../../../../var/lib/ieee-data/iab.txt $SNAPCRAFT_PART_INSTALL/usr/lib/python3/dist-packages/netaddr/eui/iab.txt
     override-prime: |
-      (cd $SNAPCRAFT_PART_SRC; snapcraftctl set-version $($SNAPCRAFT_PART_SRC/utilities/package-version))
+      set -e
+      cwd=$(pwd)
+      cd $SNAPCRAFT_PART_SRC
+      snapcraftctl set-version $($SNAPCRAFT_PART_SRC/utilities/package-version)
+      cd $cwd
       snapcraftctl prime
-      python3 -m compileall -j 0 -q .
+      /usr/bin/python3 -m compileall -q .
 
   ui:
     plugin: npm
@@ -208,6 +211,7 @@ parts:
           # node-sass on non-amd64 needs python 2, see http://pad.lv/1867329
           - python
     override-build: |
+      set -e
       snapcraftctl build
       PATH="$PATH:$SNAPCRAFT_PART_BUILD/node_modules/.bin:$SNAPCRAFT_PART_INSTALL/bin"
       NODE_ENV="production"
@@ -221,17 +225,13 @@ parts:
     prime:
       - usr/share/maas/web/static
 
-  offline-docs:
-    plugin: make
-    source: src/maas-offline-docs
-    make-parameters:
-      - BUILD_TYPE=snap
-
   machine-resources:
     plugin: make
     source: src/machine-resources
+    build-snaps:
+      - go
     build-packages:
-      - golang-go
+      - go-dep
 
   tree:
     plugin: dump

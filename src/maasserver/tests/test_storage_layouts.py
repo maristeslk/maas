@@ -1,4 +1,4 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2019 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Test the storage layouts."""
@@ -42,7 +42,6 @@ from maasserver.storage_layouts import (
     StorageLayoutForm,
     StorageLayoutMissingBootDiskError,
     VMFS6StorageLayout,
-    VMFS7StorageLayout,
 )
 from maasserver.testing.factory import factory
 from maasserver.testing.testcase import MAASServerTestCase
@@ -87,7 +86,6 @@ class TestFormHelpers(MAASServerTestCase):
                 ("lvm", "LVM layout"),
                 ("bcache", "Bcache layout"),
                 ("vmfs6", "VMFS6 layout"),
-                ("vmfs7", "VMFS7 layout"),
                 ("blank", "No storage (blank) layout"),
             ],
             get_storage_layout_choices(),
@@ -122,13 +120,13 @@ class TestGetAppliedStorageLayoutForNode(MAASServerTestCase):
         )
         layout = self.layout_class(node)
         layout.configure()
-        self.assertEqual(
+        self.assertEquals(
             (bd, self.layout_name), get_applied_storage_layout_for_node(node)
         )
 
     def test_returns_unknown(self):
         node = factory.make_Node()
-        self.assertEqual(
+        self.assertEquals(
             (None, "unknown"), get_applied_storage_layout_for_node(node)
         )
 
@@ -420,7 +418,7 @@ class TestStorageLayoutBase(MAASServerTestCase):
         factory.make_PhysicalBlockDevice(node=node, size=LARGE_BLOCK_DEVICE)
         layout = StorageLayoutBase(node, {})
         self.assertTrue(layout.is_valid(), layout.errors)
-        self.assertEqual(node.get_boot_disk(), layout.get_root_device())
+        self.assertEquals(node.get_boot_disk(), layout.get_root_device())
 
     def test_get_root_device_returns_root_device_if_set(self):
         node = make_Node_with_uefi_boot_method()
@@ -961,7 +959,7 @@ class TestFlatStorageLayout(MAASServerTestCase, LayoutHelpersMixin):
         )
         layout = FlatStorageLayout(node)
         layout.configure()
-        self.assertEqual(bd, layout.is_layout())
+        self.assertEquals(bd, layout.is_layout())
 
     def test_is_layout_without_uefi(self):
         node = make_arm64_Node_without_uefi_boot_method()
@@ -970,7 +968,7 @@ class TestFlatStorageLayout(MAASServerTestCase, LayoutHelpersMixin):
         )
         layout = FlatStorageLayout(node)
         layout.configure()
-        self.assertEqual(bd, layout.is_layout())
+        self.assertEquals(bd, layout.is_layout())
 
     def test_is_layout_returns_none_when_not_found(self):
         node = make_Node_with_uefi_boot_method()
@@ -1277,7 +1275,7 @@ class TestLVMStorageLayout(MAASServerTestCase, LayoutHelpersMixin):
         )
         layout = LVMStorageLayout(node)
         layout.configure()
-        self.assertEqual(bd, layout.is_layout())
+        self.assertEquals(bd, layout.is_layout())
 
     def test_is_layout_without_uefi(self):
         node = make_arm64_Node_without_uefi_boot_method()
@@ -1286,7 +1284,7 @@ class TestLVMStorageLayout(MAASServerTestCase, LayoutHelpersMixin):
         )
         layout = LVMStorageLayout(node)
         layout.configure()
-        self.assertEqual(bd, layout.is_layout())
+        self.assertEquals(bd, layout.is_layout())
 
     def test_is_layout_returns_none_when_not_found(self):
         node = make_Node_with_uefi_boot_method()
@@ -1807,7 +1805,7 @@ class TestBcacheStorageLayout(MAASServerTestCase):
         )
         layout = BcacheStorageLayout(node)
         layout.configure()
-        self.assertEqual(bd, layout.is_layout())
+        self.assertEquals(bd, layout.is_layout())
 
     def test_is_layout_without_uefi(self):
         node = make_arm64_Node_without_uefi_boot_method()
@@ -1819,7 +1817,7 @@ class TestBcacheStorageLayout(MAASServerTestCase):
         )
         layout = BcacheStorageLayout(node, {"cache_no_part": True})
         layout.configure()
-        self.assertEqual(bd, layout.is_layout())
+        self.assertEquals(bd, layout.is_layout())
 
     def test_is_layout_returns_none_when_not_found(self):
         node = make_Node_with_uefi_boot_method()
@@ -1886,7 +1884,7 @@ class TestVMFS6StorageLayout(MAASServerTestCase):
         layout = VMFS6StorageLayout(node)
         error = self.assertRaises(StorageLayoutFieldsError, layout.configure)
         self.assertEqual(
-            {"size": ["Boot disk must be at least 10G."]}, error.message_dict
+            {"size": ["Boot disk must be atleast 10G."]}, error.message_dict
         )
 
     def test_accepts_root_device_param(self):
@@ -1955,7 +1953,7 @@ class TestVMFS6StorageLayout(MAASServerTestCase):
         )
         layout = VMFS6StorageLayout(node)
         layout.configure()
-        self.assertEqual(bd, layout.is_layout())
+        self.assertEquals(bd, layout.is_layout())
 
     def test_is_layout_without_datastore(self):
         node = make_Node_with_uefi_boot_method()
@@ -1967,7 +1965,7 @@ class TestVMFS6StorageLayout(MAASServerTestCase):
         # A user can delete the VMFS Datastore but the layout should still
         # be detected for the UI.
         node.virtualblockdevice_set.delete()
-        self.assertEqual(bd, layout.is_layout())
+        self.assertEquals(bd, layout.is_layout())
 
     def test_is_layout_returns_none_when_not_found(self):
         node = make_Node_with_uefi_boot_method()
@@ -1981,139 +1979,6 @@ class TestVMFS6StorageLayout(MAASServerTestCase):
             layout = layout_class(node)
             layout.configure()
             vmfs_layout = VMFS6StorageLayout(node)
-            self.assertIsNone(vmfs_layout.is_layout(), layout_name)
-
-
-class TestVMFS7StorageLayout(MAASServerTestCase):
-    def test_init_sets_up_all_fields(self):
-        node = factory.make_Node(with_boot_disk=False)
-        factory.make_PhysicalBlockDevice(node=node, size=LARGE_BLOCK_DEVICE)
-        layout = VMFS7StorageLayout(node)
-        self.assertItemsEqual(
-            ["root_device", "root_size", "boot_size"], layout.fields.keys()
-        )
-
-    def test_creates_layout(self):
-        node = factory.make_Node(with_boot_disk=False)
-        node.boot_disk = factory.make_PhysicalBlockDevice(
-            node=node, size=LARGE_BLOCK_DEVICE
-        )
-        layout = VMFS7StorageLayout(node)
-        self.assertEqual("VMFS7", layout.configure())
-        pt = node.boot_disk.get_partitiontable()
-        self.assertDictEqual(
-            {
-                "%s-part1" % node.boot_disk.name: 105 * 1024 ** 2,
-                "%s-part5" % node.boot_disk.name: 1074 * 1024 ** 2,
-                "%s-part6" % node.boot_disk.name: 1074 * 1024 ** 2,
-                "%s-part7" % node.boot_disk.name: 8704 * 1024 ** 2,
-                "%s-part8"
-                % node.boot_disk.name: (
-                    node.boot_disk.size
-                    - 105 * 1024 ** 2
-                    - 1074 * 1024 ** 2
-                    - 1074 * 1024 ** 2
-                    - 8704 * 1024 ** 2
-                    - 7 * 1024 ** 2
-                ),
-            },
-            {part.name: part.size for part in pt.partitions.all()},
-        )
-
-    def test_clean_validates_min_size(self):
-        node = factory.make_Node(with_boot_disk=False)
-        node.boot_disk = factory.make_PhysicalBlockDevice(
-            node=node, size=1024 ** 3 - 1
-        )
-        layout = VMFS7StorageLayout(node)
-        error = self.assertRaises(StorageLayoutFieldsError, layout.configure)
-        self.assertEqual(
-            {"size": ["Boot disk must be at least 10G."]}, error.message_dict
-        )
-
-    def test_accepts_root_device_param(self):
-        # Regression test for LP:1825241
-        node = factory.make_Node(with_boot_disk=False)
-        node.boot_disk = factory.make_PhysicalBlockDevice(
-            node=node, size=LARGE_BLOCK_DEVICE
-        )
-        root_disk = factory.make_PhysicalBlockDevice(
-            node=node, size=LARGE_BLOCK_DEVICE
-        )
-        layout = VMFS7StorageLayout(node, {"root_device": root_disk.id})
-        self.assertEqual("VMFS7", layout.configure())
-        pt = root_disk.get_partitiontable()
-        self.assertDictEqual(
-            {
-                "%s-part1" % root_disk.name: 105 * 1024 ** 2,
-                "%s-part5" % root_disk.name: 1074 * 1024 ** 2,
-                "%s-part6" % root_disk.name: 1074 * 1024 ** 2,
-                "%s-part7" % root_disk.name: 8704 * 1024 ** 2,
-                "%s-part8"
-                % root_disk.name: (
-                    root_disk.size
-                    - 105 * 1024 ** 2
-                    - 1074 * 1024 ** 2
-                    - 1074 * 1024 ** 2
-                    - 8704 * 1024 ** 2
-                    - 7 * 1024 ** 2
-                ),
-            },
-            {part.name: part.size for part in pt.partitions.all()},
-        )
-
-    def test_accepts_root_size_param(self):
-        node = factory.make_Node(with_boot_disk=False)
-        node.boot_disk = factory.make_PhysicalBlockDevice(
-            node=node, size=LARGE_BLOCK_DEVICE
-        )
-        layout = VMFS7StorageLayout(node, {"root_size": 10 * 1024 ** 3})
-        self.assertEqual("VMFS7", layout.configure())
-        pt = node.boot_disk.get_partitiontable()
-        self.assertDictEqual(
-            {
-                "%s-part1" % node.boot_disk.name: 105 * 1024 ** 2,
-                "%s-part5" % node.boot_disk.name: 1074 * 1024 ** 2,
-                "%s-part6" % node.boot_disk.name: 1074 * 1024 ** 2,
-                "%s-part7" % node.boot_disk.name: 8704 * 1024 ** 2,
-                "%s-part8" % node.boot_disk.name: 10 * 1024 ** 3,
-            },
-            {part.name: part.size for part in pt.partitions.all()},
-        )
-
-    def test_is_layout(self):
-        node = make_Node_with_uefi_boot_method()
-        bd = factory.make_PhysicalBlockDevice(
-            node=node, size=LARGE_BLOCK_DEVICE
-        )
-        layout = VMFS7StorageLayout(node)
-        layout.configure()
-        self.assertEqual(bd, layout.is_layout())
-
-    def test_is_layout_without_datastore(self):
-        node = make_Node_with_uefi_boot_method()
-        bd = factory.make_PhysicalBlockDevice(
-            node=node, size=LARGE_BLOCK_DEVICE
-        )
-        layout = VMFS7StorageLayout(node)
-        layout.configure()
-        # A user can delete the VMFS Datastore but the layout should still
-        # be detected for the UI.
-        node.virtualblockdevice_set.delete()
-        self.assertEqual(bd, layout.is_layout())
-
-    def test_is_layout_returns_none_when_not_found(self):
-        node = make_Node_with_uefi_boot_method()
-        factory.make_PhysicalBlockDevice(node=node, size=LARGE_BLOCK_DEVICE)
-        factory.make_PhysicalBlockDevice(
-            node=node, size=LARGE_BLOCK_DEVICE, tags=["ssd"]
-        )
-        for layout_name, layout_class in STORAGE_LAYOUTS.values():
-            if layout_class == VMFS7StorageLayout:
-                continue
-            layout = layout_class(node)
-            layout.configure()
-            vmfs_layout = VMFS7StorageLayout(node)
             self.assertIsNone(vmfs_layout.is_layout(), layout_name)
 
 
@@ -2142,8 +2007,8 @@ class TestBlankStorageLayout(MAASServerTestCase):
         layout = BlankStorageLayout(node)
         if self.layout_class != BlankStorageLayout:
             self.assertIsNone(layout.is_layout())
-        self.assertEqual("blank", layout.configure())
-        self.assertEqual(bd, layout.is_layout())
+        self.assertEquals("blank", layout.configure())
+        self.assertEquals(bd, layout.is_layout())
         self.assertFalse(node.virtualblockdevice_set.exists())
         for bd in node.blockdevice_set.all():
             self.assertFalse(bd.filesystem_set.exists())

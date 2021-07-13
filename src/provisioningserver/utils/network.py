@@ -55,6 +55,7 @@ ENI_PARSED_METHODS = ["static", "manual", "dhcp"]
 # included in `get_all_interfaces_definition()`.
 LOOPBACK_INTERFACE_INFO = {
     "enabled": True,
+    "index": 1,
     "links": [{"address": "::1/128"}, {"address": "127.0.0.1/8"}],
 }
 
@@ -939,11 +940,6 @@ def get_mac_organization(mac):
 def fix_link_addresses(links):
     """Fix the addresses defined in `links`.
 
-    Each link entry can contain addresses in the form:
-       {"address": "1.2.3.4/24", ...}
-    or
-       {"address": "1.2.3.4", "netmask": 24, ...}
-
     Some address will have a prefixlen of 32 or 128 depending if IPv4 or IPv6.
     Fix those address to fall within a subnet that is already defined in
     another link. The addresses that get fixed will be placed into the smallest
@@ -957,10 +953,7 @@ def fix_link_addresses(links):
     # Loop through and build a list of subnets where the prefixlen is not
     # 32 or 128 for IPv4 and IPv6 respectively.
     for link in links:
-        if "netmask" in link:
-            ip_addr = IPNetwork(f"{link['address']}/{link['netmask']}")
-        else:
-            ip_addr = IPNetwork(link["address"])
+        ip_addr = IPNetwork(link["address"])
         if ip_addr.version == 4:
             if ip_addr.prefixlen == 32:
                 links_v4.append(link)
@@ -972,25 +965,26 @@ def fix_link_addresses(links):
             else:
                 subnets_v6.append(ip_addr.cidr)
 
-    for links, subnets in ((links_v4, subnets_v4), (links_v6, subnets_v6)):
-        subnets = sorted(subnets, key=attrgetter("prefixlen"), reverse=True)
-        # Fix all addresses that have prefixlen of 32 or 128 that fit in inside
-        # one of the already defined subnets.
-        for link in links:
-            has_separate_netmask = "netmask" in link
-            if has_separate_netmask:
-                ip_addr = IPNetwork(f"{link['address']}/{link['netmask']}")
-            else:
-                ip_addr = IPNetwork(link["address"])
+    # Sort the subnets so the smallest prefixlen is first.
+    subnets_v4 = sorted(subnets_v4, key=attrgetter("prefixlen"), reverse=True)
+    subnets_v6 = sorted(subnets_v6, key=attrgetter("prefixlen"), reverse=True)
 
-            for subnet in subnets:
-                if ip_addr.ip in subnet:
-                    if has_separate_netmask:
-                        link["netmask"] = subnet.prefixlen
-                    else:
-                        ip_addr.prefixlen = subnet.prefixlen
-                        link["address"] = str(ip_addr)
-                    break
+    # Fix all addresses that have prefixlen of 32 or 128 that fit in inside
+    # one of the already defined subnets.
+    for link in links_v4:
+        ip_addr = IPNetwork(link["address"])
+        for subnet in subnets_v4:
+            if ip_addr.ip in subnet:
+                ip_addr.prefixlen = subnet.prefixlen
+                link["address"] = str(ip_addr)
+                break
+    for link in links_v6:
+        ip_addr = IPNetwork(link["address"])
+        for subnet in subnets_v6:
+            if ip_addr.ip in subnet:
+                ip_addr.prefixlen = subnet.prefixlen
+                link["address"] = str(ip_addr)
+                break
 
 
 def fix_link_gateways(links, iproute_info):
@@ -998,15 +992,15 @@ def fix_link_gateways(links, iproute_info):
     or if the default gateway is in the subnet.
     """
     for link in links:
-        network = IPNetwork(link["address"])
-        cidr = str(network.cidr)
+        ip_addr = IPNetwork(link["address"])
+        cidr = str(ip_addr.cidr)
         if cidr in iproute_info:
-            link["gateway"] = iproute_info[cidr]["gateway"]
+            link["gateway"] = iproute_info[cidr]["via"]
         elif (
             "default" in iproute_info
-            and IPAddress(iproute_info["default"]["gateway"]) in network
+            and IPAddress(iproute_info["default"]["via"]) in ip_addr
         ):
-            link["gateway"] = iproute_info["default"]["gateway"]
+            link["gateway"] = iproute_info["default"]["via"]
 
 
 def get_interface_children(interfaces: dict) -> dict:
@@ -1107,7 +1101,8 @@ def annotate_with_default_monitored_interfaces(interfaces: dict) -> None:
 def get_all_interfaces_definition(
     annotate_with_monitored: bool = True,
 ) -> dict:
-    """Return details for all network interfaces.
+    """Return interfaces definition by parsing "ip addr" and the running
+    "dhclient" processes on the machine.
 
     The interfaces definition is defined as a contract between the region and
     the rack controller. The region controller processes this resulting
@@ -1115,7 +1110,6 @@ def get_all_interfaces_definition(
 
     :param annotate_with_monitored: If True, annotates the given interfaces
         with whether or not they should be monitored. (Default: True)
-
     """
     interfaces = {}
     dhclient_info = get_dhclient_info()
@@ -1128,7 +1122,7 @@ def get_all_interfaces_definition(
         # This type of interface is created when hypervisors create virtual
         # interfaces for guests. By themselves, they're not useful for MAAS to
         # manage.
-        "tunnel",
+        "ethernet.tunnel",
     ]
     if not running_in_container():
         # When not running in a container, we should be able to identify
@@ -1139,30 +1133,51 @@ def get_all_interfaces_definition(
         name: ipaddr
         for name, ipaddr in get_ip_addr().items()
         if (
-            ipaddr["mac"]
-            and ipaddr["type"] not in exclude_types
+            ipaddr["type"] not in exclude_types
             and not ipaddr["type"].startswith("unknown-")
+            and ipaddr.get("mac", "") != "00:00:00:00:00:00"
         )
     }
-    for name, details in ipaddr_info.items():
-        if_type = details["type"]
-        if if_type not in ("vlan", "bridge", "bond"):
-            if_type = "physical"
+    for name, ipaddr in ipaddr_info.items():
+        iface_type = "physical"
+        parents = []
+        mac_address = None
+        vid = None
+        if ipaddr["type"] == "ethernet.bond":
+            iface_type = "bond"
+            mac_address = ipaddr["mac"]
+            for bond_nic in ipaddr["bonded_interfaces"]:
+                if bond_nic in interfaces or bond_nic in ipaddr_info:
+                    parents.append(bond_nic)
+        elif ipaddr["type"] == "ethernet.vlan":
+            iface_type = "vlan"
+            parents.append(ipaddr["parent"])
+            vid = ipaddr["vid"]
+        elif ipaddr["type"] == "ethernet.bridge":
+            iface_type = "bridge"
+            mac_address = ipaddr["mac"]
+            for bridge_nic in ipaddr["bridged_interfaces"]:
+                if bridge_nic in interfaces or bridge_nic in ipaddr_info:
+                    parents.append(bridge_nic)
+        else:
+            mac_address = ipaddr["mac"]
+
+        # Create the interface definition will links for both IPv4 and IPv6.
         interface = {
-            "type": if_type,
-            "mac_address": details["mac"],
+            "type": iface_type,
+            "index": ipaddr["index"],
             "links": [],
-            "enabled": details["enabled"],
-            "parents": [
-                iface for iface in details["parents"] if iface in ipaddr_info
-            ],
-            "source": "machine-resources",
+            "enabled": True if "UP" in ipaddr["flags"] else False,
+            "parents": parents,
+            "source": "ipaddr",
         }
-        if "vid" in details:
-            interface["vid"] = details["vid"]
+        if mac_address is not None:
+            interface["mac_address"] = mac_address
+        if vid is not None:
+            interface["vid"] = vid
         # Add the static and dynamic IP addresses assigned to the interface.
         dhcp_address = dhclient_info.get(name, None)
-        for address in details["addresses"]:
+        for address in ipaddr.get("inet", []) + ipaddr.get("inet6", []):
             if str(IPNetwork(address).ip) == dhcp_address:
                 interface["links"].append({"mode": "dhcp", "address": address})
             else:
@@ -1259,16 +1274,18 @@ def enumerate_ipv4_addresses(ifdata):
     )
 
 
-def has_ipv4_address(interface: dict) -> bool:
+def has_ipv4_address(interfaces: dict, interface: str) -> bool:
     """Returns True if the specified interface has an IPv4 address assigned.
 
     If no addresses are assigned, or only addresses with other address families
     are assigned (IPv6), returns False.
 
-    :param interface: interface details for an interface fom `get_all_interfaces_definition()`.
+    :param interfaces: The output of `get_all_interfaces_definition()`.
+    :param interface: The interface name to check.
     """
     address_families = {
-        IPAddress(ip).version for ip in enumerate_assigned_ips(interface)
+        IPAddress(ip).version
+        for ip in enumerate_assigned_ips(interfaces[interface])
     }
     return 4 in address_families
 
@@ -1377,17 +1394,15 @@ def reverseResolve(
     return None
 
 
-def coerce_to_valid_hostname(hostname, lowercase: bool = True):
+def coerce_to_valid_hostname(hostname):
     """Given a server name that may contain spaces and special characters,
     attempts to derive a valid hostname.
 
     :param hostname: the specified (possibly invalid) hostname
-    :param lowercase: whether to coerce to lowercase chars
     :return: the resulting string, or None if the hostname could not be coerced
     """
-    if lowercase:
-        hostname = hostname.lower()
-    hostname = re.sub(r"[^a-zA-Z0-9-]+", "-", hostname)
+    hostname = hostname.lower()
+    hostname = re.sub(r"[^a-z0-9-]+", "-", hostname)
     hostname = hostname.strip("-")
     if hostname == "" or len(hostname) > 64:
         return None

@@ -132,7 +132,7 @@ class IPCMaster(RPCProtocol):
         return {}
 
 
-class IPCMasterService(service.Service):
+class IPCMasterService(service.Service, object):
     """
     IPC master service.
 
@@ -626,7 +626,7 @@ class IPCWorker(RPCProtocol):
         return d
 
 
-class IPCWorkerService(service.Service):
+class IPCWorkerService(service.Service, object):
     """
     IPC worker service.
 

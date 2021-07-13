@@ -1,4 +1,4 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2016 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Tests for `provisioningserver.boot`."""
@@ -19,7 +19,6 @@ from maastesting.testcase import MAASTestCase, MAASTwistedRunTest
 from provisioningserver import boot
 from provisioningserver.boot import (
     BootMethod,
-    BootMethodRegistry,
     BytesReader,
     gen_template_filenames,
     get_main_archive_url,
@@ -29,9 +28,8 @@ from provisioningserver.boot import (
 )
 from provisioningserver.boot.tftppath import compose_image_path
 from provisioningserver.kernel_opts import compose_kernel_command_line
-from provisioningserver.rpc import clusterservice, region
+from provisioningserver.rpc import region
 from provisioningserver.rpc.testing import MockLiveClusterToRegionRPCFixture
-from provisioningserver.testing.config import ClusterConfigurationFixture
 from provisioningserver.tests.test_kernel_opts import make_kernel_parameters
 from provisioningserver.utils.fs import atomic_symlink, tempdir
 
@@ -333,52 +331,10 @@ class TestBootMethod(MAASTestCase):
             template_namespace["dtb_path"](kernel_params),
         )
 
-    def test_compose_template_namespace_include_debug(self):
-        debug = factory.pick_bool()
-        boot.debug_enabled.cache_clear()
-        self.addClassCleanup(boot.debug_enabled.cache_clear)
-        self.useFixture(ClusterConfigurationFixture(debug=debug))
-        kernel_params = make_kernel_parameters()
-        method = FakeBootMethod()
-
-        template_namespace = method.compose_template_namespace(kernel_params)
-
-        self.assertEqual(debug, template_namespace["debug"])
-
-    def test_consistent_names(self):
-        # MAAS stores the boot method name on the Subnet model to indicate it
-        # is disabled. This test ensures the name doesn't change.
-        self.assertEqual(
-            [
-                ("ipxe", None),
-                ("pxe", "00:00"),
-                ("uefi_amd64_tftp", "00:07"),
-                ("uefi_amd64_http", "00:10"),
-                ("uefi_ebc_tftp", "00:09"),
-                ("uefi_arm64_tftp", "00:0B"),
-                ("uefi_arm64_http", "00:13"),
-                ("open-firmware_ppc64el", "00:0C"),
-                ("powernv", "00:0E"),
-                ("windows", None),
-                ("s390x", "00:1F"),
-                ("s390x_partition", "00:20"),
-            ],
-            [
-                (boot_method.name, boot_method.arch_octet)
-                for _, boot_method in BootMethodRegistry
-            ],
-        )
-
 
 class TestGetArchiveUrl(MAASTestCase):
 
     run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
-
-    def setUp(self):
-        super().setUp()
-        self.patch(
-            clusterservice, "get_all_interfaces_definition"
-        ).return_value = {}
 
     def patch_rpc_methods(self, return_value=None):
         fixture = self.useFixture(MockLiveClusterToRegionRPCFixture())

@@ -30,15 +30,14 @@ def get_content_parameter(request):
 
 
 class CommissioningScriptsHandler(OperationsHandler):
-    """
-    Manage custom commissioning scripts.
+    """Manage custom commissioning scripts.
 
     This functionality is only available to administrators.
 
     This endpoint has been deprecated in favor of the node-scripts endpoint.
     """
 
-    api_doc_section_name = "Commissioning scripts (deprecated)"
+    api_doc_section_name = "Commissioning scripts"
 
     update = delete = None
 
@@ -112,15 +111,14 @@ class CommissioningScriptsHandler(OperationsHandler):
 
 
 class CommissioningScriptHandler(OperationsHandler):
-    """
-    Manage a custom commissioning script.
+    """Manage a custom commissioning script.
 
     This functionality is only available to administrators.
 
     This endpoint has been deprecated in favor of the node-script endpoint.
     """
 
-    api_doc_section_name = "Commissioning script (deprecated)"
+    api_doc_section_name = "Commissioning script"
 
     # Relies on Piston's built-in DELETE implementation.  There is no POST.
     create = None

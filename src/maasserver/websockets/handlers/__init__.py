@@ -1,4 +1,4 @@
-# Copyright 2015-2020 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2017 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Handlers for the WebSocket connections."""
@@ -19,7 +19,7 @@ __all__ = [
     "IPRangeHandler",
     "IPRangeHandler",
     "MachineHandler",
-    "NodeDeviceHandler",
+    "NodeResultHandler",
     "NodeResultHandler",
     "NotificationHandler",
     "PackageRepositoryHandler",
@@ -32,6 +32,7 @@ __all__ = [
     "SpaceHandler",
     "StaticRouteHandler",
     "SubnetHandler",
+    "SwitchHandler",
     "TagHandler",
     "TokenHandler",
     "UserHandler",
@@ -51,7 +52,6 @@ from maasserver.websockets.handlers.fabric import FabricHandler
 from maasserver.websockets.handlers.general import GeneralHandler
 from maasserver.websockets.handlers.iprange import IPRangeHandler
 from maasserver.websockets.handlers.machine import MachineHandler
-from maasserver.websockets.handlers.node_device import NodeDeviceHandler
 from maasserver.websockets.handlers.node_result import NodeResultHandler
 from maasserver.websockets.handlers.notification import NotificationHandler
 from maasserver.websockets.handlers.packagerepository import (
@@ -66,6 +66,7 @@ from maasserver.websockets.handlers.sshkey import SSHKeyHandler
 from maasserver.websockets.handlers.sslkey import SSLKeyHandler
 from maasserver.websockets.handlers.staticroute import StaticRouteHandler
 from maasserver.websockets.handlers.subnet import SubnetHandler
+from maasserver.websockets.handlers.switch import SwitchHandler
 from maasserver.websockets.handlers.tag import TagHandler
 from maasserver.websockets.handlers.token import TokenHandler
 from maasserver.websockets.handlers.user import UserHandler

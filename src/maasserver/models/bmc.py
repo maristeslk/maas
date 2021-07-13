@@ -4,7 +4,6 @@
 """BMC objects."""
 
 
-from collections import defaultdict
 from functools import partial
 import re
 from statistics import mean
@@ -41,6 +40,7 @@ from maasserver.enum import (
     BMC_TYPE_CHOICES,
     INTERFACE_TYPE,
     IPADDRESS_TYPE,
+    NODE_CREATION_TYPE,
     NODE_STATUS,
     NODE_TYPE,
 )
@@ -49,6 +49,10 @@ from maasserver.models.blockdevice import BlockDevice
 from maasserver.models.cleansave import CleanSave
 from maasserver.models.fabric import Fabric
 from maasserver.models.interface import PhysicalInterface, VLANInterface
+from maasserver.models.iscsiblockdevice import (
+    get_iscsi_target,
+    ISCSIBlockDevice,
+)
 from maasserver.models.node import get_default_zone, Machine, Node
 from maasserver.models.physicalblockdevice import PhysicalBlockDevice
 from maasserver.models.podhints import PodHints
@@ -66,7 +70,7 @@ from maasserver.utils.orm import transactional
 from maasserver.utils.threads import deferToDatabase
 from metadataserver.enum import RESULT_TYPE
 from provisioningserver.drivers import SETTING_SCOPE
-from provisioningserver.drivers.pod import InterfaceAttachType
+from provisioningserver.drivers.pod import BlockDeviceType, InterfaceAttachType
 from provisioningserver.drivers.power.registry import PowerDriverRegistry
 from provisioningserver.enum import MACVLAN_MODE_CHOICES
 from provisioningserver.logger import get_maas_logger
@@ -180,8 +184,6 @@ class BMC(CleanSave, TimestampedModel):
     # Name of the pod.
     name = CharField(max_length=255, default="", blank=True, unique=True)
 
-    version = TextField(default="", blank=True)
-
     # Architectures this pod supports.
     architectures = ArrayField(
         TextField(), blank=True, null=True, default=list
@@ -201,6 +203,14 @@ class BMC(CleanSave, TimestampedModel):
 
     # Total storage available in the pod (bytes).
     local_storage = BigIntegerField(blank=False, null=False, default=0)
+
+    # Number of disks in the pod (if applicable, otherwise set to -1).
+    local_disks = IntegerField(blank=False, null=False, default=-1)
+
+    # Total iSCSI storage available in the pod (if applicable, otherwise -1).
+    iscsi_storage = BigIntegerField(  # Bytes
+        blank=False, null=False, default=-1
+    )
 
     # Resource pool for this pod.
     pool = ForeignKey(
@@ -610,6 +620,20 @@ class PodManager(BaseBMCManager):
         else:
             raise PermissionDenied()
 
+    def have_rsd(self, user, perm):
+        """Are there any RSD hosts?
+
+        :param user: The user that should be used in the permission check.
+        :type user: User_
+        :param perm: Type of access requested.
+        :type perm: `PodPermission`
+
+        .. _User: https://
+           docs.djangoproject.com/en/dev/topics/auth/
+           #django.contrib.auth.models.User
+        """
+        return self.get_pods(user, perm).filter(power_type="rsd").exists()
+
 
 class Pod(BMC):
     """A `Pod` represents a `BMC` that controls multiple machines."""
@@ -638,11 +662,6 @@ class Pod(BMC):
             raise ValidationError("A pod needs to have a pool")
 
     @property
-    def tracked_project(self) -> str:
-        """Return the project tracked by the Pod, or empty string."""
-        return self.power_parameters.get("project", "")
-
-    @property
     def host(self):
         node = self.hints.nodes.first()
         if node:
@@ -668,6 +687,10 @@ class Pod(BMC):
             hints.memory = discovered_hints.memory
         if discovered_hints.local_storage != -1:
             hints.local_storage = discovered_hints.local_storage
+        if discovered_hints.local_disks != -1:
+            hints.local_disks = discovered_hints.local_disks
+        if discovered_hints.iscsi_storage != -1:
+            hints.iscsi_storage = discovered_hints.iscsi_storage
         hints.save()
 
     def add_tag(self, tag):
@@ -685,21 +708,20 @@ class Pod(BMC):
     def check_over_commit_ratios(self, requested_cores, requested_memory):
         """Checks that requested cpu cores and memory are within the
         currently available resources capped by the overcommit ratios."""
-        from maasserver.models.virtualmachine import get_vm_host_used_resources
-
         message = ""
-        used_resources = get_vm_host_used_resources(self)
+        used_cores = self.get_used_cores()
+        used_memory = self.get_used_memory()
         over_commit_cores = self.cores * self.cpu_over_commit_ratio
-        potential_cores = used_resources.cores + requested_cores
+        potential_cores = used_cores + requested_cores
         over_commit_memory = self.memory * self.memory_over_commit_ratio
-        potential_memory = used_resources.total_memory + requested_memory
+        potential_memory = used_memory + requested_memory
         if (over_commit_cores - potential_cores) < 0:
             message = (
                 "CPU overcommit ratio is %s and there are %s "
                 "available resources; %s requested."
                 % (
                     self.cpu_over_commit_ratio,
-                    (self.cores - used_resources.cores),
+                    (self.cores - used_cores),
                     requested_cores,
                 )
             )
@@ -709,7 +731,7 @@ class Pod(BMC):
                 "available resources; %s requested."
                 % (
                     self.memory_over_commit_ratio,
-                    (self.memory - used_resources.total_memory),
+                    (self.memory - used_memory),
                     requested_memory,
                 )
             )
@@ -746,8 +768,7 @@ class Pod(BMC):
             storage_pool = self._get_storage_pool_by_id(
                 discovered_bd.storage_pool
             )
-
-        block_device = PhysicalBlockDevice.objects.create(
+        return PhysicalBlockDevice.objects.create(
             numa_node=machine.default_numanode,
             name=name,
             id_path=discovered_bd.id_path,
@@ -756,8 +777,45 @@ class Pod(BMC):
             size=discovered_bd.size,
             block_size=discovered_bd.block_size,
             tags=discovered_bd.tags,
+            storage_pool=storage_pool,
         )
-        self._sync_vm_disk(block_device, storage_pool=storage_pool)
+
+    def _create_iscsi_block_device(self, discovered_bd, machine, name=None):
+        """Create's a new `ISCSIBlockDevice` for `machine`.
+
+        `ISCSIBlockDevice.target` are unique. So if one exists on another
+        machine it will be moved from that machine to this machine.
+        """
+        if name is None:
+            name = machine.get_next_block_device_name()
+        target = get_iscsi_target(discovered_bd.iscsi_target)
+        block_device, created = ISCSIBlockDevice.objects.get_or_create(
+            target=target,
+            defaults={
+                "name": name,
+                "node": machine,
+                "size": discovered_bd.size,
+                "block_size": discovered_bd.block_size,
+                "tags": discovered_bd.tags,
+            },
+        )
+        if not created:
+            podlog.warning(
+                "%s: ISCSI block device with target %s was discovered on "
+                "machine %s and was moved from %s."
+                % (
+                    self.name,
+                    target,
+                    machine.hostname,
+                    block_device.node.hostname,
+                )
+            )
+            block_device.name = name
+            block_device.node = machine
+            block_device.size = discovered_bd.size
+            block_device.block_size = discovered_bd.block_size
+            block_device.tags = discovered_bd.tags
+            block_device.save()
         return block_device
 
     def _create_interface(self, discovered_nic, machine, name=None):
@@ -807,7 +865,7 @@ class Pod(BMC):
         discovered_machine,
         commissioning_user,
         skip_commissioning=False,
-        dynamic=False,
+        creation_type=NODE_CREATION_TYPE.PRE_EXISTING,
         interfaces=None,
         requested_machine=None,
         **kwargs,
@@ -830,6 +888,7 @@ class Pod(BMC):
         zone = kwargs.pop("zone", None)
         if zone is None:
             zone = self.zone
+
         pool = kwargs.pop("pool", None)
         if pool is None:
             pool = self.pool
@@ -849,7 +908,7 @@ class Pod(BMC):
             cpu_speed=discovered_machine.cpu_speed,
             memory=discovered_machine.memory,
             power_state=discovered_machine.power_state,
-            dynamic=dynamic,
+            creation_type=creation_type,
             pool=pool,
             zone=zone,
             bios_boot_method=discovered_machine.bios_boot_method,
@@ -861,8 +920,7 @@ class Pod(BMC):
             machine.set_random_hostname()
         machine.save()
 
-        self._sync_vm(discovered_machine, machine)
-        self._sync_tags(discovered_machine, machine)
+        self._assign_tags(machine, discovered_machine)
         self._assign_storage(machine, discovered_machine, skip_commissioning)
         created_interfaces = self._assign_interfaces(
             machine, discovered_machine, interfaces, skip_commissioning
@@ -870,6 +928,7 @@ class Pod(BMC):
         self._assign_ip_addresses(
             discovered_machine, created_interfaces, requested_ips, ip_modes
         )
+        self._sync_machine(discovered_machine, machine)
 
         # New machines get commission started immediately unless skipped.
         if not skip_commissioning:
@@ -967,29 +1026,48 @@ class Pod(BMC):
         # Create the discovered block devices and set the initial storage
         # layout for the machine.
         for idx, discovered_bd in enumerate(discovered_machine.block_devices):
-            try:
-                self._create_physical_block_device(
+            if discovered_bd.type == BlockDeviceType.PHYSICAL:
+                try:
+                    self._create_physical_block_device(
+                        discovered_bd,
+                        machine,
+                        name=BlockDevice._get_block_name_from_idx(idx),
+                    )
+                except Exception:
+                    if skip_commissioning:
+                        # Commissioning is not being performed for this
+                        # machine. When not performing commissioning it is
+                        # required for all physical block devices be created,
+                        # otherwise this is allowed to fail as commissioning
+                        # will discover this information.
+                        raise
+            elif discovered_bd.type == BlockDeviceType.ISCSI:
+                # iSCSI block devices cannot fail, they must provide the
+                # required information.
+                self._create_iscsi_block_device(
                     discovered_bd,
                     machine,
                     name=BlockDevice._get_block_name_from_idx(idx),
                 )
-            except Exception:
-                if skip_commissioning:
-                    # Commissioning is not being performed for this
-                    # machine. When not performing commissioning it is
-                    # required for all physical block devices be created,
-                    # otherwise this is allowed to fail as commissioning
-                    # will discover this information.
-                    raise
+            else:
+                raise ValueError(
+                    "Unknown block device type: %s" % discovered_bd.type
+                )
         if skip_commissioning:
             machine.set_default_storage_layout()
 
-    def _sync_tags(self, discovered_machine, machine):
-        tags = []
-        for tag_name in set(discovered_machine.tags + self.tags):
-            tag, _ = Tag.objects.get_or_create(name=tag_name)
-            tags.append(tag)
-        machine.tags.set(tags)
+    def _assign_tags(self, machine, discovered_machine):
+        # Assign the discovered tags.
+        for discovered_tag in discovered_machine.tags:
+            tag, _ = Tag.objects.get_or_create(name=discovered_tag)
+            machine.tags.add(tag)
+        # Assign the Pod's tags.
+        existing_tags = machine.tags.all().values("name")
+        for pod_tag in self.tags:
+            # Only if not a duplicate.
+            if pod_tag not in existing_tags:
+                tag, _ = Tag.objects.get_or_create(name=pod_tag)
+                machine.tags.add(tag)
 
     def _update_vlans_based_on_pod_host(
         self, created_interfaces, discovered_machine
@@ -1073,16 +1151,80 @@ class Pod(BMC):
         existing_machine.instance_power_parameters = (
             discovered_machine.power_parameters
         )
-        existing_machine.cpu_count = discovered_machine.cores
-        existing_machine.memory = discovered_machine.memory
 
-        self._sync_vm(discovered_machine, existing_machine)
+        if self.power_type == "lxd":
+            from maasserver.models.virtualmachine import (
+                VirtualMachine,
+                VirtualMachineInterface,
+            )
 
-        # If this machine is not composed on allocation we skip syncing all the
-        # remaining information because MAAS commissioning will discover this
-        # information. Any changes on the MAAS in the pod for pre-existing and
-        # manual require the machine to be re-commissioned.
-        if not existing_machine.dynamic:
+            host_interfaces = {}
+            if self.host is not None:
+                for interface in self.host.interface_set.all():
+                    host_interfaces[interface.name] = interface
+
+            vm = getattr(existing_machine, "virtualmachine", None)
+            if vm is None:
+                vm, _ = VirtualMachine.objects.get_or_create(
+                    identifier=existing_machine.instance_power_parameters[
+                        "instance_name"
+                    ],
+                    bmc=self,
+                )
+                vm.machine = existing_machine
+            vm.memory = discovered_machine.memory
+            vm.hugepages_backed = discovered_machine.hugepages_backed
+            vm.pinned_cores = discovered_machine.pinned_cores
+            vm.unpinned_cores = (
+                0
+                if discovered_machine.pinned_cores
+                else discovered_machine.cores
+            )
+            vm.save()
+            iface_ids = set()
+            existing_vm_ifaces = list(
+                VirtualMachineInterface.objects.filter(vm=vm).all()
+            )
+            for discovered_interface in discovered_machine.interfaces:
+                found_iface = None
+                for existing_vm_iface in existing_vm_ifaces:
+                    if discovered_interface.mac_address is not None:
+                        if (
+                            discovered_interface.mac_address
+                            == existing_vm_iface.mac_address
+                        ):
+                            found_iface = existing_vm_iface
+                            break
+                if found_iface is not None:
+                    iface = found_iface
+                    existing_vm_ifaces.remove(found_iface)
+                else:
+                    iface = VirtualMachineInterface.objects.create(
+                        vm=vm,
+                        mac_address=discovered_interface.mac_address,
+                        attachment_type=discovered_interface.attach_type,
+                    )
+
+                iface_ids.add(iface.id)
+
+                iface.attachment_type = discovered_interface.attach_type
+                iface.host_interface = host_interfaces.get(
+                    discovered_interface.attach_name
+                )
+                iface.save()
+            VirtualMachineInterface.objects.filter(vm=vm).exclude(
+                id__in=iface_ids
+            ).delete()
+
+        # If this machine is pre-existing or manually composed then we skip
+        # syncing all the remaining information because MAAS commissioning
+        # will discover this information. Any changes on the MAAS in the pod
+        # for pre-existing and manual require the machine to be
+        # re-commissioned.
+        if existing_machine.creation_type in [
+            NODE_CREATION_TYPE.PRE_EXISTING,
+            NODE_CREATION_TYPE.MANUAL,
+        ]:
             existing_machine.save()
             return
 
@@ -1090,116 +1232,56 @@ class Pod(BMC):
         # We are skipping hostname syncing so that any changes to the
         # hostname in MAAS are not overwritten.
         existing_machine.architecture = discovered_machine.architecture
+        existing_machine.cpu_count = discovered_machine.cores
         existing_machine.cpu_speed = discovered_machine.cpu_speed
+        existing_machine.memory = discovered_machine.memory
         existing_machine.save()
 
-        self._sync_tags(discovered_machine, existing_machine)
-        self._sync_block_devices(discovered_machine, existing_machine)
-        self._sync_interfaces(discovered_machine, existing_machine)
-
-    def _sync_vm(self, discovered_machine, machine):
-        from maasserver.models.virtualmachine import VirtualMachine
-
-        vm = getattr(machine, "virtualmachine", None)
-        if not vm:
-            vm, _ = VirtualMachine.objects.get_or_create(
-                identifier=machine.instance_name,
-                project=self.tracked_project,
-                bmc=self,
-            )
-            vm.machine = machine
-        vm.memory = discovered_machine.memory
-        vm.hugepages_backed = discovered_machine.hugepages_backed
-        vm.pinned_cores = discovered_machine.pinned_cores
-        vm.unpinned_cores = (
-            0 if discovered_machine.pinned_cores else discovered_machine.cores
-        )
-        vm.save()
-        self._sync_vm_interfaces(vm, discovered_machine)
-        return vm
-
-    def _sync_vm_interfaces(self, vm, discovered_machine):
-        from maasserver.models.virtualmachine import VirtualMachineInterface
-
-        host_interfaces = {}
-        if self.host:
-            host_interfaces = {
-                interface.name: interface
-                for interface in self.host.interface_set.all()
-            }
-
-        iface_ids = set()
-        existing_vm_ifaces = list(
-            VirtualMachineInterface.objects.filter(vm=vm).all()
-        )
-        for discovered_interface in discovered_machine.interfaces:
-            found_iface = None
-            for existing_vm_iface in existing_vm_ifaces:
-                if discovered_interface.mac_address is not None:
-                    if (
-                        discovered_interface.mac_address
-                        == existing_vm_iface.mac_address
-                    ):
-                        found_iface = existing_vm_iface
-                        break
-            if found_iface is not None:
-                iface = found_iface
-                existing_vm_ifaces.remove(found_iface)
+        # Sync the tags to make sure they match the discovered machine.
+        add_tags = set(discovered_machine.tags)
+        for existing_tag_inst in existing_machine.tags.all():
+            if existing_tag_inst.name in add_tags:
+                add_tags.remove(existing_tag_inst.name)
             else:
-                iface = VirtualMachineInterface.objects.create(
-                    vm=vm,
-                    mac_address=discovered_interface.mac_address,
-                    attachment_type=discovered_interface.attach_type,
-                )
+                existing_machine.tags.remove(existing_tag_inst)
+        for tag in add_tags:
+            tag, _ = Tag.objects.get_or_create(name=tag)
+            existing_machine.tags.add(tag)
 
-            iface_ids.add(iface.id)
+        # Sync the block devices and interfaces on the machine.
+        self._sync_block_devices(
+            discovered_machine.block_devices, existing_machine
+        )
+        self._sync_interfaces(discovered_machine.interfaces, existing_machine)
 
-            iface.attachment_type = discovered_interface.attach_type
-            iface.host_interface = host_interfaces.get(
-                discovered_interface.attach_name
-            )
-            iface.save()
-        VirtualMachineInterface.objects.filter(vm=vm).exclude(
-            id__in=iface_ids
-        ).delete()
-
-    def _sync_vm_disk(self, block_device, storage_pool=None):
-        """Ensure a VirtualMachineDisk exists and is updated for a block device."""
-        from maasserver.models.virtualmachine import VirtualMachineDisk
-
-        vmdisk = getattr(block_device, "vmdisk", None)
-        if vmdisk:
-            vmdisk.size = block_device.size
-            vmdisk.storage_pool = storage_pool
-            vmdisk.save()
-        else:
-            vmdisk = VirtualMachineDisk.objects.create(
-                name=block_device.name,
-                vm=block_device.node.virtualmachine,
-                size=block_device.size,
-                backing_pool=storage_pool,
-                block_device=block_device,
-            )
-        return vmdisk
-
-    def _sync_block_devices(self, discovered_machine, existing_machine):
+    def _sync_block_devices(self, block_devices, existing_machine):
         """Sync the `block_devices` to the `existing_machine`."""
-        block_devices = discovered_machine.block_devices
         model_mapping = {
             "%s/%s" % (block_device.model, block_device.serial): block_device
             for block_device in block_devices
-            if block_device.model and block_device.serial
+            if (
+                block_device.type == BlockDeviceType.PHYSICAL
+                and block_device.model
+                and block_device.serial
+            )
         }
         path_mapping = {
             block_device.id_path: block_device
             for block_device in block_devices
-            if not block_device.model or not block_device.serial
+            if (
+                block_device.type == BlockDeviceType.PHYSICAL
+                and (not block_device.model or not block_device.serial)
+            )
+        }
+        iscsi_mapping = {
+            block_device.iscsi_target: block_device
+            for block_device in block_devices
+            if block_device.type == BlockDeviceType.ISCSI
         }
         existing_block_devices = map(
             lambda bd: bd.actual_instance,
             existing_machine.blockdevice_set.all(),
         )
-        disks_to_delete = []
         for block_device in existing_block_devices:
             if isinstance(block_device, PhysicalBlockDevice):
                 if block_device.model and block_device.serial:
@@ -1209,7 +1291,7 @@ class Pod(BMC):
                             model_mapping.pop(key), block_device
                         )
                     else:
-                        disks_to_delete.append(block_device.id)
+                        block_device.delete()
                 else:
                     if block_device.id_path in path_mapping:
                         self._sync_block_device(
@@ -1217,22 +1299,25 @@ class Pod(BMC):
                             block_device,
                         )
                     else:
-                        disks_to_delete.append(block_device.id)
-
-        if disks_to_delete:
-            from maasserver.models.virtualmachine import VirtualMachineDisk
-
-            VirtualMachineDisk.objects.filter(
-                block_device__id__in=disks_to_delete
-            ).delete()
-            BlockDevice.objects.filter(id__in=disks_to_delete).delete()
-
+                        block_device.delete()
+            elif isinstance(block_device, ISCSIBlockDevice):
+                target = get_iscsi_target(block_device.target)
+                if target in iscsi_mapping:
+                    self._sync_block_device(
+                        iscsi_mapping.pop(target), block_device
+                    )
+                else:
+                    block_device.delete()
         for _, discovered_block_device in model_mapping.items():
             self._create_physical_block_device(
                 discovered_block_device, existing_machine
             )
         for _, discovered_block_device in path_mapping.items():
             self._create_physical_block_device(
+                discovered_block_device, existing_machine
+            )
+        for _, discovered_block_device in iscsi_mapping.items():
+            self._create_iscsi_block_device(
                 discovered_block_device, existing_machine
             )
 
@@ -1247,20 +1332,20 @@ class Pod(BMC):
         existing_bd.block_size = discovered_bd.block_size
         existing_bd.tags = discovered_bd.tags
 
-        storage_pool = None
-        if discovered_bd.storage_pool:
-            storage_pool = self._get_storage_pool_by_id(
-                discovered_bd.storage_pool
-            )
+        # Update or remove the storage pool on physical block devices.
+        if isinstance(existing_bd, PhysicalBlockDevice):
+            if discovered_bd.storage_pool:
+                existing_bd.storage_pool = self._get_storage_pool_by_id(
+                    discovered_bd.storage_pool
+                )
+            elif existing_bd.storage_pool:
+                existing_bd.storage_pool = None
 
-        self._sync_vm_disk(existing_bd, storage_pool=storage_pool)
         existing_bd.save()
 
-    def _sync_interfaces(self, discovered_machine, existing_machine):
+    def _sync_interfaces(self, interfaces, existing_machine):
         """Sync the `interfaces` to the `existing_machine`."""
-        mac_mapping = {
-            nic.mac_address: nic for nic in discovered_machine.interfaces
-        }
+        mac_mapping = {nic.mac_address: nic for nic in interfaces}
         # interface_set has been preloaded so filtering is done locally.
         physical_interfaces = [
             nic
@@ -1300,78 +1385,9 @@ class Pod(BMC):
 
     def sync_machines(self, discovered_machines, commissioning_user):
         """Sync the machines on this pod from `discovered_machines`."""
-        tracked_machines = []
-        discovered_by_project = defaultdict(list)
-        # if a project is specified for the Pod, only track (i.e. create
-        # machines for) VMs in that project, but sync VirtualMachine objects
-        # across all projects
-        if self.tracked_project:
-            for discovered_machine in discovered_machines:
-                machine_project = discovered_machine.power_parameters.get(
-                    "project", ""
-                )
-                discovered_by_project[machine_project].append(
-                    discovered_machine
-                )
-                if machine_project == self.tracked_project:
-                    tracked_machines.append(discovered_machine)
-        else:
-            tracked_machines = discovered_machines
-            discovered_by_project[""] = discovered_machines
-
-        from maasserver.models.virtualmachine import (
-            VirtualMachine,
-            VirtualMachineDisk,
-        )
-
-        # delete all VMs in projects that are no longer found (either
-        # they're empty or have been removed)
-        VirtualMachine.objects.filter(bmc=self).exclude(
-            project__in=discovered_by_project
-        ).delete()
-
-        for project, discovered in discovered_by_project.items():
-            vm_names = [machine.instance_name for machine in discovered]
-            VirtualMachine.objects.filter(bmc=self, project=project).exclude(
-                identifier__in=vm_names
-            ).delete()
-            for discovered_vm in discovered:
-                vm, _ = VirtualMachine.objects.update_or_create(
-                    identifier=discovered_vm.instance_name,
-                    project=project,
-                    bmc=self,
-                    defaults={
-                        "memory": discovered_vm.memory,
-                        "hugepages_backed": discovered_vm.hugepages_backed,
-                        "pinned_cores": discovered_vm.pinned_cores,
-                        "unpinned_cores": (
-                            0
-                            if discovered_vm.pinned_cores
-                            else discovered_vm.cores
-                        ),
-                    },
-                )
-                existing_disks = []
-                for idx, device in enumerate(discovered_vm.block_devices):
-                    vmdisk, _ = VirtualMachineDisk.objects.update_or_create(
-                        name=f"vd{idx}",
-                        vm=vm,
-                        defaults={
-                            "size": device.size,
-                            "backing_pool": self._get_storage_pool_by_id(
-                                device.storage_pool
-                            ),
-                        },
-                    )
-                    existing_disks.append(vmdisk.id)
-                # delete any other disk
-                VirtualMachineDisk.objects.filter(vm=vm).exclude(
-                    id__in=existing_disks
-                ).delete()
-
         all_macs = [
             interface.mac_address
-            for machine in tracked_machines
+            for machine in discovered_machines
             for interface in machine.interfaces
         ]
         existing_machines = list(
@@ -1391,7 +1407,7 @@ class Pod(BMC):
             for machine in existing_machines
             for interface in machine.interface_set.all()
         }
-        for discovered_machine in tracked_machines:
+        for discovered_machine in discovered_machines:
             existing_machine = self._find_existing_machine(
                 discovered_machine, mac_machine_map
             )
@@ -1413,6 +1429,19 @@ class Pod(BMC):
                 "%s: machine %s no longer exists and was deleted."
                 % (self.name, remove_machine.hostname)
             )
+
+        # delete entries for VirtualMachines if the corresponding VM has been
+        # removed on the host
+        existing_instance_names = set(
+            machine.power_parameters.get("instance_name")
+            for machine in discovered_machines
+        )
+        existing_instance_names.discard(None)
+        from maasserver.models.virtualmachine import VirtualMachine
+
+        VirtualMachine.objects.filter(bmc=self).exclude(
+            identifier__in=existing_instance_names
+        ).delete()
 
     def sync_storage_pools(self, discovered_storage_pools):
         """Sync the storage pools for the pod."""
@@ -1475,7 +1504,6 @@ class Pod(BMC):
         interfaces, and/or block devices that do not match the
         `discovered_pod` values will be removed.
         """
-        self.version = discovered_pod.version
         self.architectures = discovered_pod.architectures
         if not self.name and discovered_pod.name:
             self.name = discovered_pod.name
@@ -1488,6 +1516,10 @@ class Pod(BMC):
             self.memory = discovered_pod.memory
         if discovered_pod.local_storage != -1:
             self.local_storage = discovered_pod.local_storage
+        if discovered_pod.local_disks != -1:
+            self.local_disks = discovered_pod.local_disks
+        if discovered_pod.iscsi_storage != -1:
+            self.iscsi_storage = discovered_pod.iscsi_storage
         self.tags = list(set(self.tags).union(discovered_pod.tags))
         self.save()
         self.sync_hints(discovered_pod.hints)
@@ -1544,6 +1576,8 @@ class Pod(BMC):
         self.cores = hints.cores = 0
         self.cpu_speed = hints.cpu_speed = 0
         self.memory = hints.memory = 0
+        self.local_disks = hints.local_disks = 0
+        self.iscsi_storage = hints.iscsi_storage = 0
         cpu_speeds = []
         # Set the hints for the Pod to the total amount for all nodes in a
         # cluster.
@@ -1557,11 +1591,105 @@ class Pod(BMC):
                 self.memory += numa.memory
             if node.cpu_speed != 0:
                 cpu_speeds.append(node.cpu_speed)
+            for bd in node.blockdevice_set.all():
+                if bd.type == "physical":
+                    hints.local_disks += 1
+                    self.local_disks += 1
+                elif bd.type == "iscsi":
+                    hints.iscsi_storage += bd.size
+                    self.iscsi_storage += bd.size
         self.cpu_speed = hints.cpu_speed = (
             mean(cpu_speeds) if cpu_speeds else 0
         )
         hints.save()
         self.save()
+
+    def get_used_cores(self, machines=None):
+        """Get the number of used cores in the pod.
+
+        :param machines: Deployed machines on this pod. Only used when
+            the deployed machines have already been pulled from the database
+            and no extra query needs to be performed.
+        """
+        if machines is None:
+            machines = Machine.objects.filter(bmc__id=self.id)
+        return sum(machine.cpu_count for machine in machines)
+
+    def get_used_memory(self, machines=None):
+        """Get the amount of used memory in the pod.
+
+        :param machines: Deployed machines on this pod. Only used when
+            the deployed machines have already been pulled from the database
+            and no extra query needs to be performed.
+        """
+        if machines is None:
+            machines = Machine.objects.filter(bmc__id=self.id)
+        return sum(machine.memory for machine in machines)
+
+    def get_used_local_storage(self, machines=None):
+        """Get the amount of used local storage in the pod.
+
+        :param machines: Deployed machines on this pod. Only used when
+            the deployed machines have already been pulled from the database
+            and no extra query needs to be performed.
+        """
+        if machines is None:
+            machines = (
+                Machine.objects.filter(bmc__id=self.id)
+                .prefetch_related("blockdevice_set__iscsiblockdevice")
+                .prefetch_related("blockdevice_set__virtualblockdevice")
+                .prefetch_related("blockdevice_set__physicalblockdevice")
+            )
+        return sum(
+            blockdevice.size
+            for machine in machines
+            for blockdevice in machine.blockdevice_set.all()
+            if isinstance(blockdevice.actual_instance, PhysicalBlockDevice)
+        )
+
+    def get_used_local_disks(self, machines=None):
+        """Get the amount of used local disks in the pod.
+
+        :param machines: Deployed machines on this clusted. Only used when
+            the deployed machines have already been pulled from the database
+            and no extra query needs to be performed.
+        """
+        if machines is None:
+            machines = (
+                Machine.objects.filter(bmc__id=self.id)
+                .prefetch_related("blockdevice_set__iscsiblockdevice")
+                .prefetch_related("blockdevice_set__virtualblockdevice")
+                .prefetch_related("blockdevice_set__physicalblockdevice")
+            )
+        return len(
+            [
+                blockdevice
+                for machine in machines
+                for blockdevice in machine.blockdevice_set.all()
+                if isinstance(blockdevice.actual_instance, PhysicalBlockDevice)
+            ]
+        )
+
+    def get_used_iscsi_storage(self, machines=None):
+        """Get the amount of used iSCSI storage in the pod.
+
+        :param machines: Deployed machines on this clusted. Only used when
+            the deployed machines have already been pulled from the database
+            and no extra query needs to be performed.
+        """
+        if machines is None:
+            machines = (
+                Machine.objects.filter(bmc__id=self.id)
+                .prefetch_related("blockdevice_set__iscsiblockdevice")
+                .prefetch_related("blockdevice_set__virtualblockdevice")
+                .prefetch_related("blockdevice_set__physicalblockdevice")
+            )
+        return sum(
+            blockdevice.size
+            for machine in machines
+            for blockdevice in machine.blockdevice_set.all()
+            if isinstance(blockdevice.actual_instance, ISCSIBlockDevice)
+        )
 
     def delete(self, *args, **kwargs):
         raise AttributeError(
@@ -1569,7 +1697,7 @@ class Pod(BMC):
             "an asynchronous action."
         )
 
-    def delete_and_wait(self, decompose=False):
+    def delete_and_wait(self):
         """Block the current thread while waiting for the pod to be deleted.
 
         This must not be called from a deferToDatabase thread; use the
@@ -1579,50 +1707,55 @@ class Pod(BMC):
         # machines. We allow maximum of 60 seconds per machine plus 60 seconds
         # for the pod.
         pod = self.as_pod()
-        machine_wait = 0
-        if decompose:
-            machine_wait = Machine.objects.filter(bmc=pod).count() * 60
-        pod.async_delete(decompose=decompose).wait(machine_wait + 60)
+        num_machines = Machine.objects.filter(bmc=pod)
+        num_machines = num_machines.exclude(
+            creation_type=NODE_CREATION_TYPE.PRE_EXISTING
+        )
+        pod.async_delete().wait((num_machines.count() * 60) + 60)
 
     @asynchronous
-    def async_delete(self, decompose=False):
+    def async_delete(self):
         """Delete a pod asynchronously.
 
-        If `decompose` is True, any machine in the pod will be decomposed
+        Any machine in the pod that needs to be decomposed will be decomposed
         before it is removed from the database.  If there are any errors during
         decomposition, the deletion of the machine and ultimately the pod are
         not stopped.
-
         """
 
         @transactional
         def gather_clients_and_machines(pod):
-            machine_details = [
-                (machine.id, machine.power_parameters)
-                for machine in Machine.objects.filter(
-                    bmc__id=pod.id
-                ).select_related("bmc")
-            ]
+            decompose, pre_existing = [], []
+            for machine in (
+                Machine.objects.filter(bmc__id=pod.id)
+                .order_by("id")
+                .select_related("bmc")
+            ):
+                if machine.creation_type == NODE_CREATION_TYPE.PRE_EXISTING:
+                    pre_existing.append(machine.id)
+                else:
+                    decompose.append((machine.id, machine.power_parameters))
             return (
                 pod.id,
                 pod.name,
                 pod.power_type,
                 pod.get_client_identifiers(),
-                machine_details,
+                decompose,
+                pre_existing,
             )
 
         @inlineCallbacks
-        def decompose_machines(result):
+        def decompose(result):
             (
                 pod_id,
                 pod_name,
                 pod_type,
                 client_idents,
-                machine_details,
+                decompose,
+                pre_existing,
             ) = result
-            decomposed_ids = []
-            for machine_id, parameters in machine_details:
-                decomposed_ids.append(machine_id)
+            decomposed = []
+            for machine_id, parameters in decompose:
                 # Get a new client for every decompose because we might lose
                 # a connection to a rack during this operation.
                 client = yield getClientFromIdentifiers(client_idents)
@@ -1637,50 +1770,45 @@ class Pod(BMC):
                 except PodProblem:
                     # Catch all errors and continue.
                     break
-            return pod_id, decomposed_ids
-
-        def get_pod_and_machine_ids(result):
-            (
-                pod_id,
-                pod_name,
-                pod_type,
-                client_idents,
-                machine_details,
-            ) = result
-            return pod_id, [
-                machine_id for machine_id, parameters in machine_details
-            ]
+                finally:
+                    # Set the machine to decomposed regardless
+                    # if it actually decomposed or not.
+                    decomposed.append(machine_id)
+            return pod_id, decomposed, pre_existing
 
         @transactional
         def perform_deletion(result):
-            pod_id, decomposed_ids = result
-            for machine in Machine.objects.filter(id__in=decomposed_ids):
+            (pod_id, decomposed_ids, pre_existing_ids) = result
+            pod = Pod.objects.get(id=pod_id)
+            machines = Machine.objects.filter(id__in=decomposed_ids)
+            for machine in machines:
                 # Clear BMC (aka. this pod) so the signal handler does not
                 # try to decompose it. Its already been decomposed.
                 machine.bmc = None
                 machine.delete()
 
-            # Update bmc types for any matches.  Only delete the BMC
-            # when no controllers are using the same BMC.
+            # Delete the pre-existing machines and finally the pod.
+            for machine in Machine.objects.filter(id__in=pre_existing_ids):
+                # We loop and call delete to ensure the `delete` method
+                # on the machine object is actually called.
+                machine.delete()
+
             from maasserver.models.node import RackController
 
-            racks_with_matching_bmc = list(
-                RackController.objects.filter(bmc__id=pod_id)
-            )
-            if racks_with_matching_bmc:
+            # Update bmc types for any matches.  Only delete the BMC
+            # when no controllers are using the same BMC.
+            racks_with_matching_bmc = RackController.objects.filter(bmc=pod)
+            if len(racks_with_matching_bmc) > 0:
                 for rack in racks_with_matching_bmc:
                     rack.bmc.bmc_type = BMC_TYPE.BMC
                     rack.bmc.save()
             else:
                 # Call delete by bypassing the override that prevents its call.
-                pod = Pod.objects.get(id=pod_id)
                 super(BMC, pod).delete()
 
         # Don't catch any errors here they are raised to the caller.
         d = deferToDatabase(gather_clients_and_machines, self)
-        d.addCallback(
-            decompose_machines if decompose else get_pod_and_machine_ids
-        )
+        d.addCallback(decompose)
         d.addCallback(partial(deferToDatabase, perform_deletion))
         return d
 

@@ -1,4 +1,4 @@
-# Copyright 2015-2020 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2018 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """
@@ -1161,21 +1161,22 @@ CONSUMER_TOKEN_NOTIFY = dedent(
 
 def render_notification_procedure(proc_name, event_name, cast):
     return dedent(
-        f"""\
-        CREATE OR REPLACE FUNCTION {proc_name}() RETURNS trigger AS $$
+        """\
+        CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$
         DECLARE
         BEGIN
-          PERFORM pg_notify('{event_name}',CAST({cast} AS text));
+          PERFORM pg_notify('%s',CAST(%s AS text));
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
         """
+        % (proc_name, event_name, cast)
     )
 
 
 def render_device_notification_procedure(proc_name, event_name, obj):
     return dedent(
-        f"""\
+        """\
         CREATE OR REPLACE FUNCTION {proc_name}() RETURNS trigger AS $$
         DECLARE
           pnode RECORD;
@@ -1191,29 +1192,27 @@ def render_device_notification_procedure(proc_name, event_name, obj):
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
-        """
+        """.format(
+            proc_name=proc_name, event_name=event_name, obj=obj
+        )
     )
 
 
 def render_node_related_notification_procedure(proc_name, node_id_relation):
-    type_machine = NODE_TYPE.MACHINE
-    type_rack = NODE_TYPE.RACK_CONTROLLER
-    type_region = NODE_TYPE.REGION_CONTROLLER
-    type_region_rack = NODE_TYPE.REGION_AND_RACK_CONTROLLER
     return dedent(
-        f"""\
-        CREATE OR REPLACE FUNCTION {proc_name}() RETURNS trigger AS $$
+        """\
+        CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$
         DECLARE
           node RECORD;
           pnode RECORD;
         BEGIN
           SELECT system_id, node_type, parent_id INTO node
           FROM maasserver_node
-          WHERE id = {node_id_relation};
+          WHERE id = %s;
 
-          IF node.node_type = {type_machine} THEN
+          IF node.node_type = %d THEN
             PERFORM pg_notify('machine_update',CAST(node.system_id AS text));
-          ELSIF node.node_type IN ({type_rack}, {type_region}, {type_region_rack}) THEN
+          ELSIF node.node_type IN (%d, %d, %d) THEN
             PERFORM pg_notify('controller_update',CAST(
               node.system_id AS text));
           ELSIF node.parent_id IS NOT NULL THEN
@@ -1228,57 +1227,89 @@ def render_node_related_notification_procedure(proc_name, node_id_relation):
         END;
         $$ LANGUAGE plpgsql;
         """
+        % (
+            proc_name,
+            node_id_relation,
+            NODE_TYPE.MACHINE,
+            NODE_TYPE.RACK_CONTROLLER,
+            NODE_TYPE.REGION_CONTROLLER,
+            NODE_TYPE.REGION_AND_RACK_CONTROLLER,
+        )
+    )
+
+
+def render_switch_notification_procedure(
+    proc_name, event_name, node_id_relation
+):
+    return dedent(
+        """\
+        CREATE OR REPLACE FUNCTION {proc_name}() RETURNS trigger AS $$
+        DECLARE
+          node RECORD;
+        BEGIN
+          SELECT system_id, node_type, parent_id INTO node
+          FROM maasserver_node
+          WHERE id = {node_id_relation};
+
+          PERFORM pg_notify('{event_name}',CAST(node.system_id AS text));
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        """.format(
+            proc_name=proc_name,
+            node_id_relation=node_id_relation,
+            event_name=event_name,
+        )
     )
 
 
 def node_type_change():
-    type_machine = NODE_TYPE.MACHINE
-    type_device = NODE_TYPE.DEVICE
-    type_rack = NODE_TYPE.RACK_CONTROLLER
-    type_region = NODE_TYPE.REGION_CONTROLLER
-    type_region_rack = NODE_TYPE.REGION_AND_RACK_CONTROLLER
     return dedent(
-        f"""\
+        """\
         CREATE OR REPLACE FUNCTION node_type_change_notify()
         RETURNS trigger AS $$
         BEGIN
           IF (OLD.node_type != NEW.node_type AND NOT (
               (
-                OLD.node_type IN ({type_rack}, {type_region}, {type_region_rack})
+                OLD.node_type = {rack_controller} OR
+                OLD.node_type = {region_controller} OR
+                OLD.node_type = {region_and_rack_controller}
               ) AND (
-                NEW.node_type IN ({type_rack}, {type_region}, {type_region_rack})
+                NEW.node_type = {rack_controller} OR
+                NEW.node_type = {region_controller} OR
+                NEW.node_type = {region_and_rack_controller}
               ))) THEN
             CASE OLD.node_type
-              WHEN {type_machine} THEN
+              WHEN {machine} THEN
                 PERFORM pg_notify('machine_delete',CAST(
                   OLD.system_id AS TEXT));
-              WHEN {type_device} THEN
+              WHEN {device} THEN
                 PERFORM pg_notify('device_delete',CAST(
                   OLD.system_id AS TEXT));
-              WHEN {type_rack} THEN
+              WHEN {rack_controller} THEN
                 PERFORM pg_notify('controller_delete',CAST(
                   OLD.system_id AS TEXT));
-              WHEN {type_region} THEN
+              WHEN {region_controller} THEN
                 PERFORM pg_notify('controller_delete',CAST(
                   OLD.system_id AS TEXT));
-              WHEN {type_region_rack} THEN
+              WHEN {region_and_rack_controller} THEN
                 PERFORM pg_notify('controller_delete',CAST(
                   OLD.system_id AS TEXT));
             END CASE;
             CASE NEW.node_type
-              WHEN {type_machine} THEN
+              WHEN {machine} THEN
                 PERFORM pg_notify('machine_create',CAST(
                   NEW.system_id AS TEXT));
-              WHEN {type_device} THEN
+              WHEN {device} THEN
                 PERFORM pg_notify('device_create',CAST(
                   NEW.system_id AS TEXT));
-              WHEN {type_rack} THEN
+              WHEN {rack_controller} THEN
                 PERFORM pg_notify('controller_create',CAST(
                   NEW.system_id AS TEXT));
-              WHEN {type_region} THEN
+              WHEN {region_controller} THEN
                 PERFORM pg_notify('controller_create',CAST(
                   NEW.system_id AS TEXT));
-              WHEN {type_region_rack} THEN
+              WHEN {region_and_rack_controller} THEN
                 PERFORM pg_notify('controller_create',CAST(
                   NEW.system_id AS TEXT));
             END CASE;
@@ -1286,19 +1317,20 @@ def node_type_change():
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
-    """
+    """.format(
+            machine=NODE_TYPE.MACHINE,
+            device=NODE_TYPE.DEVICE,
+            rack_controller=NODE_TYPE.RACK_CONTROLLER,
+            region_controller=NODE_TYPE.REGION_CONTROLLER,
+            region_and_rack_controller=NODE_TYPE.REGION_AND_RACK_CONTROLLER,
+        )
     )
 
 
 def render_script_result_notify(proc_name, script_set_id):
-    type_machine = NODE_TYPE.MACHINE
-    type_device = NODE_TYPE.DEVICE
-    type_rack = NODE_TYPE.RACK_CONTROLLER
-    type_region = NODE_TYPE.REGION_CONTROLLER
-    type_region_rack = NODE_TYPE.REGION_AND_RACK_CONTROLLER
     return dedent(
-        f"""\
-        CREATE OR REPLACE FUNCTION {proc_name}() RETURNS trigger AS $$
+        """\
+        CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$
         DECLARE
           node RECORD;
         BEGIN
@@ -1308,20 +1340,29 @@ def render_script_result_notify(proc_name, script_set_id):
             maasserver_node AS nodet,
             metadataserver_scriptset AS scriptset
           WHERE
-            scriptset.id = {script_set_id} AND
+            scriptset.id = %s AND
             scriptset.node_id = nodet.id;
-          IF node.node_type = {type_machine} THEN
+          IF node.node_type = %d THEN
             PERFORM pg_notify('machine_update',CAST(node.system_id AS text));
-          ELSIF node.node_type IN ({type_rack}, {type_region}, {type_region_rack}) THEN
+          ELSIF node.node_type IN (%d, %d, %d) THEN
             PERFORM pg_notify(
               'controller_update',CAST(node.system_id AS text));
-          ELSIF node.node_type = {type_device} THEN
+          ELSIF node.node_type = %d THEN
             PERFORM pg_notify('device_update',CAST(node.system_id AS text));
           END IF;
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
     """
+        % (
+            proc_name,
+            script_set_id,
+            NODE_TYPE.MACHINE,
+            NODE_TYPE.RACK_CONTROLLER,
+            NODE_TYPE.REGION_CONTROLLER,
+            NODE_TYPE.REGION_AND_RACK_CONTROLLER,
+            NODE_TYPE.DEVICE,
+        )
     )
 
 
@@ -1338,49 +1379,49 @@ def render_notification_dismissal_notification_procedure(
     the row.
     """
     return dedent(
-        f"""\
-        CREATE OR REPLACE FUNCTION {proc_name}() RETURNS trigger AS $$
+        """\
+        CREATE OR REPLACE FUNCTION %s() RETURNS trigger AS $$
         DECLARE
         BEGIN
           PERFORM pg_notify(
-              '{event_name}', CAST(NEW.notification_id AS text) || ':' ||
+              '%s', CAST(NEW.notification_id AS text) || ':' ||
               CAST(NEW.user_id AS text));
           RETURN NEW;
         END;
         $$ LANGUAGE plpgsql;
         """
+        % (proc_name, event_name)
     )
 
 
 # Only trigger updates to the websocket on the node object for fields
 # the UI cares about.
 node_fields = (
+    "hostname",
+    "pool_id",
+    "domain_id",
+    "status",
+    "owner_id",
+    "osystem",
+    "distro_series",
     "architecture",
-    "bmc_id",
+    "min_hwe_kernel",
+    "hwe_kernel",
+    "parent_id",
+    "zone_id",
     "cpu_count",
     "cpu_speed",
+    "swap_size",
+    "bmc_id",
+    "instance_power_parameters",
+    "power_state",
+    "last_image_sync",
+    "error",
+    "license_key",
     "current_commissioning_script_set_id",
     "current_installation_script_set_id",
     "current_testing_script_set_id",
-    "description",
-    "distro_series",
-    "domain_id",
-    "error",
-    "hostname",
-    "hwe_kernel",
-    "instance_power_parameters",
-    "last_image_sync",
-    "license_key",
     "locked",
-    "min_hwe_kernel",
-    "osystem",
-    "owner_id",
-    "parent_id",
-    "pool_id",
-    "power_state",
-    "status",
-    "swap_size",
-    "zone_id",
 )
 
 
@@ -1401,22 +1442,22 @@ def register_websocket_triggers():
         # Non-Device Node types
         register_procedure(
             render_notification_procedure(
-                f"{proc_name_prefix}_create_notify",
-                f"{event_name_prefix}_create",
+                "%s_create_notify" % proc_name_prefix,
+                "%s_create" % event_name_prefix,
                 "NEW.system_id",
             )
         )
         register_procedure(
             render_notification_procedure(
-                f"{proc_name_prefix}_update_notify",
-                f"{event_name_prefix}_update",
+                "%s_update_notify" % proc_name_prefix,
+                "%s_update" % event_name_prefix,
                 "NEW.system_id",
             )
         )
         register_procedure(
             render_notification_procedure(
-                f"{proc_name_prefix}_delete_notify",
-                f"{event_name_prefix}_delete",
+                "%s_delete_notify" % proc_name_prefix,
+                "%s_delete" % event_name_prefix,
                 "OLD.system_id",
             )
         )
@@ -1446,8 +1487,29 @@ def register_websocket_triggers():
     register_triggers(
         "maasserver_controllerinfo",
         "controllerinfo",
+        # Trigger only fires for version information on update; it doesn't
+        # care when the other metadata is updated.
+        fields=("version",),
         events=EVENTS_LUU,
     )
+
+    # Switch notifications
+    register_procedure(
+        render_switch_notification_procedure(
+            "switch_create_notify", "switch_create", "NEW.node_id"
+        )
+    )
+    register_procedure(
+        render_switch_notification_procedure(
+            "switch_update_notify", "switch_update", "NEW.node_id"
+        )
+    )
+    register_procedure(
+        render_switch_notification_procedure(
+            "switch_delete_notify", "switch_delete", "OLD.node_id"
+        )
+    )
+    register_triggers("maasserver_switch", "switch", fields=("nos_driver",))
 
     # NodeMetadata notifications
     register_procedure(
@@ -1468,24 +1530,6 @@ def register_websocket_triggers():
     register_triggers(
         "maasserver_nodemetadata", "nodemetadata", events=EVENTS_LUU
     )
-
-    # workload annotations notifications
-    register_procedure(
-        render_node_related_notification_procedure(
-            "ownerdata_link_notify", "NEW.node_id"
-        )
-    )
-    register_procedure(
-        render_node_related_notification_procedure(
-            "ownerdata_update_notify", "NEW.node_id"
-        )
-    )
-    register_procedure(
-        render_node_related_notification_procedure(
-            "ownerdata_unlink_notify", "OLD.node_id"
-        )
-    )
-    register_triggers("maasserver_ownerdata", "ownerdata", events=EVENTS_LUU)
 
     register_procedure(
         POOL_NODE_INSERT_NOTIFY.format(
@@ -2680,21 +2724,3 @@ def register_websocket_triggers():
         )
     )
     register_triggers("metadataserver_script", "script")
-
-    # NodeDevice table
-    register_procedure(
-        render_notification_procedure(
-            "nodedevice_create_notify", "nodedevice_create", "NEW.id"
-        )
-    )
-    register_procedure(
-        render_notification_procedure(
-            "nodedevice_update_notify", "nodedevice_update", "NEW.id"
-        )
-    )
-    register_procedure(
-        render_notification_procedure(
-            "nodedevice_delete_notify", "nodedevice_delete", "OLD.id"
-        )
-    )
-    register_triggers("maasserver_nodedevice", "nodedevice")

@@ -38,7 +38,7 @@ from maasserver.clusterrpc.pods import (
     get_best_discovered_result,
     send_pod_commissioning_results,
 )
-from maasserver.enum import BMC_TYPE, INTERFACE_TYPE
+from maasserver.enum import BMC_TYPE, INTERFACE_TYPE, NODE_CREATION_TYPE
 from maasserver.exceptions import PodProblem
 from maasserver.forms import MAASModelForm
 from maasserver.models import (
@@ -109,7 +109,7 @@ def make_unique_hostname():
 def request_commissioning_results(pod):
     """Request commissioning results from machines associated with the Pod."""
     nodes = yield deferToDatabase(lambda: list(pod.hints.nodes.all()))
-    # libvirt Pods don't create machines for the host.
+    # Intel RSD and libvirt Pods don't create machines for the host.
     if not nodes:
         return pod
     client_identifiers = yield deferToDatabase(pod.get_client_identifiers)
@@ -222,7 +222,7 @@ class PodForm(MAASModelForm):
             for driver in self.drivers_orig
             if driver["driver_type"] == "pod"
         }
-        if not self.drivers:
+        if len(self.drivers) == 0:
             type_value = ""
         elif type_value not in self.drivers:
             type_value = (
@@ -256,7 +256,7 @@ class PodForm(MAASModelForm):
         super()._clean_fields()
         # If no errors then we re-process with the fields required by the
         # selected type for the pod.
-        if not self.errors:
+        if len(self.errors) == 0:
             driver_fields = get_driver_parameters_from_json(
                 self.drivers_orig, scope=SETTING_SCOPE.BMC
             )
@@ -272,7 +272,7 @@ class PodForm(MAASModelForm):
 
     def clean(self):
         cleaned_data = super().clean()
-        if not self.drivers:
+        if len(self.drivers) == 0:
             set_form_error(
                 self,
                 "type",
@@ -628,6 +628,11 @@ class ComposeMachineForm(forms.Form):
         storage_constraints = get_storage_constraints_from_string(
             self.get_value_for("storage")
         )
+        # LXD Pods currently only support one block device.
+        if self.pod.power_type == "lxd" and len(storage_constraints) > 1:
+            raise PodProblem(
+                "LXD Pod virtual machines currently only support one block device."
+            )
         for _, size, tags in storage_constraints:
             if tags is None:
                 tags = []
@@ -757,7 +762,7 @@ class ComposeMachineForm(forms.Form):
     def compose(
         self,
         timeout=120,
-        dynamic=False,
+        creation_type=NODE_CREATION_TYPE.MANUAL,
         skip_commissioning=None,
     ):
         """Compose the machine.
@@ -799,7 +804,7 @@ class ComposeMachineForm(forms.Form):
                 discovered_machine,
                 self.request.user,
                 skip_commissioning=skip_commissioning,
-                dynamic=dynamic,
+                creation_type=creation_type,
                 interfaces=self.get_value_for("interfaces"),
                 requested_machine=requested_machine,
                 domain=self.get_value_for("domain"),
@@ -927,7 +932,7 @@ class ComposeMachineForPodsForm(forms.Form):
             try:
                 return form.compose(
                     skip_commissioning=True,
-                    dynamic=True,
+                    creation_type=NODE_CREATION_TYPE.DYNAMIC,
                 )
             except Exception:
                 continue
@@ -936,7 +941,7 @@ class ComposeMachineForPodsForm(forms.Form):
             try:
                 return form.compose(
                     skip_commissioning=True,
-                    dynamic=True,
+                    creation_type=NODE_CREATION_TYPE.DYNAMIC,
                 )
             except Exception:
                 continue
@@ -947,12 +952,7 @@ class ComposeMachineForPodsForm(forms.Form):
         self.valid_pod_forms = [
             pod_form for pod_form in self.pod_forms if pod_form.is_valid()
         ]
-        if not self.valid_pod_forms:
+        if len(self.valid_pod_forms) == 0:
             self.add_error(
                 "__all__", "No current pod resources match constraints."
             )
-
-
-class DeletePodForm(forms.Form):
-
-    decompose = BooleanField(required=False, initial=False)

@@ -6,9 +6,9 @@ import copy
 from datetime import timedelta
 import random
 
-from testtools.matchers import ContainsAll
+from testtools.matchers import ContainsAll, Equals, Not
 
-from maasserver.models import ControllerInfo, VersionedTextFile
+from maasserver.models import VersionedTextFile
 from maasserver.testing.factory import factory
 from maasserver.testing.testcase import MAASServerTestCase
 from maasserver.utils.orm import reload_object
@@ -18,16 +18,11 @@ from metadataserver.builtin_scripts import (
 )
 from metadataserver.enum import SCRIPT_TYPE_CHOICES
 from metadataserver.models import Script
-from provisioningserver.refresh.node_info_scripts import NODE_INFO_SCRIPTS
+from provisioningserver.utils.version import get_maas_version
 
 
 class TestBuiltinScripts(MAASServerTestCase):
     """Test that builtin scripts get properly added and updated."""
-
-    def setUp(self):
-        super().setUp()
-        self.controller = factory.make_RegionRackController()
-        ControllerInfo.objects.set_version(self.controller, "3.0.0")
 
     def test_creates_scripts(self):
         load_builtin_scripts()
@@ -40,22 +35,15 @@ class TestBuiltinScripts(MAASServerTestCase):
             self.assertTrue(script_in_db.title, script.name)
             self.assertTrue(script_in_db.description, script.name)
             self.assertTrue(script_in_db.script.data, script.name)
-            self.assertNotEqual([], script_in_db.tags, script.name)
+            self.assertThat(script_in_db.tags, Not(Equals([])), script.name)
 
             # These values should always be set by the script loader.
-            self.assertEqual(
-                "Created by maas-3.0.0",
+            self.assertEquals(
+                "Created by maas-%s" % get_maas_version(),
                 script_in_db.script.comment,
                 script.name,
             )
             self.assertTrue(script_in_db.default, script.name)
-            if (
-                script.name in NODE_INFO_SCRIPTS
-                and NODE_INFO_SCRIPTS[script.name]["run_on_controller"]
-            ):
-                self.assertIn("deploy-info", script_in_db.tags)
-            else:
-                self.assertNotIn("deploy-info", script_in_db.tags)
 
     def test_update_script(self):
         load_builtin_scripts()
@@ -83,8 +71,6 @@ class TestBuiltinScripts(MAASServerTestCase):
         )
         script.script = old_script
 
-        # Change maas version
-        ControllerInfo.objects.set_version(self.controller, "3.0.1")
         # User changeable fields.
         user_tags = [factory.make_name("tag") for _ in range(3)]
         script.tags = copy.deepcopy(user_tags)
@@ -95,39 +81,20 @@ class TestBuiltinScripts(MAASServerTestCase):
         load_builtin_scripts()
         script = reload_object(script)
 
-        self.assertEqual(orig_title, script.title, script.name)
-        self.assertEqual(orig_description, script.description, script.name)
-        self.assertEqual(orig_script_type, script.script_type, script.name)
+        self.assertEquals(orig_title, script.title, script.name)
+        self.assertEquals(orig_description, script.description, script.name)
+        self.assertEquals(orig_script_type, script.script_type, script.name)
         self.assertDictEqual(orig_results, script.results, script.name)
         self.assertDictEqual(orig_parameters, script.parameters, script.name)
 
         self.assertThat(script.tags, ContainsAll(user_tags))
-        self.assertEqual(user_timeout, script.timeout)
+        self.assertEquals(user_timeout, script.timeout)
 
-        self.assertEqual(old_script, script.script.previous_version)
-        self.assertEqual("Updated by maas-3.0.1", script.script.comment)
+        self.assertEquals(old_script, script.script.previous_version)
+        self.assertEquals(
+            "Updated by maas-%s" % get_maas_version(), script.script.comment
+        )
         self.assertTrue(script.default)
-
-    def test_update_removes_deploy_info_tag(self):
-        load_builtin_scripts()
-        script = (
-            Script.objects.filter(default=True)
-            .exclude(tags__contains=["deploy-info"])
-            .first()
-        )
-
-        script.add_tag("deploy-info")
-        # Put fake old data in to simulate updating a script.
-        old_script = VersionedTextFile.objects.create(
-            data=factory.make_string()
-        )
-        script.script = old_script
-        script.save()
-
-        load_builtin_scripts()
-        script = reload_object(script)
-
-        self.assertNotIn("deploy-info", script.tags)
 
     def test_update_doesnt_revert_script(self):
         load_builtin_scripts()
@@ -139,8 +106,6 @@ class TestBuiltinScripts(MAASServerTestCase):
         new_script = factory.make_string()
         script.script = script.script.update(new_script)
 
-        # Change maas version
-        ControllerInfo.objects.set_version(self.controller, "3.0.1")
         # Fake user updates
         user_tags = [factory.make_name("tag") for _ in range(3)]
         script.tags = user_tags
@@ -179,18 +144,21 @@ class TestBuiltinScripts(MAASServerTestCase):
         load_builtin_scripts()
 
         script = reload_object(script)
-        self.assertEqual(update_script_values.name, script.name)
-        self.assertEqual(new_script, script.script.data)
+        self.assertEquals(update_script_values.name, script.name)
+        self.assertEquals(new_script, script.script.data)
         self.assertTrue(min([tag in script.tags for tag in user_tags]))
-        self.assertEqual(user_timeout, script.timeout)
+        self.assertEquals(user_timeout, script.timeout)
         self.assertTrue(script.default)
 
         second_script = reload_object(second_script)
-        self.assertEqual(orig_title, second_script.title)
-        self.assertEqual(orig_description, second_script.description)
-        self.assertEqual(orig_script_type, second_script.script_type)
+        self.assertEquals(orig_title, second_script.title)
+        self.assertEquals(orig_description, second_script.description)
+        self.assertEquals(orig_script_type, second_script.script_type)
         self.assertDictEqual(orig_results, second_script.results)
         self.assertDictEqual(orig_parameters, second_script.parameters)
-        self.assertEqual(old_script, second_script.script.previous_version)
-        self.assertEqual("Updated by maas-3.0.1", second_script.script.comment)
+        self.assertEquals(old_script, second_script.script.previous_version)
+        self.assertEquals(
+            "Updated by maas-%s" % get_maas_version(),
+            second_script.script.comment,
+        )
         self.assertTrue(second_script.default)

@@ -1,14 +1,15 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2018 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Model for a nodes physical block device."""
 
 
 from django.core.exceptions import ValidationError
-from django.db.models import CASCADE, CharField, ForeignKey
+from django.db.models import CASCADE, CharField, ForeignKey, SET_NULL
 
 from maasserver import DefaultMeta
 from maasserver.models.blockdevice import BlockDevice, BlockDeviceManager
+from maasserver.models.podstoragepool import PodStoragePool
 from maasserver.utils.converters import human_readable_bytes
 
 
@@ -53,6 +54,17 @@ class PhysicalBlockDevice(BlockDevice):
         help_text="Firmware version of block device.",
     )
 
+    # Only used when the machine is composed in a Pod that supports
+    # storage pool.
+    storage_pool = ForeignKey(
+        PodStoragePool,
+        blank=True,
+        null=True,
+        on_delete=SET_NULL,
+        related_name="block_devices",
+        help_text="Storage pool that this block device belongs to",
+    )
+
     numa_node = ForeignKey(
         "NUMANode", related_name="blockdevices", on_delete=CASCADE
     )
@@ -86,13 +98,3 @@ class PhysicalBlockDevice(BlockDevice):
             size=human_readable_bytes(self.size),
             node=self.node,
         )
-
-    def serialize(self):
-        """Serialize the model so it can be detected outside of MAAS."""
-        return {
-            "id": self.id,
-            "name": self.name,
-            "id_path": self.id_path,
-            "model": self.model,
-            "serial": self.serial,
-        }

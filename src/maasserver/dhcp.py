@@ -1,4 +1,4 @@
-# Copyright 2012-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2012-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """DHCP management module."""
@@ -14,6 +14,7 @@ from django.core.exceptions import ValidationError
 from django.db.models import Q
 from netaddr import IPAddress, IPNetwork
 from twisted.internet.defer import inlineCallbacks
+from twisted.protocols import amp
 
 from maasserver.dns.zonegenerator import (
     get_dns_search_paths,
@@ -35,7 +36,6 @@ from maasserver.models import (
     Service,
     StaticIPAddress,
     Subnet,
-    VLAN,
 )
 from maasserver.rpc import getAllClients, getClientFor, getRandomClient
 from maasserver.utils.orm import transactional
@@ -44,11 +44,16 @@ from provisioningserver.dhcp.omapi import generate_omapi_key
 from provisioningserver.logger import LegacyLogger
 from provisioningserver.rpc.cluster import (
     ConfigureDHCPv4,
+    ConfigureDHCPv4_V2,
     ConfigureDHCPv6,
+    ConfigureDHCPv6_V2,
     ValidateDHCPv4Config,
+    ValidateDHCPv4Config_V2,
     ValidateDHCPv6Config,
+    ValidateDHCPv6Config_V2,
 )
 from provisioningserver.rpc.clusterservice import DHCP_TIMEOUT
+from provisioningserver.rpc.dhcp import downgrade_shared_networks
 from provisioningserver.rpc.exceptions import NoConnectionsAvailable
 from provisioningserver.utils import typed
 from provisioningserver.utils.network import get_source_address
@@ -396,14 +401,13 @@ def make_hosts_for_subnets(subnets, nodes_dhcp_snippets: list = None):
     return hosts
 
 
-def make_pools_for_subnet(subnet, dhcp_snippets, failover_peer=None):
+def make_pools_for_subnet(subnet, failover_peer=None):
     """Return list of pools to create in the DHCP config for `subnet`."""
     pools = []
     for ip_range in subnet.get_dynamic_ranges().order_by("id"):
         pool = {
             "ip_range_low": ip_range.start_ip,
             "ip_range_high": ip_range.end_ip,
-            "dhcp_snippets": dhcp_snippets.get(ip_range.id, []),
         }
         if failover_peer is not None:
             pool["failover_peer"] = failover_peer
@@ -431,7 +435,6 @@ def make_subnet_config(
     """
     ip_network = subnet.get_ipnetwork()
     dns_servers = []
-    ipranges_dhcp_snippets = dict()
     if subnet.allow_dns and default_dns_servers:
         # If the MAAS DNS server is enabled make sure that is used first.
         if subnet.gateway_ip:
@@ -448,20 +451,6 @@ def make_subnet_config(
         dns_servers += [IPAddress(server) for server in subnet.dns_servers]
     if subnets_dhcp_snippets is None:
         subnets_dhcp_snippets = []
-    else:
-        subnet_only_dhcp_snippets = []
-        for snippet in subnets_dhcp_snippets:
-            if snippet.iprange is not None:
-                iprange_dhcp_snippets = ipranges_dhcp_snippets.get(
-                    snippet.iprange.id, []
-                )
-                iprange_dhcp_snippets.append(make_dhcp_snippet(snippet))
-                ipranges_dhcp_snippets[
-                    snippet.iprange.id
-                ] = iprange_dhcp_snippets
-            else:
-                subnet_only_dhcp_snippets.append(snippet)
-        subnets_dhcp_snippets = subnet_only_dhcp_snippets
 
     subnet_config = {
         "subnet": str(ip_network.network),
@@ -472,17 +461,12 @@ def make_subnet_config(
         "dns_servers": dns_servers,
         "ntp_servers": get_ntp_servers(ntp_servers, subnet, peer_rack),
         "domain_name": default_domain.name,
-        "pools": make_pools_for_subnet(
-            subnet,
-            ipranges_dhcp_snippets,
-            failover_peer,
-        ),
+        "pools": make_pools_for_subnet(subnet, failover_peer),
         "dhcp_snippets": [
             make_dhcp_snippet(dhcp_snippet)
             for dhcp_snippet in subnets_dhcp_snippets
             if dhcp_snippet.subnet == subnet
         ],
-        "disabled_boot_architectures": subnet.disabled_boot_architectures,
     }
     if search_list is not None:
         subnet_config["search_list"] = search_list
@@ -595,7 +579,7 @@ def get_default_dns_servers(rack_controller, subnet, use_rack_proxy=True):
             default_region_ip=default_region_ip,
         )
     except UnresolvableHost:
-        dns_servers = []
+        dns_servers = None
 
     if default_region_ip:
         default_region_ip = IPAddress(default_region_ip)
@@ -619,11 +603,8 @@ def get_default_dns_servers(rack_controller, subnet, use_rack_proxy=True):
     # If no DNS servers were found give the region IP. This won't go through
     # the rack but its better than nothing.
     if not dns_servers:
-        if default_region_ip:
-            log.warn("No DNS servers found, DHCP defaulting to region IP.")
-            dns_servers = [default_region_ip]
-        else:
-            log.warn("No DNS servers found.")
+        log.warn("No DNS servers found, DHCP defaulting to region IP.")
+        dns_servers = [default_region_ip]
 
     return dns_servers
 
@@ -891,9 +872,10 @@ def configure_dhcp(rack_controller):
     ipv4_status, ipv6_status = SERVICE_STATUS.UNKNOWN, SERVICE_STATUS.UNKNOWN
 
     try:
-        yield client(
+        yield _perform_dhcp_config(
+            client,
+            ConfigureDHCPv4_V2,
             ConfigureDHCPv4,
-            _timeout=DHCP_TIMEOUT + 5,
             failover_peers=config.failover_peers_v4,
             interfaces=interfaces_v4,
             shared_networks=config.shared_networks_v4,
@@ -920,9 +902,10 @@ def configure_dhcp(rack_controller):
         )
 
     try:
-        yield client(
+        yield _perform_dhcp_config(
+            client,
+            ConfigureDHCPv6_V2,
             ConfigureDHCPv6,
-            _timeout=DHCP_TIMEOUT + 5,
             failover_peers=config.failover_peers_v6,
             interfaces=interfaces_v6,
             shared_networks=config.shared_networks_v6,
@@ -978,27 +961,6 @@ def configure_dhcp(rack_controller):
         raise ipv6_exc
 
 
-def get_racks_by_subnet(subnet):
-    """Return the set of racks with at least one interface configured on the
-    specified subnet.
-    """
-    racks = RackController.objects.filter(
-        interface__ip_addresses__subnet__in=[subnet]
-    )
-
-    if subnet.vlan.relay_vlan_id:
-        relay_vlan = VLAN.objects.get(id=subnet.vlan.relay_vlan_id)
-        racks = racks.union(
-            RackController.objects.filter(
-                id__in=[
-                    relay_vlan.primary_rack_id,
-                    relay_vlan.secondary_rack_id,
-                ]
-            )
-        )
-    return racks
-
-
 def validate_dhcp_config(test_dhcp_snippet=None):
     """Validate a DHCPD config with uncommitted values.
 
@@ -1033,7 +995,9 @@ def validate_dhcp_config(test_dhcp_snippet=None):
     if test_dhcp_snippet is not None:
         if test_dhcp_snippet.subnet is not None:
             rack_controller = find_connected_rack(
-                get_racks_by_subnet(test_dhcp_snippet.subnet)
+                RackController.objects.filter_by_subnets(
+                    [test_dhcp_snippet.subnet]
+                )
             )
         elif test_dhcp_snippet.node is not None:
             rack_controller = find_connected_rack(
@@ -1042,10 +1006,6 @@ def validate_dhcp_config(test_dhcp_snippet=None):
     # If no rack controller is linked to the DHCPSnippet its a global DHCP
     # snippet which we can test anywhere.
     if rack_controller is None:
-        log.msg(
-            "Could not find a rack controller for the snippet. Trying "
-            "random client"
-        )
         try:
             client = getRandomClient()
         except NoConnectionsAvailable:
@@ -1072,28 +1032,27 @@ def validate_dhcp_config(test_dhcp_snippet=None):
     interfaces_v6 = [{"name": name} for name in config.interfaces_v6]
 
     # Validate both IPv4 and IPv6.
-    # XXX: These remote calls can hold transactions open for a prolonged
-    # period. This is bad for concurrency and scaling.
-    v4_response = client(
-        ValidateDHCPv4Config,
-        _timeout=DHCP_TIMEOUT + 5,
+    v4_args = dict(
         omapi_key=config.omapi_key,
         failover_peers=config.failover_peers_v4,
         hosts=config.hosts_v4,
         interfaces=interfaces_v4,
         global_dhcp_snippets=config.global_dhcp_snippets,
         shared_networks=config.shared_networks_v4,
-    ).wait(30)
-    v6_response = client(
-        ValidateDHCPv6Config,
-        _timeout=DHCP_TIMEOUT + 5,
+    )
+    v6_args = dict(
         omapi_key=config.omapi_key,
         failover_peers=config.failover_peers_v6,
         hosts=config.hosts_v6,
         interfaces=interfaces_v6,
         global_dhcp_snippets=config.global_dhcp_snippets,
         shared_networks=config.shared_networks_v6,
-    ).wait(30)
+    )
+
+    # XXX: These remote calls can hold transactions open for a prolonged
+    # period. This is bad for concurrency and scaling.
+    v4_response = _validate_dhcp_config_v4(client, **v4_args).wait(30)
+    v6_response = _validate_dhcp_config_v6(client, **v6_args).wait(30)
 
     # Deduplicate errors between IPv4 and IPv6
     known_errors = []
@@ -1107,3 +1066,56 @@ def validate_dhcp_config(test_dhcp_snippet=None):
                 known_errors.append(hash)
                 unique_errors.append(error)
     return unique_errors
+
+
+def _validate_dhcp_config_v4(client, **args):
+    """See `_validate_dhcp_config_vx`."""
+    return _perform_dhcp_config(
+        client, ValidateDHCPv4Config_V2, ValidateDHCPv4Config, **args
+    )
+
+
+def _validate_dhcp_config_v6(client, **args):
+    """See `_validate_dhcp_config_vx`."""
+    return _perform_dhcp_config(
+        client, ValidateDHCPv6Config_V2, ValidateDHCPv6Config, **args
+    )
+
+
+@asynchronous
+def _perform_dhcp_config(
+    client, v2_command, v1_command, *, shared_networks, **args
+):
+    """Call `v2_command` then `v1_command`...
+
+    ... if the former is not recognised. This allows interoperability between
+    a region that's newer than the rack controller.
+
+    :param client: An RPC client.
+    :param v2_command: The RPC command to attempt first.
+    :param v1_command: The RPC command to attempt second.
+    :param shared_networks: The shared networks argument for `v2_command` and
+        `v1_command`. If `v2_command` is not handled by the remote side, this
+        structure will be downgraded in place.
+    :param args: Remaining arguments for `v2_command` and `v1_command`.
+    """
+
+    def call(command):
+        # DHCP command should not take more than `DHCP_TIMEOUT` plus 5 seconds
+        # to complete. This gives the region controller a 5 second buffer to
+        # recieve the timeout error from the rack controller.
+        return client(
+            command,
+            _timeout=DHCP_TIMEOUT + 5,
+            shared_networks=shared_networks,
+            **args
+        )
+
+    def maybeDowngrade(failure):
+        if failure.check(amp.UnhandledCommand):
+            downgrade_shared_networks(shared_networks)
+            return call(v1_command)
+        else:
+            return failure
+
+    return call(v2_command).addErrback(maybeDowngrade)

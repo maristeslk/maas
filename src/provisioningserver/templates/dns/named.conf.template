@@ -1,26 +1,19 @@
 include "{{named_rndc_conf_path}}";
 
-# Authoritative Zone declarations.
+# Zone declarations.
+zone "maas-internal" {
+    type master;
+    file "/var/snap/agora-maas/current/bind/zone.maas-internal";
+};
 {{for zone in zones}}
 {{for zoneinfo in zone.zone_info}}
+{{if zoneinfo.zone_name != "maas-internal"}}
 zone "{{zoneinfo.zone_name}}" {
     type master;
     file "{{zoneinfo.target_path}}";
 };
+{{endif}}
 {{endfor}}
-{{endfor}}
-
-# Forwarded Zone declarations.
-{{for forwarded_zone in forwarded_zones}}
-zone "{{forwarded_zone[0]}}" {
-    type forward;
-    forward only;
-    forwarders {
-    {{for forward_server in forwarded_zone[1]}}
-        {{forward_server}};
-    {{endfor}}
-    };
-};
 {{endfor}}
 
 # Access control for recursive queries.  See named.conf.options.inside.maas

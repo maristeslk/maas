@@ -54,9 +54,7 @@ def is_ip_address(string):
         return True
 
 
-def make_sample_params_only(
-    ipv6=False, with_interface=False, disabled_boot_architectures=None
-):
+def make_sample_params_only(ipv6=False, with_interface=False):
     """Return a dict of arbitrary DHCP configuration parameters.
 
     :param ipv6: When true, prepare configuration for a DHCPv6 server,
@@ -65,11 +63,7 @@ def make_sample_params_only(
     """
     failover_peers = [make_failover_peer_config() for _ in range(3)]
     shared_networks = [
-        make_shared_network(
-            ipv6=ipv6,
-            with_interface=with_interface,
-            disabled_boot_architectures=disabled_boot_architectures,
-        )
+        make_shared_network(ipv6=ipv6, with_interface=with_interface)
         for _ in range(3)
     ]
 
@@ -267,10 +261,6 @@ class TestGetConfig(MAASTestCase):
         rendered = config.get_config(self.template, **params)
         validate_dhcpd_configuration(self, rendered, self.ipv6)
         self.assertThat(rendered, Contains(bootloader))
-        # Verify that "/images/" is automatically added to bootloaders
-        # loaded over HTTP. This ensures nginx handles the result without
-        # bothering rackd.
-        self.assertIn("/images/bootx64.efi", rendered)
 
     def test_renders_dns_servers_as_comma_separated_list(self):
         params = make_sample_params(self, ipv6=self.ipv6)
@@ -676,30 +666,6 @@ class TestComposeConditionalBootloader(MAASTestCase):
                     output,
                     Contains('option dhcp6.vendor-class 0 10 "HTTPClient";'),
                 )
-
-    def test_disabled_boot_architecture(self):
-        if factory.pick_bool():
-            ipv6 = True
-            ip = factory.make_ipv6_address()
-        else:
-            ipv6 = False
-            ip = factory.make_ipv4_address()
-        disabled_arches = random.sample(
-            [
-                boot_method
-                for _, boot_method in BootMethodRegistry
-                if boot_method.arch_octet or boot_method.user_class
-            ],
-            3,
-        )
-        output = config.compose_conditional_bootloader(
-            ipv6, ip, [bm.name for bm in disabled_arches]
-        )
-        for disabled_arch in disabled_arches:
-            if disabled_arch.arch_octet:
-                self.assertNotIn(disabled_arch.arch_octet, output)
-            else:
-                self.assertNotIn(disabled_arch.user_class, output)
 
 
 class TestGetAddresses(MAASTestCase):

@@ -1,4 +1,4 @@
-# Copyright 2015-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2015-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Tests for the Machine API."""
@@ -14,7 +14,7 @@ from django.conf import settings
 from django.db import transaction
 from django.urls import reverse
 from django.utils.http import urlencode
-from netaddr import IPAddress, IPNetwork
+from netaddr import IPNetwork
 from testtools.matchers import (
     ContainsDict,
     MatchesListwise,
@@ -571,7 +571,7 @@ class TestMachineAPI(APITestCase.ForUser):
         )
         self.assertEqual(http.client.BAD_REQUEST, response.status_code)
         self.assertEqual(
-            b"Cannot deploy as a VM host for ephemeral deployments.",
+            b"Cannot install KVM host for ephemeral deployments.",
             response.content,
         )
 
@@ -598,63 +598,7 @@ class TestMachineAPI(APITestCase.ForUser):
         )
         self.assertEqual(http.client.BAD_REQUEST, response.status_code)
         self.assertEqual(
-            b"Cannot deploy as a VM host for ephemeral deployments.",
-            response.content,
-        )
-
-    def test_POST_deploy_fails_when_register_vmhost_set_for_diskless(self):
-        self.become_admin()
-        osystem = Config.objects.get_config("default_osystem")
-        distro_series = Config.objects.get_config("default_distro_series")
-        make_usable_osystem(
-            self, osystem_name=osystem, releases=[distro_series]
-        )
-        machine = factory.make_Node(
-            owner=self.user,
-            interface=True,
-            status=NODE_STATUS.ALLOCATED,
-            power_type="manual",
-            distro_series=distro_series,
-            osystem=osystem,
-            architecture=make_usable_architecture(self),
-            ephemeral_deploy=True,
-        )
-        response = self.client.post(
-            self.get_machine_uri(machine),
-            {"op": "deploy", "register_vmhost": True},
-        )
-        self.assertEqual(http.client.BAD_REQUEST, response.status_code)
-        self.assertEqual(
-            b"Cannot deploy as a VM host for ephemeral deployments.",
-            response.content,
-        )
-
-    def test_POST_deploy_fails_when_register_vmhost_set_for_ephemeral_deploy(
-        self,
-    ):
-        self.become_admin()
-        osystem = Config.objects.get_config("default_osystem")
-        distro_series = Config.objects.get_config("default_distro_series")
-        make_usable_osystem(
-            self, osystem_name=osystem, releases=[distro_series]
-        )
-        machine = factory.make_Node(
-            owner=self.user,
-            interface=True,
-            status=NODE_STATUS.ALLOCATED,
-            power_type="manual",
-            distro_series=distro_series,
-            osystem=osystem,
-            architecture=make_usable_architecture(self),
-            ephemeral_deploy=True,
-        )
-        response = self.client.post(
-            self.get_machine_uri(machine),
-            {"op": "deploy", "register_vmhost": True},
-        )
-        self.assertEqual(http.client.BAD_REQUEST, response.status_code)
-        self.assertEqual(
-            b"Cannot deploy as a VM host for ephemeral deployments.",
+            b"Cannot install KVM host for ephemeral deployments.",
             response.content,
         )
 
@@ -765,7 +709,7 @@ class TestMachineAPI(APITestCase.ForUser):
                 error_message,
             )
 
-    def test_POST_deploy_stores_user_data_base64_encoded(self):
+    def test_POST_deploy_stores_user_data(self):
         rack_controller = factory.make_RackController()
         self.patch(
             node_module.RackControllerManager, "filter_by_url_accessible"
@@ -774,9 +718,6 @@ class TestMachineAPI(APITestCase.ForUser):
         self.patch(node_module.Node, "_start_deployment")
         self.patch(node_module.Node, "_claim_auto_ips")
         self.patch(machines_module, "get_curtin_merged_config")
-        self.patch(
-            node_module, "get_maas_facing_server_addresses"
-        ).return_value = [IPAddress("127.0.0.1"), IPAddress("::1")]
         machine = factory.make_Node_with_Interface_on_Subnet(
             owner=self.user,
             interface=True,
@@ -803,7 +744,7 @@ class TestMachineAPI(APITestCase.ForUser):
 
         osystem = make_usable_osystem(self)
         distro_series = osystem["default_release"]
-        user_data = b64encode(
+        user_data = (
             b"\xff\x00\xff\xfe\xff\xff\xfe"
             + factory.make_string().encode("ascii")
         )
@@ -811,65 +752,13 @@ class TestMachineAPI(APITestCase.ForUser):
             self.get_machine_uri(machine),
             {
                 "op": "deploy",
-                "user_data": user_data.decode("ascii"),
+                "user_data": b64encode(user_data).decode("ascii"),
                 "distro_series": distro_series,
             },
         )
         self.assertEqual(http.client.OK, response.status_code)
         self.assertEqual(
             user_data, NodeUserData.objects.get_user_data(machine)
-        )
-
-    def test_POST_deploy_stores_user_data_plain_text(self):
-        rack_controller = factory.make_RackController()
-        self.patch(
-            node_module.RackControllerManager, "filter_by_url_accessible"
-        ).return_value = [rack_controller]
-        self.patch(node_module.Node, "_power_control_node")
-        self.patch(node_module.Node, "_start_deployment")
-        self.patch(node_module.Node, "_claim_auto_ips")
-        self.patch(machines_module, "get_curtin_merged_config")
-        self.patch(
-            node_module, "get_maas_facing_server_addresses"
-        ).return_value = [IPAddress("127.0.0.1"), IPAddress("::1")]
-        machine = factory.make_Node_with_Interface_on_Subnet(
-            owner=self.user,
-            interface=True,
-            power_type="virsh",
-            architecture=make_usable_architecture(self),
-            status=NODE_STATUS.ALLOCATED,
-            bmc_connected_to=rack_controller,
-        )
-
-        # assign an IP to both the machine and the rack on the same subnet
-        machine_interface = machine.get_boot_interface()
-        [auto_ip] = machine_interface.ip_addresses.filter(
-            alloc_type=IPADDRESS_TYPE.AUTO
-        )
-        ip = factory.pick_ip_in_Subnet(auto_ip.subnet)
-        auto_ip.ip = ip
-        auto_ip.save()
-        rack_if = rack_controller.interface_set.first()
-        rack_if.link_subnet(
-            INTERFACE_LINK_TYPE.STATIC,
-            auto_ip.subnet,
-            factory.pick_ip_in_Subnet(auto_ip.subnet),
-        )
-
-        osystem = make_usable_osystem(self)
-        distro_series = osystem["default_release"]
-        user_data = factory.make_name("user_data")
-        response = self.client.post(
-            self.get_machine_uri(machine),
-            {
-                "op": "deploy",
-                "user_data": user_data,
-                "distro_series": distro_series,
-            },
-        )
-        self.assertEqual(http.client.OK, response.status_code)
-        self.assertEqual(
-            user_data.encode(), NodeUserData.objects.get_user_data(machine)
         )
 
     def test_POST_deploy_passes_comment(self):
@@ -904,7 +793,6 @@ class TestMachineAPI(APITestCase.ForUser):
                 user_data=ANY,
                 comment=comment,
                 install_kvm=ANY,
-                register_vmhost=ANY,
                 bridge_type=ANY,
                 bridge_stp=ANY,
                 bridge_fd=ANY,
@@ -935,7 +823,6 @@ class TestMachineAPI(APITestCase.ForUser):
                 user_data=ANY,
                 comment=None,
                 install_kvm=ANY,
-                register_vmhost=ANY,
                 bridge_type=ANY,
                 bridge_stp=ANY,
                 bridge_fd=ANY,
@@ -967,7 +854,7 @@ class TestMachineAPI(APITestCase.ForUser):
             http.client.OK, response.status_code, response.content
         )
         response_content = json_load_bytes(response.content)
-        self.assertEqual("virsh", response_content["power_type"])
+        self.assertEquals("virsh", response_content["power_type"])
 
     def test_POST_deploy_allocates_ready_machines(self):
         self.patch(node_module.Node, "_start")

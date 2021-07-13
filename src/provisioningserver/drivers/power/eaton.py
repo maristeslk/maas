@@ -32,7 +32,6 @@ class EatonPowerDriver(PowerDriver):
     name = "eaton"
     chassis = True
     can_probe = False
-    can_set_boot_order = False
     description = "Eaton PDU"
     settings = [
         make_setting_field("power_address", "IP for Eaton PDU", required=True),

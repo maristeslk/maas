@@ -504,7 +504,12 @@ class Handler(metaclass=HandlerMetaclass):
                         raise HandlerValidationError(e.message_dict)
                     except AttributeError:
                         raise HandlerValidationError({"__all__": e.message})
-                return self.full_dehydrate(self.refetch(obj))
+                # Refetch the object to get any annotations added to the
+                # queryset.
+                obj = self.get_object(
+                    {self._meta.pk: getattr(obj, self._meta.pk)}
+                )
+                return self.full_dehydrate(obj)
             else:
                 raise HandlerValidationError(form.errors)
 
@@ -656,14 +661,6 @@ class Handler(metaclass=HandlerMetaclass):
         :param pk: Id of the object.
         """
         return self.get_object({self._meta.pk: pk})
-
-    def refetch(self, obj):
-        """Refetch an object using the handler queryset.
-
-        This ensures annotations defined in the queryset are added to the
-        object.
-        """
-        return self.get_object({self._meta.pk: getattr(obj, self._meta.pk)})
 
 
 class AdminOnlyMixin(Handler):

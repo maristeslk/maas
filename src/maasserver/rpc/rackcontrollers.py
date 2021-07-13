@@ -6,6 +6,7 @@
 __all__ = [
     "handle_upgrade",
     "register",
+    "update_interfaces",
     "update_last_image_sync",
 ]
 
@@ -16,7 +17,6 @@ from django.db.models import Q
 from maasserver import locks, worker_user
 from maasserver.enum import NODE_TYPE
 from maasserver.models import (
-    Controller,
     ControllerInfo,
     Domain,
     Node,
@@ -30,10 +30,8 @@ from maasserver.utils import synchronised
 from maasserver.utils.orm import transactional, with_connection
 from metadataserver.models import ScriptSet
 from provisioningserver.logger import get_maas_logger
-from provisioningserver.rpc.exceptions import NoSuchNode, NoSuchScope
+from provisioningserver.rpc.exceptions import NoSuchNode
 from provisioningserver.utils import typed
-from provisioningserver.utils.deb import DebVersionsInfo
-from provisioningserver.utils.snap import SnapVersionsInfo
 from provisioningserver.utils.twisted import synchronous
 
 maaslog = get_maas_logger("rpc.rackcontrollers")
@@ -77,6 +75,7 @@ def register(
     interfaces=None,
     url=None,
     is_loopback=None,
+    create_fabrics=True,
     version=None,
 ):
     """Register a new rack controller if not already registered.
@@ -165,6 +164,8 @@ def register(
     if rackcontroller.owner is None:
         rackcontroller.owner = worker_user.get_worker_user()
     rackcontroller.save()
+    # Update interfaces, if requested.
+    rackcontroller.update_interfaces(interfaces, create_fabrics=create_fabrics)
     # Update the version.
     if version is not None:
         ControllerInfo.objects.set_version(rackcontroller, version)
@@ -241,6 +242,14 @@ def update_foreign_dhcp(system_id, interface_name, dhcp_ip=None):
 
 @synchronous
 @transactional
+def update_interfaces(system_id, interfaces, topology_hints=None):
+    """Update the interface definition on the rack controller."""
+    rack_controller = RackController.objects.get(system_id=system_id)
+    rack_controller.update_interfaces(interfaces, topology_hints)
+
+
+@synchronous
+@transactional
 def get_discovery_state(system_id):
     """Update the interface definition on the rack controller."""
     rack_controller = RackController.objects.get(system_id=system_id)
@@ -281,34 +290,3 @@ def update_last_image_sync(system_id):
     RackController.objects.filter(system_id=system_id).update(
         last_image_sync=now()
     )
-
-
-@synchronous
-@transactional
-def update_state(system_id, scope, state):
-    """Update the state of a controller for a scope."""
-    try:
-        controller = Controller.objects.get(system_id=system_id)
-    except Controller.DoesNotExist:
-        raise NoSuchNode.from_system_id(system_id)
-
-    scope_handlers = {
-        "versions": _update_controller_versions,
-    }
-    handler = scope_handlers.get(scope)
-    if handler is None:
-        raise NoSuchScope()
-    handler(controller, state)
-
-
-def _update_controller_versions(node, state):
-    """Update reported version for a controller."""
-    versions_info = None
-    for info_class in (SnapVersionsInfo, DebVersionsInfo):
-        info = state.get(info_class.install_type)
-        if info:
-            versions_info = info_class(**info)
-            break
-    if not versions_info:
-        return
-    ControllerInfo.objects.set_versions_info(node, versions_info)

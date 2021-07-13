@@ -42,19 +42,7 @@ from metadataserver.enum import (
 )
 from metadataserver.models.script import Script
 from provisioningserver.events import EVENT_TYPES
-
-
-def _get_hw_pairs(script_set):
-    """
-    Given a ScriptSet return hardware pairs as a list of "key:value" strings.
-    """
-    hw_pairs_qs = script_set.node.nodemetadata_set.filter(
-        Q(key__startswith="system_")
-        | Q(key__startswith="mainboard_")
-        | Q(key__startswith="firmware_")
-        | Q(key__startswith="chassis_")
-    ).values_list("key", "value")
-    return [":".join(pair) for pair in hw_pairs_qs]
+from provisioningserver.refresh.node_info_scripts import NODE_INFO_SCRIPTS
 
 
 def get_status_from_qs(qs):
@@ -122,28 +110,20 @@ class ScriptSetManager(Manager):
         """Create a new commissioning ScriptSet with ScriptResults
 
         ScriptResults will be created for all builtin commissioning scripts.
-        Optionally a list of user scripts can be given to create ScriptResults
-        for. If None all user scripts will be assumed. Scripts may also have
-        paramaters passed to them.
-
+        Optionally a list of user scripts and tags can be given to create
+        ScriptResults for. If None all user scripts will be assumed. Scripts
+        may also have paramaters passed to them.
         """
-        scripts = (
-            [] if scripts is None else list(scripts)
-        )  # ensure it's always a list
-        builtin_scripts = Script.objects.filter(default=True)
-        builtin_scripts_names = list(
-            builtin_scripts.values_list("name", flat=True)
-        )
         if node.is_controller:
             # Controllers can only run the builtin scripts for them.
-            scripts = list(
-                builtin_scripts.filter(
-                    tags__contains=["deploy-info"]
-                ).values_list("name", flat=True)
-            )
+            scripts = [
+                script["name"]
+                for script in NODE_INFO_SCRIPTS.values()
+                if script["run_on_controller"]
+            ]
         elif enlisting:
             if Config.objects.get_config("enlist_commissioning"):
-                scripts = builtin_scripts_names + ["enlisting"]
+                scripts = list(NODE_INFO_SCRIPTS.keys()) + ["enlisting"]
             else:
                 scripts = ["bmc-config"]
         elif not scripts:
@@ -151,15 +131,15 @@ class ScriptSetManager(Manager):
             pass
         elif "none" in scripts:
             # Don't add any scripts besides the ones that come with MAAS.
-            scripts = builtin_scripts_names
+            scripts = list(NODE_INFO_SCRIPTS.keys())
         else:
-            scripts = builtin_scripts_names + scripts
+            scripts = list(NODE_INFO_SCRIPTS.keys()) + scripts
 
         script_set = self.create(
             node=node,
             result_type=RESULT_TYPE.COMMISSIONING,
             power_state_before_transition=node.power_state,
-            requested_scripts=scripts,
+            requested_scripts=scripts if scripts else [],
         )
 
         if not scripts:
@@ -227,22 +207,6 @@ class ScriptSetManager(Manager):
         self._clean_old(node, RESULT_TYPE.INSTALLATION, script_set)
         return script_set
 
-    def _find_scripts(self, script_qs, hw_pairs, modaliases):
-        for script in script_qs:
-            # If a script is not for specific hardware, it is always included
-            if not script.for_hardware:
-                yield script
-                continue
-
-            # If a script with the for_hardware field is selected by tag only
-            # add it if matching hardware is found.
-            for hardware in script.for_hardware:
-                if hardware in hw_pairs:
-                    yield script
-                    break
-            if filter_modaliases(modaliases, *script.ForHardware):
-                yield script
-
     def _add_user_selected_scripts(
         self, script_set, scripts=None, script_input=None
     ):
@@ -262,9 +226,27 @@ class ScriptSetManager(Manager):
             Q(name__in=scripts) | Q(tags__overlap=scripts) | Q(id__in=ids),
             script_type=script_type,
         )
-        hw_pairs = _get_hw_pairs(script_set)
         modaliases = script_set.node.modaliases
-        for script in self._find_scripts(qs, hw_pairs, modaliases):
+        hw_pairs_qs = script_set.node.nodemetadata_set.filter(
+            Q(key__startswith="system_")
+            | Q(key__startswith="mainboard_")
+            | Q(key__startswith="firmware_")
+            | Q(key__startswith="chassis_")
+        ).values_list("key", "value")
+        hw_pairs = [":".join(t) for t in hw_pairs_qs]
+        for script in qs:
+            # If a script with the for_hardware field is selected by tag only
+            # add it if matching hardware is found.
+            if script.for_hardware:
+                found_hw_match = False
+                if hw_pairs:
+                    for hardware in script.for_hardware:
+                        if hardware in hw_pairs:
+                            found_hw_match = True
+                            break
+                matches = filter_modaliases(modaliases, *script.ForHardware)
+                if len(matches) == 0 and not found_hw_match:
+                    continue
             try:
                 script_set.add_pending_script(script, script_input)
             except ValidationError:
@@ -482,7 +464,14 @@ class ScriptSet(CleanSave, Model):
 
         if modaliases is None:
             modaliases = self.node.modaliases
-        hw_pairs = _get_hw_pairs(self)
+
+        hw_pairs_qs = self.node.nodemetadata_set.filter(
+            Q(key__startswith="system_")
+            | Q(key__startswith="mainboard_")
+            | Q(key__startswith="firmware_")
+            | Q(key__startswith="chassis_")
+        ).values_list("key", "value")
+        hw_pairs = [":".join(t) for t in hw_pairs_qs]
 
         # Remove scripts autoselected at the start of commissioning but updated
         # commissioning data shows the Script is no longer applicable.

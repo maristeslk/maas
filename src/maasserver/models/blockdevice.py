@@ -1,4 +1,4 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2016 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """Model for a nodes block device."""
@@ -155,18 +155,23 @@ class BlockDevice(CleanSave, TimestampedModel):
 
     @property
     def type(self):
+        # Circular imports, since ISCSIBlockDevice, PhysicalBlockDevice and
+        # VirtualBlockDevice extend from this calss.
+        from maasserver.models.iscsiblockdevice import ISCSIBlockDevice
         from maasserver.models.physicalblockdevice import PhysicalBlockDevice
         from maasserver.models.virtualblockdevice import VirtualBlockDevice
 
         actual_instance = self.actual_instance
-        if isinstance(actual_instance, PhysicalBlockDevice):
+        if isinstance(actual_instance, ISCSIBlockDevice):
+            return "iscsi"
+        elif isinstance(actual_instance, PhysicalBlockDevice):
             return "physical"
         elif isinstance(actual_instance, VirtualBlockDevice):
             return "virtual"
         else:
             raise ValueError(
                 "BlockDevice is not a subclass of "
-                "PhysicalBlockDevice or VirtualBlockDevice"
+                "ISCSIBlockDevice, PhysicalBlockDevice or VirtualBlockDevice"
             )
 
     @property
@@ -174,22 +179,32 @@ class BlockDevice(CleanSave, TimestampedModel):
         """Return the instance as its correct type.
 
         By default all references from Django will be to `BlockDevice`, when
-        the native type PhysicalBlockDevice` or `VirtualBlockDevice` is needed
-        use this property to get its actual instance.
-
+        the native type `ISCSIBlockDevice`, `PhysicalBlockDevice` or
+        `VirtualBlockDevice` is needed use this property to get its actual
+        instance.
         """
+        # Circular imports, since ISCSIBlockDevice, PhysicalBlockDevice and
+        # VirtualBlockDevice extend from this calss.
+        from maasserver.models.iscsiblockdevice import ISCSIBlockDevice
         from maasserver.models.physicalblockdevice import PhysicalBlockDevice
         from maasserver.models.virtualblockdevice import VirtualBlockDevice
 
-        if isinstance(self, (PhysicalBlockDevice, VirtualBlockDevice)):
+        if (
+            isinstance(self, ISCSIBlockDevice)
+            or isinstance(self, PhysicalBlockDevice)
+            or isinstance(self, VirtualBlockDevice)
+        ):
             return self
         try:
-            return self.physicalblockdevice
-        except PhysicalBlockDevice.DoesNotExist:
+            return self.iscsiblockdevice
+        except Exception:
             try:
-                return self.virtualblockdevice
-            except VirtualBlockDevice.DoesNotExist:
-                pass
+                return self.physicalblockdevice
+            except PhysicalBlockDevice.DoesNotExist:
+                try:
+                    return self.virtualblockdevice
+                except VirtualBlockDevice.DoesNotExist:
+                    pass
         return self
 
     def get_effective_filesystem(self):
@@ -233,14 +248,6 @@ class BlockDevice(CleanSave, TimestampedModel):
     def used_for(self):
         """Return what the block device is being used for."""
         return used_for(self)
-
-    def serialize(self):
-        """Serialize the model so it can be detected outside of MAAS."""
-        return {
-            "id": self.id,
-            "name": self.name,
-            "id_path": self.id_path,
-        }
 
     def __str__(self):
         return "{size} attached to {node}".format(

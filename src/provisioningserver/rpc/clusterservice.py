@@ -1,4 +1,4 @@
-# Copyright 2014-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2014-2020 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """RPC implementation for clusters."""
@@ -46,15 +46,15 @@ from provisioningserver.drivers.hardware.seamicro import (
 from provisioningserver.drivers.hardware.ucsm import probe_and_enlist_ucsm
 from provisioningserver.drivers.hardware.virsh import probe_virsh_and_enlist
 from provisioningserver.drivers.hardware.vmware import probe_vmware_and_enlist
-from provisioningserver.drivers.power.hmcz import probe_hmcz_and_enlist
+from provisioningserver.drivers.nos.registry import NOSDriverRegistry
 from provisioningserver.drivers.power.mscm import probe_and_enlist_mscm
 from provisioningserver.drivers.power.msftocs import probe_and_enlist_msftocs
-from provisioningserver.drivers.power.proxmox import probe_proxmox_and_enlist
 from provisioningserver.drivers.power.recs import probe_and_enlist_recs
 from provisioningserver.drivers.power.registry import PowerDriverRegistry
 from provisioningserver.logger import get_maas_logger, LegacyLogger
 from provisioningserver.path import get_maas_data_path
 from provisioningserver.prometheus.metrics import set_global_labels
+from provisioningserver.refresh import refresh
 from provisioningserver.rpc import (
     cluster,
     common,
@@ -102,7 +102,7 @@ from provisioningserver.utils.shell import (
     ExternalProcessError,
     get_env_with_bytes_locale,
 )
-from provisioningserver.utils.snap import running_in_snap
+from provisioningserver.utils.snappy import running_in_snap
 from provisioningserver.utils.twisted import (
     call,
     callOut,
@@ -113,7 +113,7 @@ from provisioningserver.utils.twisted import (
     suppress,
 )
 from provisioningserver.utils.url import get_domain
-from provisioningserver.utils.version import get_running_version
+from provisioningserver.utils.version import get_maas_version
 
 maaslog = get_maas_logger("rpc.cluster")
 log = LegacyLogger()
@@ -295,6 +295,15 @@ class Cluster(RPCProtocol):
         """
         return {"images": list_boot_images()}
 
+    @cluster.ListBootImagesV2.responder
+    def list_boot_images_v2(self):
+        """list_boot_images_v2()
+
+        Implementation of
+        :py:class:`~provisioningserver.rpc.cluster.ListBootImagesV2`.
+        """
+        return {"images": list_boot_images()}
+
     @cluster.ImportBootImages.responder
     def import_boot_images(self, sources, http_proxy=None, https_proxy=None):
         """import_boot_images()
@@ -338,6 +347,15 @@ class Cluster(RPCProtocol):
                 PowerDriverRegistry.get_schema(detect_missing_packages=False)
             )
         }
+
+    @cluster.DescribeNOSTypes.responder
+    def describe_nos_types(self):
+        """describe_nos_types()
+
+        Implementation of
+        :py:class:`~provisioningserver.rpc.cluster.DescribeNOSTypes`.
+        """
+        return {"nos_types": list(NOSDriverRegistry.get_schema())}
 
     @cluster.ListSupportedArchitectures.responder
     def list_supported_architectures(self):
@@ -459,27 +477,28 @@ class Cluster(RPCProtocol):
             )
         return {"missing_packages": driver.detect_missing_packages()}
 
-    @cluster.SetBootOrder.responder
-    def set_boot_order(self, system_id, hostname, power_type, context, order):
-        driver = PowerDriverRegistry.get_item(power_type)
-        if driver is None:
-            raise exceptions.UnknownPowerType(
-                f"No driver found for power type '{power_type}'"
-            )
-        elif not driver.can_set_boot_order:
-            # Don't raise NotImplementedError because most boot drivers can
-            # provide a boot config to boot the proper device.
-            log.debug(
-                f"{power_type} does not support configuring the boot order!"
-            )
-            return {}
-        else:
-            d = driver.set_boot_order(system_id, context, order)
-            d.addCallback(lambda _: {})
-            return d
-
     @cluster.ConfigureDHCPv4.responder
     def configure_dhcpv4(
+        self,
+        omapi_key,
+        failover_peers,
+        shared_networks,
+        hosts,
+        interfaces,
+        global_dhcp_snippets=[],
+    ):
+        dhcp.upgrade_shared_networks(shared_networks)
+        return self.configure_dhcpv4_v2(
+            omapi_key,
+            failover_peers,
+            shared_networks,
+            hosts,
+            interfaces,
+            global_dhcp_snippets,
+        )
+
+    @cluster.ConfigureDHCPv4_V2.responder
+    def configure_dhcpv4_v2(
         self,
         omapi_key,
         failover_peers,
@@ -533,6 +552,26 @@ class Cluster(RPCProtocol):
         interfaces,
         global_dhcp_snippets=[],
     ):
+        dhcp.upgrade_shared_networks(shared_networks)
+        return self.validate_dhcpv4_config_v2(
+            omapi_key,
+            failover_peers,
+            shared_networks,
+            hosts,
+            interfaces,
+            global_dhcp_snippets,
+        )
+
+    @cluster.ValidateDHCPv4Config_V2.responder
+    def validate_dhcpv4_config_v2(
+        self,
+        omapi_key,
+        failover_peers,
+        shared_networks,
+        hosts,
+        interfaces,
+        global_dhcp_snippets=[],
+    ):
         server = dhcp.DHCPv4Server(omapi_key)
         d = deferToThread(
             dhcp.validate,
@@ -548,6 +587,26 @@ class Cluster(RPCProtocol):
 
     @cluster.ConfigureDHCPv6.responder
     def configure_dhcpv6(
+        self,
+        omapi_key,
+        failover_peers,
+        shared_networks,
+        hosts,
+        interfaces,
+        global_dhcp_snippets=[],
+    ):
+        dhcp.upgrade_shared_networks(shared_networks)
+        return self.configure_dhcpv6_v2(
+            omapi_key,
+            failover_peers,
+            shared_networks,
+            hosts,
+            interfaces,
+            global_dhcp_snippets,
+        )
+
+    @cluster.ConfigureDHCPv6_V2.responder
+    def configure_dhcpv6_v2(
         self,
         omapi_key,
         failover_peers,
@@ -593,6 +652,26 @@ class Cluster(RPCProtocol):
 
     @cluster.ValidateDHCPv6Config.responder
     def validate_dhcpv6_config(
+        self,
+        omapi_key,
+        failover_peers,
+        shared_networks,
+        hosts,
+        interfaces,
+        global_dhcp_snippets=[],
+    ):
+        dhcp.upgrade_shared_networks(shared_networks)
+        return self.validate_dhcpv6_config_v2(
+            omapi_key,
+            failover_peers,
+            shared_networks,
+            hosts,
+            interfaces,
+            global_dhcp_snippets,
+        )
+
+    @cluster.ValidateDHCPv6Config_V2.responder
+    def validate_dhcpv6_config_v2(
         self,
         omapi_key,
         failover_peers,
@@ -660,6 +739,38 @@ class Cluster(RPCProtocol):
         )
         return d.addCallback(lambda _: {})
 
+    @cluster.RefreshRackControllerInfo.responder
+    def refresh(self, system_id, consumer_key, token_key, token_secret):
+        """RefreshRackControllerInfo()
+
+        Implementation of
+        :py:class:`~provisioningserver.rpc.cluster.RefreshRackControllerInfo`.
+        """
+
+        def _refresh():
+            return deferToThread(
+                refresh,
+                system_id,
+                consumer_key,
+                token_key,
+                token_secret,
+                self.service.maas_url,
+            )
+
+        lock = NamedLock("refresh")
+        try:
+            lock.acquire()
+        except lock.NotAvailable:
+            # Refresh is already running, don't do anything
+            raise exceptions.RefreshAlreadyInProgress()
+        else:
+            # Start gathering node results (lshw, lsblk, etc) but don't wait.
+            maybeDeferred(_refresh).addBoth(callOut, lock.release).addErrback(
+                log.err, "Failed to refresh the rack controller."
+            )
+
+        return deferToThread(lambda: {"maas_version": get_maas_version()})
+
     @cluster.AddChassis.responder
     def add_chassis(
         self,
@@ -674,9 +785,6 @@ class Cluster(RPCProtocol):
         power_control=None,
         port=None,
         protocol=None,
-        token_name=None,
-        token_secret=None,
-        verify_ssl=False,
     ):
         """AddChassis()
 
@@ -694,31 +802,6 @@ class Cluster(RPCProtocol):
                 domain,
             )
             d.addErrback(partial(catch_probe_and_enlist_error, "virsh"))
-        elif chassis_type == "proxmox":
-            d = probe_proxmox_and_enlist(
-                user,
-                hostname,
-                username,
-                password,
-                token_name,
-                token_secret,
-                verify_ssl,
-                accept_all,
-                domain,
-                prefix_filter,
-            )
-            d.addErrback(partial(catch_probe_and_enlist_error, "proxmox"))
-        elif chassis_type == "hmcz":
-            d = probe_hmcz_and_enlist(
-                user,
-                hostname,
-                username,
-                password,
-                accept_all,
-                domain,
-                prefix_filter,
-            )
-            d.addErrback(partial(catch_probe_and_enlist_error, "hmcz"))
         elif chassis_type == "vmware":
             d = deferToThread(
                 probe_vmware_and_enlist,
@@ -797,16 +880,6 @@ class Cluster(RPCProtocol):
             message = "Unknown chassis type %s" % chassis_type
             maaslog.error(message)
         return {}
-
-    @cluster.DiscoverPodProjects.responder
-    def discover_pod_projects(self, type, context):
-        """DiscoverPod()
-
-        Implementation of
-        :py:class:`~provisioningserver.rpc.cluster.DiscoverPodProjects`.
-        """
-
-        return pods.discover_pod_projects(type, context)
 
     @cluster.DiscoverPod.responder
     def discover_pod(self, type, context, pod_id=None, name=None):
@@ -921,7 +994,7 @@ class Cluster(RPCProtocol):
             secret_path.unlink()
         try:
             if running_in_snap():
-                call_and_check(["snapctl", "restart", "maas.supervisor"])
+                call_and_check(["snapctl", "restart", "agora-maas.supervisor"])
             else:
                 call_and_check(["sudo", "systemctl", "restart", "maas-rackd"])
         except ExternalProcessError as e:
@@ -1034,7 +1107,7 @@ class ClusterClient(Cluster):
         interfaces = get_all_interfaces_definition()
         hostname = gethostname()
         parsed_url = urlparse(self.service.maas_url)
-        version = str(get_running_version())
+        version = get_maas_version()
 
         try:
             # Note: we indicate support for beacons here, and act differently
@@ -1183,7 +1256,7 @@ class ClusterClient(Cluster):
         log.msg("Peer certificate: %r" % self.peerCertificate)
 
 
-class ClusterClientService(TimerService):
+class ClusterClientService(TimerService, object):
     """A cluster controller RPC client service.
 
     This is a service - in the Twisted sense - that connects to a set of
@@ -1814,7 +1887,7 @@ class ClusterClientService(TimerService):
         self._update_interval(0, 0, reset=True)
 
 
-class ClusterClientCheckerService(TimerService):
+class ClusterClientCheckerService(TimerService, object):
     """A cluster controller RPC client checker service.
 
     This is a service - in the Twisted sense - that cordinates with the

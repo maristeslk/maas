@@ -31,11 +31,8 @@ class TestDHCPSnippetHandler(MAASServerTestCase):
     def dehydrate_dhcp_snippet(self, dhcp_snippet):
         node_system_id = None
         subnet_id = None
-        iprange_id = None
         if dhcp_snippet.subnet is not None:
             subnet_id = dhcp_snippet.subnet.id
-            if dhcp_snippet.iprange is not None:
-                iprange_id = dhcp_snippet.iprange.id
         elif dhcp_snippet.node is not None:
             node_system_id = dhcp_snippet.node.system_id
         return {
@@ -54,7 +51,6 @@ class TestDHCPSnippetHandler(MAASServerTestCase):
             "enabled": dhcp_snippet.enabled,
             "node": node_system_id,
             "subnet": subnet_id,
-            "iprange": iprange_id,
             "updated": dehydrate_datetime(dhcp_snippet.updated),
             "created": dehydrate_datetime(dhcp_snippet.created),
         }
@@ -128,7 +124,7 @@ class TestDHCPSnippetHandler(MAASServerTestCase):
         node = factory.make_Node()
         handler.update({"id": dhcp_snippet.id, "node": node.system_id})
         dhcp_snippet = reload_object(dhcp_snippet)
-        self.assertEqual(node, dhcp_snippet.node)
+        self.assertEquals(node, dhcp_snippet.node)
         event = Event.objects.get(type__level=AUDIT)
         self.assertIsNotNone(event)
         self.assertEqual(
@@ -172,7 +168,7 @@ class TestDHCPSnippetHandler(MAASServerTestCase):
         remaining_ids = textfile_ids[:revert_to]
         handler.revert({"id": dhcp_snippet.id, "to": revert_to})
         dhcp_snippet = reload_object(dhcp_snippet)
-        self.assertEqual(
+        self.assertEquals(
             VersionedTextFile.objects.get(id=textfile_ids[revert_to - 1]).data,
             dhcp_snippet.value.data,
         )

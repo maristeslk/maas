@@ -79,7 +79,9 @@ class TestIsPIDRunning(MAASTestCase):
 
     def test_result(self):
         self.patch(ps_module.os, "kill").side_effect = self.exception
-        self.assertEqual(self.result, is_pid_running(random.randint(100, 200)))
+        self.assertEquals(
+            self.result, is_pid_running(random.randint(100, 200))
+        )
 
 
 class TestIsPIDInContainer(MAASTestCase):

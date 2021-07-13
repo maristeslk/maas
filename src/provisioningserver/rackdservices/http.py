@@ -1,4 +1,4 @@
-# Copyright 2018-2021 Canonical Ltd.  This software is licensed under the
+# Copyright 2018-2019 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
 """HTTP service for the rack controller."""
@@ -7,7 +7,6 @@
 from collections import defaultdict
 from datetime import timedelta
 import os
-from pathlib import Path
 import sys
 
 import attr
@@ -30,7 +29,7 @@ from provisioningserver.path import get_tentative_data_path
 from provisioningserver.prometheus.metrics import PROMETHEUS_METRICS
 from provisioningserver.prometheus.resource import PrometheusMetricsResource
 from provisioningserver.service_monitor import service_monitor
-from provisioningserver.utils import load_template, snap
+from provisioningserver.utils import load_template, snappy
 from provisioningserver.utils.fs import atomic_write
 from provisioningserver.utils.twisted import callOut
 
@@ -154,7 +153,7 @@ class RackHTTPService(TimerService):
         # XXX: blake_r 2018-06-12 bug=1687620. When running in a snap,
         # supervisord tracks services. It does not support reloading.
         # Instead, we need to restart the service.
-        if snap.running_in_snap():
+        if snappy.running_in_snap():
             d.addCallback(lambda _: service_monitor.restartService("http"))
         else:
             d.addCallback(lambda _: service_monitor.reloadService("http"))
@@ -171,17 +170,16 @@ class RackHTTPService(TimerService):
     def _configure(self, upstream_http):
         """Update the HTTP configuration for the rack."""
         template = load_template("http", "rackd.nginx.conf.template")
-        machine_resources_prefix = snap.SnapPaths.from_environ().snap or Path(
-            "/"
-        )
         try:
             rendered = template.substitute(
                 {
                     "upstream_http": list(sorted(upstream_http)),
                     "resource_root": self._resource_root,
-                    "machine_resources": str(
-                        machine_resources_prefix / "usr/share/maas"
-                    ),
+                    "machine_resources": os.path.join(
+                        snappy.get_snap_path(), "usr/share/maas"
+                    )
+                    if (snappy.running_in_snap())
+                    else "/usr/share/maas",
                 }
             )
         except NameError as error:
@@ -310,7 +308,6 @@ class HTTPBootResource(resource.Resource):
             tftp.backend.get_reader,
             path,
             skip_logging=True,
-            protocol="http",
         )
         d.addCallback(writeResponse)
         d.addErrback(handleFailure)

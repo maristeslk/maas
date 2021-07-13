@@ -46,8 +46,7 @@ from typing import Container
 from django.conf import settings
 from django.core.exceptions import MultipleObjectsReturned, ValidationError
 from django.db import connection, connections, reset_queries, transaction
-from django.db.models import F, Func, IntegerField, Q, Sum, Value
-from django.db.models.functions import Coalesce
+from django.db.models import Q
 from django.db.transaction import TransactionManagementError
 from django.db.utils import DatabaseError, IntegrityError, OperationalError
 from django.http import Http404
@@ -66,24 +65,6 @@ from provisioningserver.utils import flatten
 from provisioningserver.utils.backoff import exponential_growth, full_jitter
 from provisioningserver.utils.network import parse_integer
 from provisioningserver.utils.twisted import callOut
-
-
-def ArrayLength(field):
-    """Expression to return the length of a PostgreSQL array."""
-    return Coalesce(
-        Func(
-            F(field),
-            Value(1),
-            function="array_length",
-            output_field=IntegerField(),
-        ),
-        Value(0),
-    )
-
-
-def NotNullSum(column):
-    """Expression like Sum, but returns 0 if the aggregate is None."""
-    return Coalesce(Sum(column), Value(0))
 
 
 def get_exception_class(items):
@@ -963,9 +944,7 @@ def parse_item_operation(specifier):
     """
     specifier = specifier.strip()
 
-    from operator import and_ as AND
-    from operator import inv as INV
-    from operator import or_ as OR
+    from operator import and_ as AND, inv as INV, or_ as OR
 
     def AND_NOT(current, next_):
         return AND(current, INV(next_))
@@ -1166,10 +1145,10 @@ class MAASQueriesMixin:
             # If we got a dictionary, treat it as one of the entries in a
             # LabeledConstraintMap. That is, each key is a specifier, and
             # each value is a list of values (which must be OR'd together).
-            for key, constraint_list in specifiers.items():
-                assert isinstance(constraint_list, list)
+            for key in specifiers.keys():
+                assert isinstance(specifiers[key], list)
                 constraints = [
-                    key + separator + value for value in constraint_list
+                    key + separator + value for value in specifiers[key]
                 ]
                 # Leave off specifier_types here because this recursion
                 # will go back to the subclass to get the types filled in.
@@ -1186,7 +1165,7 @@ class MAASQueriesMixin:
                     specifier_type, specifier_types, item, separator=separator
                 )
                 current_q = query(current_q, op, item)
-        if kwargs:
+        if len(kwargs) > 0:
             current_q &= Q(**kwargs)
         return current_q
 
@@ -1288,7 +1267,7 @@ class MAASQueriesMixin:
         object_name = get_model_object_name(self)
         if isinstance(specifiers, str):
             specifiers = specifiers.strip()
-        if specifiers is None:
+        if specifiers is None or specifiers == "":
             raise MAASAPIBadRequest("%s specifier required." % object_name)
         try:
             object = get_one(self.filter_by_specifiers(specifiers, **kwargs))

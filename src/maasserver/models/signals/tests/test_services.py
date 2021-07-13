@@ -88,7 +88,9 @@ class TestRegionControllerProcess(MAASServerTestCase):
         rack_controllers = [factory.make_RackController() for _ in range(3)]
         mock_create_for = self.patch(Service.objects, "create_services_for")
         factory.make_RegionControllerProcess()
-        self.assertEqual(len(rack_controllers) + 1, mock_create_for.call_count)
+        self.assertEquals(
+            len(rack_controllers) + 1, mock_create_for.call_count
+        )
 
     def test_calls_update_rackd_status_on_all_racks_on_create(self):
         rack_controllers = [factory.make_RackController() for _ in range(3)]
@@ -96,7 +98,7 @@ class TestRegionControllerProcess(MAASServerTestCase):
             RackController, "update_rackd_status"
         )
         factory.make_RegionControllerProcess()
-        self.assertEqual(
+        self.assertEquals(
             len(rack_controllers), mock_update_rackd_status.call_count
         )
 
@@ -105,7 +107,7 @@ class TestRegionControllerProcess(MAASServerTestCase):
         process = factory.make_RegionControllerProcess()
         mock_create_for = self.patch(Service.objects, "create_services_for")
         process.delete()
-        self.assertEqual(len(rack_controllers), mock_create_for.call_count)
+        self.assertEquals(len(rack_controllers), mock_create_for.call_count)
 
     def test_calls_update_rackd_status_on_all_racks_on_delete(self):
         rack_controllers = [factory.make_RackController() for _ in range(3)]
@@ -114,6 +116,6 @@ class TestRegionControllerProcess(MAASServerTestCase):
             RackController, "update_rackd_status"
         )
         process.delete()
-        self.assertEqual(
+        self.assertEquals(
             len(rack_controllers), mock_update_rackd_status.call_count
         )

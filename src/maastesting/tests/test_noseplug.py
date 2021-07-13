@@ -13,7 +13,7 @@ from unittest.mock import ANY, sentinel
 
 import crochet as crochet_module
 import nose.case
-import subunit
+from subunit import TestProtocolClient
 from testresources import OptimisingTestSuite
 from testtools.matchers import (
     AllMatch,
@@ -519,11 +519,11 @@ class TestSubunit(MAASTestCase):
             self.assertThat(subunit.stream.mode, Equals("wb"))
 
     def test_prepareTestResult_returns_subunit_client(self):
-        subunit_plugin = Subunit()
+        subunit = Subunit()
         with open(devnull, "wb") as stream:
-            subunit_plugin.stream = stream
-            result = subunit_plugin.prepareTestResult(sentinel.result)
-            self.assertThat(result, IsInstance(subunit.TestProtocolClient))
+            subunit.stream = stream
+            result = subunit.prepareTestResult(sentinel.result)
+            self.assertThat(result, IsInstance(TestProtocolClient))
             self.assertThat(result, MatchesStructure(_stream=Is(stream)))
 
 

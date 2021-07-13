@@ -15,6 +15,7 @@ from maasserver.clusterrpc.driver_parameters import (
     add_power_driver_parameters,
     get_driver_parameters_from_json,
     get_driver_types,
+    JSON_NOS_DRIVERS_SCHEMA,
     JSON_POWER_DRIVERS_SCHEMA,
     make_form_field,
     SETTING_PARAMETER_FIELD_SCHEMA,
@@ -204,7 +205,7 @@ class TestMakeFormField(MAASServerTestCase):
             (django_field.label, django_field.required),
         )
 
-    def test_sets_default_not_required(self):
+    def test_sets_initial_to_default(self):
         json_field = {
             "name": "some_field",
             "label": "Some Field",
@@ -213,20 +214,7 @@ class TestMakeFormField(MAASServerTestCase):
             "default": "some default",
         }
         django_field = make_form_field(json_field)
-        self.assertEqual("some default", django_field.initial)
-        self.assertEqual("", django_field.empty_value)
-
-    def test_sets_default_and_empty_value_required(self):
-        json_field = {
-            "name": "some_field",
-            "label": "Some Field",
-            "field_type": "string",
-            "required": True,
-            "default": "some default",
-        }
-        django_field = make_form_field(json_field)
-        self.assertEqual("some default", django_field.initial)
-        self.assertEqual("some default", django_field.empty_value)
+        self.assertEquals(json_field["default"], django_field.initial)
 
 
 class TestMakeSettingField(MAASServerTestCase):
@@ -462,6 +450,18 @@ class TestAddNOSTypeParameters(MAASServerTestCase):
             fields=[],
             parameters_set=[],
         )
+
+    def test_subsequent_parameters_set_is_valid(self):
+        parameters_set = []
+        fields = [self.make_field()]
+        add_nos_driver_parameters(
+            driver_type="nos",
+            name="blah",
+            description="baz",
+            fields=fields,
+            parameters_set=parameters_set,
+        )
+        jsonschema.validate(parameters_set, JSON_NOS_DRIVERS_SCHEMA)
 
 
 class TestPowerTypes(MAASTestCase):

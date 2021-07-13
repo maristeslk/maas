@@ -85,7 +85,7 @@ class TestLocateTemplate(MAASTestCase):
     """Tests for `locate_template`."""
 
     def test_returns_test_path(self):
-        self.assertEqual(
+        self.assertEquals(
             os.path.abspath(
                 os.path.join(
                     os.path.dirname(__file__), "..", "..", "templates"
@@ -192,8 +192,8 @@ class TestSudo(MAASTestCase):
         provisioningserver.config.is_dev_environment.return_value = value
 
     def set_is_in_snap(self, value):
-        self.patch(provisioningserver.utils.snap, "running_in_snap")
-        provisioningserver.utils.snap.running_in_snap.return_value = value
+        self.patch(provisioningserver.utils.snappy, "running_in_snap")
+        provisioningserver.utils.snappy.running_in_snap.return_value = value
 
     def test_returns_sudo_command_when_is_dev_environment(self):
         cmd = [factory.make_name("cmd") for _ in range(3)]
@@ -398,7 +398,7 @@ class TestKernelToDebianArchitecture(MAASTestCase):
     )
 
     def test_kernel_to_debian_architecture(self):
-        self.assertEqual(
+        self.assertEquals(
             self.debian, kernel_to_debian_architecture(self.kernel)
         )
 
@@ -423,6 +423,6 @@ class TestDebianToKernalArchitecture(MAASTestCase):
     )
 
     def test_kernel_to_debian_architecture(self):
-        self.assertEqual(
+        self.assertEquals(
             self.kernel, debian_to_kernel_architecture(self.debian)
         )

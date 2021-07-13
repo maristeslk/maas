@@ -6,21 +6,27 @@
 from datetime import datetime
 import os
 from socket import gethostname
-from threading import Lock
 from time import sleep
 
 from OpenSSL import crypto
 
 from provisioningserver.path import get_tentative_data_path
 from provisioningserver.utils.fs import NamedLock
-from provisioningserver.utils.snap import running_in_snap, SnapPaths
+from provisioningserver.utils.snappy import (
+    get_snap_common_path,
+    running_in_snap,
+)
 
 if running_in_snap():
-    _certificates_path = SnapPaths.from_environ().common / "certificates"
-    MAAS_PRIVATE_KEY = str(_certificates_path / "maas.key")
-    MAAS_PUBLIC_KEY = str(_certificates_path / "maas.pub")
-    MAAS_CERTIFICATE = str(_certificates_path / "maas.crt")
-    del _certificates_path
+    MAAS_PRIVATE_KEY = os.path.join(
+        get_snap_common_path(), "certificates", "maas.key"
+    )
+    MAAS_PUBLIC_KEY = os.path.join(
+        get_snap_common_path(), "certificates", "maas.pub"
+    )
+    MAAS_CERTIFICATE = os.path.join(
+        get_snap_common_path(), "certificates", "maas.crt"
+    )
 else:
     MAAS_PRIVATE_KEY = get_tentative_data_path(
         "/etc/maas/certificates/maas.key"
@@ -155,11 +161,7 @@ def get_certificate_fingerprint(digest_name="sha256"):
     return cert.digest(digest_name).decode()
 
 
-_get_maas_cert_tuple_lock = Lock()
-
-
 def get_maas_cert_tuple():
     """Return a certificate tuple as required by python-requests."""
-    with _get_maas_cert_tuple_lock:
-        generate_certificate_if_needed()
+    generate_certificate_if_needed()
     return (MAAS_CERTIFICATE, MAAS_PRIVATE_KEY)

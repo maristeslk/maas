@@ -1,8 +1,11 @@
 # Copyright 2014-2019 Canonical Ltd.  This software is licensed under the
 # GNU Affero General Public License version 3 (see the file LICENSE).
 
+"""Test maasserver.prometheus.stats."""
+
 
 import http.client
+import json
 from unittest import mock
 
 from django.db import transaction
@@ -41,14 +44,14 @@ class TestPrometheusHandler(MAASServerTestCase):
         self.patch(stats, "PROMETHEUS_SUPPORTED", True)
         response = self.client.get(reverse("metrics"))
         self.assertEqual("text/html; charset=utf-8", response["Content-Type"])
-        self.assertEqual(response.status_code, http.client.NOT_FOUND)
+        self.assertEquals(response.status_code, http.client.NOT_FOUND)
 
     def test_prometheus_stats_handler_not_found_not_supported(self):
         Config.objects.set_config("prometheus_enabled", True)
         self.patch(stats, "PROMETHEUS_SUPPORTED", False)
         response = self.client.get(reverse("metrics"))
         self.assertEqual("text/html; charset=utf-8", response["Content-Type"])
-        self.assertEqual(response.status_code, http.client.NOT_FOUND)
+        self.assertEquals(response.status_code, http.client.NOT_FOUND)
 
     def test_prometheus_stats_handler_returns_success(self):
         Config.objects.set_config("prometheus_enabled", True)
@@ -56,7 +59,7 @@ class TestPrometheusHandler(MAASServerTestCase):
         mock_prom_cli.generate_latest.return_value = {}
         response = self.client.get(reverse("metrics"))
         self.assertEqual("text/plain", response["Content-Type"])
-        self.assertEqual(response.status_code, http.client.OK)
+        self.assertEquals(response.status_code, http.client.OK)
 
     def test_prometheus_stats_handler_returns_metrics(self):
         Config.objects.set_config("prometheus_enabled", True)
@@ -117,7 +120,7 @@ class TestPrometheusHandler(MAASServerTestCase):
         for metric in metrics:
             for line in content.splitlines():
                 if line.startswith("maas_"):
-                    self.assertIn('maas_id="abcde"', line)
+                    self.assertIn('maas_id="abcde"'.format(metric), line)
 
 
 class TestPrometheus(MAASServerTestCase):
@@ -132,29 +135,30 @@ class TestPrometheus(MAASServerTestCase):
             "machine_stats": {"total_cpu": 0},
         }
         mock = self.patch(stats, "get_maas_stats")
-        mock.return_value = values
+        mock.return_value = json.dumps(values)
         # architecture
         arches = {"amd64": 0, "i386": 0}
         mock_arches = self.patch(stats, "get_machines_by_architecture")
         mock_arches.return_value = arches
-        vm_hosts = {
-            "vm_hosts": 0,
-            "vms": 0,
-            "available_resources": {
+        # pods
+        pods = {
+            "kvm_pods": 0,
+            "kvm_machines": 0,
+            "kvm_available_resources": {
                 "cores": 10,
                 "memory": 20,
                 "storage": 30,
                 "over_cores": 100,
                 "over_memory": 200,
             },
-            "utilized_resources": {
+            "kvm_utilized_resources": {
                 "cores": 5,
                 "memory": 10,
                 "storage": 15,
             },
         }
-        mock_vm_hosts = self.patch(stats, "get_vm_hosts_stats")
-        mock_vm_hosts.return_value = vm_hosts
+        mock_pods = self.patch(stats, "get_kvm_pods_stats")
+        mock_pods.return_value = pods
         subnet_stats = {
             "1.2.0.0/16": {
                 "available": 2 ** 16 - 3,
@@ -181,10 +185,10 @@ class TestPrometheus(MAASServerTestCase):
             STATS_DEFINITIONS, registry=prometheus_client.CollectorRegistry()
         )
         update_prometheus_stats(metrics)
-        self.assertEqual(1, len(mock.mock_calls))
-        self.assertEqual(1, len(mock_arches.mock_calls))
-        self.assertEqual(1, len(mock_vm_hosts.mock_calls))
-        self.assertEqual(1, len(mock_subnet_stats.mock_calls))
+        self.assertThat(mock, MockCalledOnce())
+        self.assertThat(mock_arches, MockCalledOnce())
+        self.assertThat(mock_pods, MockCalledOnce())
+        self.assertThat(mock_subnet_stats, MockCalledOnce())
 
     def test_push_stats_to_prometheus(self):
         factory.make_RegionRackController()

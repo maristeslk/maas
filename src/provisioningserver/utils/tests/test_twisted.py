@@ -91,7 +91,6 @@ from provisioningserver.utils.twisted import (
     suppress,
     synchronous,
     terminateProcess,
-    threadDeferred,
     ThreadPool,
     ThreadPoolLimiter,
     ThreadUnpool,
@@ -141,20 +140,6 @@ class TestAsynchronousDecorator(MAASTestCase):
 
 def noop():
     pass
-
-
-class TestThreadDeferred(MAASTestCase):
-
-    run_tests_with = MAASTwistedRunTest.make_factory(timeout=5)
-
-    @inlineCallbacks
-    def test_thread_deferred(self):
-        @threadDeferred
-        def func():
-            return threading.get_ident()
-
-        ident = yield func()
-        self.assertNotEqual(ident, threading.get_ident())
 
 
 class TestAsynchronousDecoratorWithTimeout(MAASTestCase):
