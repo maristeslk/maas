@@ -526,7 +526,7 @@ class BMC(CleanSave, TimestampedModel):
         """If the BMC is accessible by at least one rack controller."""
         #20210831 node_type pass by node.py  line_num : 5763
         racks = self.get_usable_rack_controllers(node_type=node_type, with_connection=False)
-        if len(racks) > 1:
+        if node_type == NODE_TYPE.RACK_CONTROLLER or node_type == NODE_TYPE.REGION_AND_RACK_CONTROLLER:
            #maaslog.info("is_accessible %d", len(racks))
            #maaslog.info("len(racks) > 1")
            maaslog.info("find HA_rack try to create bmcroutablerackcontrollerrelationship")
