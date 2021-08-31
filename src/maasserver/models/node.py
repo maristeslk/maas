@@ -5405,7 +5405,7 @@ class Node(CleanSave, TimestampedModel):
         if self.bmc is None:
             client_idents = []
         else:
-            client_idents = self.bmc.get_client_identifiers()
+            client_idents = self.bmc.get_client_identifiers(node_type=self.node_type)
         fallback_idents = [
             rack.system_id for rack in self.get_boot_rack_controllers()
         ]
@@ -5760,7 +5760,7 @@ class Node(CleanSave, TimestampedModel):
                     "No BMC is defined.  Cannot power control node."
                 )
             else:
-                return self.bmc.is_accessible()
+                return self.bmc.is_accessible(node_type=self.node_type)
 
         defer.addCallback(
             lambda _: deferToDatabase(transactional(is_bmc_accessible))
