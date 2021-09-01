@@ -497,7 +497,7 @@ class BMC(CleanSave, TimestampedModel):
         racks = self.get_layer2_usable_rack_controllers(
             with_connection=with_connection
         )
-        maaslog.info("layer2 len(racks) %s racks is  ",len(racks),racks)
+        usable_type = "layer2"
         #20210831 when type is rack or cannot get layer2 usable maas will use routable function
         if node_type == NODE_TYPE.RACK_CONTROLLER or node_type == NODE_TYPE.REGION_AND_RACK_CONTROLLER or len(racks) == 0:
             # No layer2 routable rack controllers. Use routable rack
@@ -505,9 +505,12 @@ class BMC(CleanSave, TimestampedModel):
             racks = self.get_routable_usable_rack_controllers(
                 with_connection=with_connection
             )
+            # 20210901 Prevent duplicate create bmcroutablerackcontrollerrelationship
+            if len(racks) > 0:
+                usable_type = "layer3"
             maaslog.info("HA_rack try to get_routable_usable_rack_controllers")
-
-        return racks
+        maaslog.info("%s len(racks) %s racks is  %s",usable_type,len(racks),racks)
+        return racks,usable_type
 
     def get_client_identifiers(self, node_type):
         """Return a list of identifiers that can be used to get the
@@ -516,17 +519,21 @@ class BMC(CleanSave, TimestampedModel):
         :raise NoBMCAccessError: Raised when no rack controllers have access
             to this `BMC`.
         """
-        #20210831 node_type pass by node.py  line_num : 5408
-        rack_controllers = self.get_usable_rack_controllers(node_type=node_type)
+        # 20210831 node_type pass by node.py  line_num : 5408
+        rack_controllers,_ = self.get_usable_rack_controllers(node_type=node_type)
         identifers = [controller.system_id for controller in rack_controllers]
         maaslog.info("get_client_identifiers %s", identifers)
         return identifers
 
     def is_accessible(self,node_type):
         """If the BMC is accessible by at least one rack controller."""
-        #20210831 node_type pass by node.py  line_num : 5763
-        racks = self.get_usable_rack_controllers(node_type=node_type, with_connection=False)
-        if node_type == NODE_TYPE.RACK_CONTROLLER or node_type == NODE_TYPE.REGION_AND_RACK_CONTROLLER:
+        # 20210831 node_type pass by node.py  line_num : 5763
+        racks,usable_type = self.get_usable_rack_controllers(node_type=node_type, with_connection=False)
+        # 20210901 Prevent duplicate create bmcroutablerackcontrollerrelationship 
+        if usable_type == "layer3":
+           return True
+        # rackcontroller have to use another one query itself's power status
+        elif node_type == NODE_TYPE.RACK_CONTROLLER  or node_type == NODE_TYPE.REGION_AND_RACK_CONTROLLER:
            #maaslog.info("is_accessible %d", len(racks))
            #maaslog.info("len(racks) > 1")
            maaslog.info("find HA_rack try to create bmcroutablerackcontrollerrelationship")
