@@ -234,7 +234,7 @@ def get_ip_address_for_interface(interface, vlan):
     for ip_address in interface.ip_addresses.all():
         if ip_is_on_vlan(ip_address, vlan):
             # 20210909 refuse ipv6 address in dhcpd.conf
-            if ipaddress.ip_address(str(ip_address)).version == 4:
+            if ipaddress.ip_address(str(ip_address.ip)).version == 4:
                 return ip_address
     return None
 

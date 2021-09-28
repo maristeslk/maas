@@ -672,7 +672,7 @@ class RackControllerManager(ControllerManager):
         """
         return self.get(system_id=get_maas_id())
 
-    def filter_by_url_accessible(self, url, with_connection=True):
+    def filter_by_url_accessible(self, url, node_systemid, with_connection=True):
         """Return a list of rack controllers which have access to the given URL
 
         If a hostname is given MAAS will do a DNS lookup to discover the IP(s).
@@ -707,11 +707,27 @@ class RackControllerManager(ControllerManager):
 
         if with_connection:
             conn_rack_ids = [client.ident for client in getAllClients()]
-            return [
-                rack
-                for rack in usable_racks
-                if rack.system_id in conn_rack_ids
-            ]
+            #20210923 if racklist length lt 2 then remove POST system_id 
+            racklist = []
+            for rack in usable_racks:
+                if rack.system_id in conn_rack_ids:
+                    racklist.append(rack)
+
+            if len(racklist) > 1:
+                maaslog.info("filter_by_url_accessible HA racklist ")
+                ha_racklist=[]
+                for rack in racklist:
+                    if rack.system_id != node_systemid:
+                        ha_racklist.append(rack)
+                return ha_racklist
+
+            return racklist
+            #return [
+            #    rack
+            #    for rack in usable_racks
+            #    if rack.system_id in conn_rack_ids
+            #        if 
+            #]
         else:
             return list(usable_racks)
 
@@ -5405,7 +5421,7 @@ class Node(CleanSave, TimestampedModel):
         if self.bmc is None:
             client_idents = []
         else:
-            client_idents = self.bmc.get_client_identifiers(node_type=self.node_type)
+            client_idents = self.bmc.get_client_identifiers(node_systemid=self.system_id)
         fallback_idents = [
             rack.system_id for rack in self.get_boot_rack_controllers()
         ]
@@ -5760,7 +5776,8 @@ class Node(CleanSave, TimestampedModel):
                     "No BMC is defined.  Cannot power control node."
                 )
             else:
-                return self.bmc.is_accessible(node_type=self.node_type)
+                #20210923 add node_systemid
+                return self.bmc.is_accessible(node_systemid=self.system_id)
 
         defer.addCallback(
             lambda _: deferToDatabase(transactional(is_bmc_accessible))
