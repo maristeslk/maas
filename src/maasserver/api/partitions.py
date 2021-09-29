@@ -137,7 +137,7 @@ class PartitionsHandler(OperationsHandler):
             system_id, device_id, request.user, NodePermission.admin
         )
         node = device.get_node()
-        if node.status != [NODE_STATUS.READY, NODE_STATUS.ALLOCATED]:
+        if node.status not in [NODE_STATUS.READY, NODE_STATUS.ALLOCATED]:
             raise NodeStateViolation(
                 "Cannot create partition because the node is not Ready."
             )
