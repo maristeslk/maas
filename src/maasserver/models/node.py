@@ -2964,7 +2964,7 @@ class Node(CleanSave, TimestampedModel):
 
             pod = bmc.as_pod()
 
-            client_idents = pod.get_client_identifiers()
+            client_idents = pod.get_client_identifiers(node_systemid='')
 
             @transactional
             def _save(machine_id, pod_id, hints):

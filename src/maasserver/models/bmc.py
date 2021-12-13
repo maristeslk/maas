@@ -1743,7 +1743,8 @@ class Pod(BMC):
                 pod.id,
                 pod.name,
                 pod.power_type,
-                pod.get_client_identifiers(),
+                #20211210 pod node_systemid fix
+                pod.get_client_identifiers(node_systemid=''),
                 decompose,
                 pre_existing,
             )

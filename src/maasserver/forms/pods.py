@@ -112,7 +112,7 @@ def request_commissioning_results(pod):
     # Intel RSD and libvirt Pods don't create machines for the host.
     if not nodes:
         return pod
-    client_identifiers = yield deferToDatabase(pod.get_client_identifiers)
+    client_identifiers = yield deferToDatabase(pod.get_client_identifiers(node_systemid=''))
     client = yield getClientFromIdentifiers(client_identifiers)
     for node in nodes:
         token = yield deferToDatabase(NodeKey.objects.get_token_for_node, node)
@@ -835,7 +835,7 @@ class ComposeMachineForm(forms.Form):
 
         if isInIOThread():
             # Running under the twisted reactor, before the work from inside.
-            d = deferToDatabase(transactional(self.pod.get_client_identifiers))
+            d = deferToDatabase(transactional(self.pod.get_client_identifiers(node_systemid='')))
             d.addCallback(getClientFromIdentifiers)
             d.addCallback(partial(deferToDatabase, transactional(db_work)))
             d.addCallback(
@@ -876,7 +876,7 @@ class ComposeMachineForm(forms.Form):
             try:
                 requested_machine = self.get_requested_machine(result)
                 result = wrap_compose_machine(
-                    self.pod.get_client_identifiers(),
+                    self.pod.get_client_identifiers(node_systemid=''),
                     self.pod.power_type,
                     power_parameters,
                     requested_machine,

@@ -115,6 +115,9 @@ def register(
             version_log,
             this_region.hostname,
         )
+        #20211201 refuse rack reboot in commission and shudown when firstboot in pxe.
+        node.status = 6
+        node.save()
     elif node.is_rack_controller:
         # Only the master process logs to the maaslog.
         maaslog.info(
@@ -131,6 +134,8 @@ def register(
             node.hostname,
             version_log,
         )
+        #20211201 refuse rack reboot in commission and shudown when firstboot in pxe.
+        node.status = 6
         node.node_type = NODE_TYPE.REGION_AND_RACK_CONTROLLER
         node.pool = None
         node.save()
