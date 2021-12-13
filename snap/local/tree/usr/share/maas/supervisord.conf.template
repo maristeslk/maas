@@ -50,6 +50,16 @@ redirect_stderr=true
 stdout_logfile=%(ENV_SNAP_COMMON)s/log/dhcpd.log
 startsecs=10
 
+[program:dhcpd6]
+process_name=dhcpd6
+command=%(ENV_SNAP)s/bin/run-dhcpd6
+autostart=false
+stopasgroup=true
+killasgroup=true
+redirect_stderr=true
+stdout_logfile=%(ENV_SNAP_COMMON)s/log/dhcpd6.log
+startsecs=10
+
 [program:http]
 process_name=http
 command=%(ENV_SNAP)s/bin/run-nginx
