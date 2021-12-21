@@ -880,8 +880,12 @@ class RegionControllerManager(ControllerManager):
             (domain, _) = Domain.objects.get_or_create(
                 name=domainname, defaults={"authoritative": False}
             )
+        #2021/12/21 merge from maas-3.1
         return self.create(
-            owner=get_worker_user(), hostname=hostname, domain=domain
+            owner=get_worker_user(),
+            hostname=hostname,
+            domain=domain,
+            status=NODE_STATUS.DEPLOYED,
         )
 
     def get_or_create_uuid(self):
@@ -6193,6 +6197,7 @@ class Controller(Node):
         only be installable when the machine is in a deployed state.  Second a
         machine must have power information."""
         return self.status == NODE_STATUS.DEPLOYED and self.bmc is not None
+
 
     def _update_interface(self, name, config, create_fabrics=True, hints=None):
         """Update a interface.

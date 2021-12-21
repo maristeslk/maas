@@ -15,8 +15,9 @@ from typing import Optional
 from django.db.models import Q
 
 from maasserver import locks, worker_user
-from maasserver.enum import NODE_TYPE
+from maasserver.enum import NODE_STATUS, NODE_TYPE
 from maasserver.models import (
+    Controller,
     ControllerInfo,
     Domain,
     Node,
@@ -107,7 +108,12 @@ def register(
     node = find(system_id, hostname, interfaces)
     version_log = "2.2 or below" if version is None else version
     if node is None:
-        node = RackController.objects.create(hostname=hostname, domain=domain)
+        #2021/12/21 merge form maas-3.1
+        node = RackController.objects.create(
+            hostname=hostname,
+            domain=domain,
+            status=NODE_STATUS.DEPLOYED,
+        )        
         maaslog.info(
             "New rack controller '%s' running version %s was created by "
             "region '%s' upon first connection.",
@@ -115,9 +121,6 @@ def register(
             version_log,
             this_region.hostname,
         )
-        #20211201 refuse rack reboot in commission and shudown when firstboot in pxe.
-        node.status = 6
-        node.save()
     elif node.is_rack_controller:
         # Only the master process logs to the maaslog.
         maaslog.info(
@@ -134,8 +137,6 @@ def register(
             node.hostname,
             version_log,
         )
-        #20211201 refuse rack reboot in commission and shudown when firstboot in pxe.
-        node.status = 6
         node.node_type = NODE_TYPE.REGION_AND_RACK_CONTROLLER
         node.pool = None
         node.save()
@@ -295,3 +296,4 @@ def update_last_image_sync(system_id):
     RackController.objects.filter(system_id=system_id).update(
         last_image_sync=now()
     )
+
