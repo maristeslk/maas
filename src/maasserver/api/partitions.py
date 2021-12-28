@@ -137,7 +137,8 @@ class PartitionsHandler(OperationsHandler):
             system_id, device_id, request.user, NodePermission.admin
         )
         node = device.get_node()
-        if node.status != NODE_STATUS.READY:
+        #2021 allow partition in allocated mode (maas-terraform)
+        if node.status not in [NODE_STATUS.READY, NODE_STATUS.ALLOCATED]:
             raise NodeStateViolation(
                 "Cannot create partition because the node is not Ready."
             )
@@ -249,7 +250,8 @@ class PartitionHandler(OperationsHandler):
         )
         partition = get_partition_by_id_or_name__or_404(id, partition_table)
         node = device.get_node()
-        if node.status != NODE_STATUS.READY:
+        #2021 allow partition in allocated mode (maas-terraform)
+        if node.status not in [NODE_STATUS.READY, NODE_STATUS.ALLOCATED]:
             raise NodeStateViolation(
                 "Cannot delete block device because the node is not Ready."
             )

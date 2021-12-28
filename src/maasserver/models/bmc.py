@@ -446,8 +446,8 @@ class BMC(CleanSave, TimestampedModel):
                 return ip
         # no match found - return None
         return None
-
-    def get_layer2_usable_rack_controllers(self, with_connection=True):
+    #2021 agora-maas ha-rack
+    def get_layer2_usable_rack_controllers(self,node_systemid, with_connection=True):
         """Return a list of `RackController`'s that have the ability to access
         this `BMC` directly through a layer 2 connection."""
         ip_address = self.ip_address
@@ -463,9 +463,9 @@ class BMC(CleanSave, TimestampedModel):
 
         # Circular imports.
         from maasserver.models.node import RackController
-
+        #20210923 add node_systemid
         return RackController.objects.filter_by_url_accessible(
-            ip_address.ip, with_connection=with_connection
+            ip_address.ip, node_systemid=node_systemid,with_connection=with_connection
         )
 
     def get_routable_usable_rack_controllers(self, with_connection=True):
@@ -490,11 +490,14 @@ class BMC(CleanSave, TimestampedModel):
         else:
             return routable_racks
 
-    def get_usable_rack_controllers(self, with_connection=True):
+    def get_usable_rack_controllers(self,node_systemid,with_connection=True):
         """Return a list of `RackController`'s that have the ability to access
         this `BMC` either using layer2 or routable if no layer2 are available.
         """
+        #2021 agora-maas ha-rack
+        #20210923 add node_systemid
         racks = self.get_layer2_usable_rack_controllers(
+            node_systemid=node_systemid,
             with_connection=with_connection
         )
         if len(racks) == 0:
@@ -504,21 +507,25 @@ class BMC(CleanSave, TimestampedModel):
                 with_connection=with_connection
             )
         return racks
-
-    def get_client_identifiers(self):
+    #2021 agora-maas ha-rack
+    def get_client_identifiers(self,node_systemid):
         """Return a list of identifiers that can be used to get the
         `rpc.common.Client` for this `BMC`.
 
         :raise NoBMCAccessError: Raised when no rack controllers have access
             to this `BMC`.
         """
-        rack_controllers = self.get_usable_rack_controllers()
+        #20210923 add node_systemid
+        #2021 agora-maas ha-rack
+        rack_controllers = self.get_usable_rack_controllers(node_systemid=node_systemid)
         identifers = [controller.system_id for controller in rack_controllers]
         return identifers
 
-    def is_accessible(self):
+    def is_accessible(self,node_systemid):
         """If the BMC is accessible by at least one rack controller."""
-        racks = self.get_usable_rack_controllers(with_connection=False)
+        #20210923 add node_systemid
+        #2021 agora-maas ha-rack
+        racks = self.get_usable_rack_controllers(node_systemid=node_systemid,with_connection=False)
         return len(racks) > 0
 
     def update_routable_racks(
@@ -1739,7 +1746,9 @@ class Pod(BMC):
                 pod.id,
                 pod.name,
                 pod.power_type,
-                pod.get_client_identifiers(),
+                #20211210 pod node_systemid fix
+                #2021 agora-maas ha-rack
+                pod.get_client_identifiers(node_systemid=''),
                 decompose,
                 pre_existing,
             )

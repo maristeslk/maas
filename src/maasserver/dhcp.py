@@ -15,7 +15,7 @@ from django.db.models import Q
 from netaddr import IPAddress, IPNetwork
 from twisted.internet.defer import inlineCallbacks
 from twisted.protocols import amp
-
+import ipaddress
 from maasserver.dns.zonegenerator import (
     get_dns_search_paths,
     get_dns_server_addresses,
@@ -233,7 +233,9 @@ def get_ip_address_for_interface(interface, vlan):
     """Return the IP address for `interface` on `vlan`."""
     for ip_address in interface.ip_addresses.all():
         if ip_is_on_vlan(ip_address, vlan):
-            return ip_address
+            # 20210909 refuse ipv6 address in dhcpd.conf
+            if ipaddress.ip_address(str(ip_address.ip)).version == 4:
+                return ip_address
     return None
 
 

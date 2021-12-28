@@ -4,11 +4,11 @@
 # Common functions for helper scripts.
 #
 
-MAAS_SNAP_COMMON="/var/snap/maas/common"
+MAAS_SNAP_COMMON="/var/snap/agora-maas/common"
 # shellcheck disable=SC2034
-MAAS_SNAP_DATA="/var/snap/maas/current"
+MAAS_SNAP_DATA="/var/snap/agora-maas/current"
 # shellcheck disable=SC2034
-MAAS_SNAP="/snap/maas/current"
+MAAS_SNAP="/snap/agora-maas/current"
 MAAS_SNAP_MODE_FILE="$MAAS_SNAP_COMMON/snap_mode"
 
 # PostgreSQL settings

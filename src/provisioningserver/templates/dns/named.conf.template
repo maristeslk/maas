@@ -1,12 +1,18 @@
 include "{{named_rndc_conf_path}}";
 
 # Zone declarations.
+zone "maas-internal" {
+    type master;
+    file "/var/snap/agora-maas/current/bind/zone.maas-internal";
+};
 {{for zone in zones}}
 {{for zoneinfo in zone.zone_info}}
+{{if zoneinfo.zone_name != "maas-internal"}}
 zone "{{zoneinfo.zone_name}}" {
     type master;
     file "{{zoneinfo.target_path}}";
 };
+{{endif}}
 {{endfor}}
 {{endfor}}
 

@@ -90,8 +90,12 @@ def _parse_interface_definition(line):
 
     # This line is in the format:
     # <interface_index>: <interface_name>: <properties>
-    [index, name, properties] = map(str.strip, line.split(":"))
-
+    #[index, name, properties] = map(str.strip, line.split(":"))
+    #2021 agora-maas fix xdp bug
+    try:
+        [index, name, properties] = map(str.strip, line.split(':',2))
+    except ValueError:
+         raise ValueError("Malformed 'ip addr' line (%s)" % line)
     interface["index"] = int(index)
     names = name.split("@")
     interface["name"] = names[0]

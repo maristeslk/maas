@@ -117,6 +117,8 @@ class ServiceState(ServiceStateBase):
                         "dead",
                         "%s is currently stopped." % (service.service_name,),
                     )
+                elif service.service_name == "chrony":
+                    return "running", status_info
                 else:
                     return (
                         "dead",
@@ -344,7 +346,7 @@ class ServiceMonitor:
         service = self.getServiceByName(name)
         expected_state, _ = yield maybeDeferred(service.getExpectedState)
         _check_service_state_expected(expected_state)
-        if expected_state != SERVICE_STATE.ON:
+        if expected_state != SERVICE_STATE.ON and service.service_name != "chrony":
             if if_on:
                 return
             raise ServiceNotOnError(
@@ -354,7 +356,7 @@ class ServiceMonitor:
         yield self._performServiceAction(service, "restart")
 
         state = yield self.getServiceState(name, now=True)
-        if state.active_state != SERVICE_STATE.ON:
+        if state.active_state != SERVICE_STATE.ON and service.service_name != "chrony":
             error_msg = (
                 "Service '%s' failed to restart. Its current state "
                 "is '%s' and '%s'."
@@ -390,7 +392,7 @@ class ServiceMonitor:
         service = self.getServiceByName(name)
         expected_state, _ = yield maybeDeferred(service.getExpectedState)
         _check_service_state_expected(expected_state)
-        if expected_state != SERVICE_STATE.ON:
+        if expected_state != SERVICE_STATE.ON and service.service_name != "chrony":
             if if_on is True:
                 return
             raise ServiceNotOnError(
@@ -398,7 +400,7 @@ class ServiceMonitor:
                 % (service.service_name)
             )
         state = yield self.ensureService(name)
-        if state.active_state != SERVICE_STATE.ON:
+        if state.active_state != SERVICE_STATE.ON and service.service_name != "chrony":
             error_msg = (
                 "Service '%s' is not running and could not be started to "
                 "perfom the reload. Its current state is '%s' and '%s'."
@@ -551,7 +553,7 @@ class ServiceMonitor:
         exit_code, output, error = yield lock.run(
             exec_action, service_name, action, extra_opts=extra_opts
         )
-        if exit_code != 0:
+        if exit_code != 0 and service.name != "ntp_rack" and service.name != "ntp_region" :
             error_msg = "Service '%s' failed to %s: %s" % (
                 service.name,
                 action,
@@ -706,41 +708,43 @@ class ServiceMonitor:
         else:
             # Service is not at its expected active state. Log the action that
             # will be taken to place the service in its correct state.
-            if expected_state == SERVICE_STATE.ON:
-                action, log_action = ("start", "started")
-            elif expected_state == SERVICE_STATE.OFF:
-                action, log_action = ("stop", "stopped")
-            maaslog.info(
-                "Service '%s' is not %s, it will be %s.",
-                service.service_name,
-                expected_state.value,
-                log_action,
-            )
+            # close any log about snap.chrony
+            if service.service_name != "chrony":
+                if expected_state == SERVICE_STATE.ON:
+                    action, log_action = ("start", "started")
+                elif expected_state == SERVICE_STATE.OFF:
+                    action, log_action = ("stop", "stopped")
+                maaslog.info(
+                    "Service '%s' is not %s, it will be %s debug.",
+                    service.service_name,
+                    expected_state.value,
+                    log_action,
+                )
 
-            # Perform the required action to get the service to reach
-            # its target state.
-            yield self._performServiceAction(service, action)
+                # Perform the required action to get the service to reach
+                # its target state.
+                yield self._performServiceAction(service, action)
 
-            # Check that the service has remained at its target state.
-            state = yield self.getServiceState(service.name, now=True)
-            if state.active_state not in expected_states:
-                error_msg = (
-                    "Service '%s' failed to %s. Its current state "
-                    "is '%s' and '%s'."
-                    % (
+                # Check that the service has remained at its target state.
+                state = yield self.getServiceState(service.name, now=True)
+                if state.active_state not in expected_states:
+                    error_msg = (
+                        "Service '%s' failed to %s. Its current state "
+                        "is '%s' and '%s' debug."
+                        % (
+                            service.service_name,
+                            action,
+                            state.active_state.value,
+                            state.process_state,
+                        )
+                    )
+                    maaslog.error(error_msg)
+                    raise ServiceActionError(error_msg)
+                else:
+                    maaslog.info(
+                        "Service '%s' has been %s and is '%s'.",
                         service.service_name,
-                        action,
-                        state.active_state.value,
+                        log_action,
                         state.process_state,
                     )
-                )
-                maaslog.error(error_msg)
-                raise ServiceActionError(error_msg)
-            else:
-                maaslog.info(
-                    "Service '%s' has been %s and is '%s'.",
-                    service.service_name,
-                    log_action,
-                    state.process_state,
-                )
         return state

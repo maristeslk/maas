@@ -282,8 +282,8 @@ class IPMIPowerDriver(PowerDriver):
         ),
     ]
     ip_extractor = make_ip_extractor("power_address")
-    wait_time = (4, 8, 16, 32)
-
+    #wait_time = (4, 8, 16, 32)
+    wait_time = (64, 128, 256, 512)
     def detect_missing_packages(self):
         if not shell.has_command_available("ipmipower"):
             return ["freeipmi-tools"]

@@ -8,7 +8,7 @@ maas_snap_mode() {
     cat "$SNAP_COMMON/snap_mode" 2>/dev/null || echo "none"
 }
 if [ "$(maas_snap_mode)" = "all" ]; then
-    tee -a "$SNAP_COMMON/log/maas.log" <<EOF
+        tee -a "$SNAP_COMMON/log/maas.log" <<EOF
 The snap is configured in "all" mode (running the PostgreSQL database within
 the snap), which is no longer supported.
 
@@ -17,7 +17,7 @@ installation is converted to a supported mode (e.g "region+rack").
 
 Please run the following script to migrate the database to the host system:
 
-  sudo /snap/maas/current/helpers/migrate-snap-database
+  sudo /snap/agora-maas/current/helpers/migrate-snap-database
 
 EOF
     exit 1

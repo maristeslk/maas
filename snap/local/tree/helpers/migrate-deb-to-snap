@@ -8,7 +8,7 @@
 #
 
 # shellcheck source=snap/local/tree/helpers/_lib
-. /snap/maas/current/helpers/_lib
+. /snap/agora-maas/current/helpers/_lib
 
 # minimum version supported by the migration script
 MAAS_MIN_DEB_VERSION="2.4.0"

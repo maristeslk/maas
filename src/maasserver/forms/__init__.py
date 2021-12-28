@@ -2252,18 +2252,18 @@ class LicenseKeyForm(MAASModelForm):
         invalid_distro_series_message = compose_invalid_choice_text(
             "distro_series", distro_choices
         )
-        self.fields["osystem"] = forms.ChoiceField(
-            label="OS",
-            choices=os_choices,
-            required=True,
-            error_messages={"invalid_choice": invalid_osystem_message},
-        )
-        self.fields["distro_series"] = forms.ChoiceField(
-            label="Release",
-            choices=distro_choices,
-            required=True,
-            error_messages={"invalid_choice": invalid_distro_series_message},
-        )
+      #  self.fields["osystem"] = forms.ChoiceField(
+      #      label="OS",
+      #      choices=os_choices,
+      #      required=True,
+      #      error_messages={"invalid_choice": invalid_osystem_message},
+      #  )
+      #  self.fields["distro_series"] = forms.ChoiceField(
+      #      label="Release",
+      #      choices=distro_choices,
+      #      required=True,
+      #      error_messages={"invalid_choice": invalid_distro_series_message},
+      #  )
         if instance is not None:
             initial_value = get_distro_series_initial(
                 osystems, instance, with_key_required=False

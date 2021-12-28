@@ -165,6 +165,9 @@ from maasserver.rpc import (
 from maasserver.server_address import get_maas_facing_server_addresses
 from maasserver.storage_layouts import (
     get_storage_layout_for_node,
+    #2021 fit boot disk 
+    MIN_BOOT_PARTITION_SIZE,
+    MAX_BOOT_DISK_SIZE,
     StorageLayoutError,
     StorageLayoutMissingBootDiskError,
     VMFS6StorageLayout,
@@ -670,7 +673,7 @@ class RackControllerManager(ControllerManager):
         """
         return self.get(system_id=get_maas_id())
 
-    def filter_by_url_accessible(self, url, with_connection=True):
+    def filter_by_url_accessible(self, url, node_systemid, with_connection=True):
         """Return a list of rack controllers which have access to the given URL
 
         If a hostname is given MAAS will do a DNS lookup to discover the IP(s).
@@ -705,11 +708,21 @@ class RackControllerManager(ControllerManager):
 
         if with_connection:
             conn_rack_ids = [client.ident for client in getAllClients()]
-            return [
-                rack
-                for rack in usable_racks
-                if rack.system_id in conn_rack_ids
-            ]
+            #20210923 if racklist length lt 2 then remove POST system_id 
+            racklist = []
+            for rack in usable_racks:
+                if rack.system_id in conn_rack_ids:
+                    racklist.append(rack)
+
+            if len(racklist) > 1:
+                maaslog.info("filter_by_url_accessible HA racklist ")
+                ha_racklist=[]
+                for rack in racklist:
+                    if rack.system_id != node_systemid:
+                        ha_racklist.append(rack)
+                return ha_racklist
+
+            return racklist
         else:
             return list(usable_racks)
 
@@ -862,8 +875,12 @@ class RegionControllerManager(ControllerManager):
             (domain, _) = Domain.objects.get_or_create(
                 name=domainname, defaults={"authoritative": False}
             )
+        #2021/12/21 merge from maas-3.1
         return self.create(
-            owner=get_worker_user(), hostname=hostname, domain=domain
+            owner=get_worker_user(),
+            hostname=hostname,
+            domain=domain,
+            status=NODE_STATUS.DEPLOYED,
         )
 
     def get_or_create_uuid(self):
@@ -2063,6 +2080,9 @@ class Node(CleanSave, TimestampedModel):
                     if isinstance(
                         block_device.actual_instance, PhysicalBlockDevice
                     )
+                    #2021 fit boot disk
+                    and block_device.size >= MIN_BOOT_PARTITION_SIZE
+                    and block_device.size <= MAX_BOOT_DISK_SIZE
                 ],
                 key=attrgetter("id"),
             )
@@ -2257,10 +2277,10 @@ class Node(CleanSave, TimestampedModel):
             if self.split_arch()[0] == "s390x":
                 result = "INFO: BMC detection not supported on S390X".encode()
             else:
-                result = (
-                    "INFO: User %s (%s) has choosen to skip BMC configuration "
-                    "during commissioning\n" % (user.get_username(), user.id)
-                ).encode()
+            result = (
+                "INFO: User %s (%s) has choosen to skip BMC configuration "
+                "during commissioning\n" % (user.get_username(), user.id)
+            ).encode()
             for script_result in commis_script_set.scriptresult_set.filter(
                 script__tags__contains=["bmc-config"]
             ):
@@ -2946,8 +2966,8 @@ class Node(CleanSave, TimestampedModel):
             from maasserver.forms.pods import request_commissioning_results
 
             pod = bmc.as_pod()
-
-            client_idents = pod.get_client_identifiers()
+            #2021 agora-maas ha-rack
+            client_idents = pod.get_client_identifiers(node_systemid='')
 
             @transactional
             def _save(machine_id, pod_id, result):
@@ -5414,7 +5434,8 @@ class Node(CleanSave, TimestampedModel):
         if self.bmc is None:
             client_idents = []
         else:
-            client_idents = self.bmc.get_client_identifiers()
+            #2021 agora-maas ha-rack
+            client_idents = self.bmc.get_client_identifiers(node_systemid=self.system_id)
         fallback_idents = [
             rack.system_id for rack in self.get_boot_rack_controllers()
         ]
@@ -5532,7 +5553,8 @@ class Node(CleanSave, TimestampedModel):
                 distro_series = self.get_distro_series(
                     default=config["default_distro_series"]
                 )
-                os_releases = osystems.get(osystem, [])
+                #os_releases = osystems.get(osystem, [])
+                os_releases = {'bionic', 'focal'}
                 if distro_series not in os_releases:
                     raise ValidationError(
                         "Deployment operating system %s %s is unavailable."
@@ -5543,7 +5565,8 @@ class Node(CleanSave, TimestampedModel):
                 self.status in deployment_like_status
                 and self.osystem != "ubuntu"
             ):
-                os_releases = osystems.get(config["commissioning_osystem"], [])
+                #os_releases = osystems.get(config["commissioning_osystem"], [])
+                os_releases = {'bionic', 'focal'}
                 if config["commissioning_distro_series"] not in os_releases:
                     raise ValidationError(
                         "Ephemeral operating system %s %s is unavailable."
@@ -5767,7 +5790,8 @@ class Node(CleanSave, TimestampedModel):
                     "No BMC is defined.  Cannot power control node."
                 )
             else:
-                return self.bmc.is_accessible()
+                #20210923 add node_systemid
+                return self.bmc.is_accessible(node_systemid=self.system_id)
 
         defer.addCallback(
             lambda _: deferToDatabase(transactional(is_bmc_accessible))

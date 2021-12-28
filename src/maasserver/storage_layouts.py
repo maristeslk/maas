@@ -32,7 +32,7 @@ from maasserver.utils.forms import compose_invalid_choice_text, set_form_error
 EFI_PARTITION_SIZE = 512 * 1024 * 1024  # 512 MiB
 MIN_BOOT_PARTITION_SIZE = 512 * 1024 * 1024  # 512 MiB
 MIN_ROOT_PARTITION_SIZE = 3 * 1024 * 1024 * 1024  # 3 GiB
-
+MAX_BOOT_DISK_SIZE = 480 * 1024 * 1024 * 1024 #2021 480GiB fit boot disk 
 
 class StorageLayoutError(Exception):
     """Error raised when layout cannot be used on node."""

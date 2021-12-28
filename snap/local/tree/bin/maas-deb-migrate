@@ -8,7 +8,7 @@
 #
 
 # shellcheck source=snap/local/tree/helpers/_lib
-. /snap/maas/current/helpers/_lib
+. /snap/agora-maas/current/helpers/_lib
 
 
 clear_services() {
@@ -78,7 +78,7 @@ keyring = "/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg"
 (
  BootSource.objects
  .filter(keyring_filename=keyring)
- .update(keyring_filename=f"/snap/maas/current{keyring}")
+ .update(keyring_filename=f"${MAAS_SNAP}{keyring}")
 )
 EOF
 }

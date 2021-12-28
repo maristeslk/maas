@@ -1012,7 +1012,7 @@ class Cluster(RPCProtocol):
             secret_path.unlink()
         try:
             if running_in_snap():
-                call_and_check(["snapctl", "restart", "maas.supervisor"])
+                call_and_check(["snapctl", "restart", "agora-maas.supervisor"])
             else:
                 call_and_check(["sudo", "systemctl", "restart", "maas-rackd"])
         except ExternalProcessError as e:
