@@ -18,4 +18,5 @@ GIT_REF=HEAD
 GIT_HASH=$(git rev-parse --short "$GIT_REF")
 GIT_REV_COUNT=$(git rev-list --count "$GIT_REF")
 
-echo "${VERSION}-${GIT_REV_COUNT}-g.${GIT_HASH}"
+echo "${VERSION}-${GIT_REV_COUNT}-g.custom"
+#echo "${VERSION}-${GIT_REV_COUNT}-g.${GIT_HASH}"
