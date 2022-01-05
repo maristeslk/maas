@@ -2277,7 +2277,7 @@ class Node(CleanSave, TimestampedModel):
             if self.split_arch()[0] == "s390x":
                 result = "INFO: BMC detection not supported on S390X".encode()
             else:
-            result = (
+                result = (
                 "INFO: User %s (%s) has choosen to skip BMC configuration "
                 "during commissioning\n" % (user.get_username(), user.id)
             ).encode()
